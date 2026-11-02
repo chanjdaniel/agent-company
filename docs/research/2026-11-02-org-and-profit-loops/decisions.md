@@ -32,4 +32,4 @@ Daniel's words: "it will all run under claude code sessions. keep it on the subs
 
 ## Prior art from T189 (2026-11-02)
 
-- Cite Google's Harness2 (arXiv:2610.14224; T189's report at `~/agent-team-records/tasks/T189/scratch/report.md`, section 5) in the design document (ticket 01) as prior art for the operating and organization loops, with that section's caveat: the company's loops have outside ground truth, so Harness2's no-answer-key method is only the fallback for unmeasured work. Daniel agreed in the T189 thread (message 1566768023027720283).
+- Cite Google's Harness2 (arXiv:2610.14224; T189's report, section 5) in the design document (ticket 01) as prior art for the operating and organization loops, with that section's caveat: the company's loops have outside ground truth, so Harness2's no-answer-key method is only the fallback for unmeasured work. Daniel agreed in the T189 thread (message 1566768023027720283).
