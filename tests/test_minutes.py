@@ -129,6 +129,18 @@ def test_a_correction_replaces_the_estimate_in_the_total(company):
     assert minutes_line(company) == "Daniel-minutes: 6.5 of 105 in the last seven days"
 
 
+@pytest.mark.parametrize(("given", "said"), [("1", "1 minute"), ("6", "6 minutes"), ("0.5", "0.5 minutes")])
+def test_a_correction_says_its_minutes_in_words_that_read_right(company, given, said):
+    seven_day_reading()
+    decide(ask(1))
+    charge(company)
+    charged = events_of("minutes-charged")[-1]["seq"]
+
+    result = company("minutes", "correct", "--charge", str(charged), "--minutes", given)
+
+    assert result.stdout.endswith(f"charge {charged} is now {said}.\n")
+
+
 def test_the_newest_correction_stands_and_may_be_zero(company):
     seven_day_reading()
     decide(ask(1))

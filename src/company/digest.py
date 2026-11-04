@@ -51,6 +51,12 @@ def _minutes(amount) -> str:
     return f"{float(amount):g}"
 
 
+def minutes_phrase(amount) -> str:
+    """An amount of minutes in words: "1 minute", "0.5 minutes"."""
+    number = _minutes(amount)
+    return f"{number} minute" if number == "1" else f"{number} minutes"
+
+
 def _cannot_compute(seqs: tuple[int, ...]) -> list[str]:
     named = f"event {seqs[0]} is" if len(seqs) == 1 else "events " + ", ".join(map(str, seqs)) + " are"
     return [f"cannot be computed: {named} not in {treasurer.CURRENCY}"]
@@ -203,7 +209,7 @@ def _pending(events: list[dict]) -> list[str]:
         return []
     lines = []
     for ask in asks:
-        minutes = _minutes(ask["minutes"])
-        lines.append(f"Event {ask['seq']}: {ask['action']}, {minutes} minutes, expected margin {ask['expected_margin']}{_bet_note(ask)}")
+        minutes = minutes_phrase(ask["minutes"])
+        lines.append(f"Event {ask['seq']}: {ask['action']}, {minutes}, expected margin {ask['expected_margin']}{_bet_note(ask)}")
     total = sum(Fraction(str(ask["minutes"])) for ask in asks)
-    return [*lines, f"Total: {len(asks)} pending, {_minutes(total)} minutes"]
+    return [*lines, f"Total: {len(asks)} pending, {minutes_phrase(total)}"]

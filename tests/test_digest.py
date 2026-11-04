@@ -277,6 +277,16 @@ def test_the_pending_approvals_are_those_not_decided(company):
     ]
 
 
+def test_one_pending_minute_reads_in_the_singular(company):
+    reading = seven_day_reading()
+    pending = ask(reading, minutes=1)
+
+    assert section(digest(company), "Pending approvals").splitlines() == [
+        f"Event {pending}: templated-approval, 1 minute, expected margin 3.00",
+        "Total: 1 pending, 1 minute",
+    ]
+
+
 def test_no_pending_approval_says_none(company):
     reading = seven_day_reading()
     decide(ask(reading))

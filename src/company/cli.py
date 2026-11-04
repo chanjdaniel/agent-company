@@ -203,7 +203,7 @@ def _minutes_correct(args) -> int:
     except LedgerBroken as broken:
         print(f"company: refused: {broken}. Nothing was recorded; see `company ledger verify`.", file=sys.stderr)
         return EXIT_REFUSED
-    print(f"Recorded event {event['seq']}: charge {args.charge} is now {args.minutes:g} minutes.")
+    print(f"Recorded event {event['seq']}: charge {args.charge} is now {digest.minutes_phrase(args.minutes)}.")
     return EXIT_OK
 
 
