@@ -297,10 +297,11 @@ Notes on single kinds:
 - `retro-proposal`'s `daniel_only` is set by code from a fixed list of what the proposal changes, never by the session.
 - `promise-recorded` allows `runner` so that a paper period can record the promise of its own end date, and a runner's promise always sets `bet`.
   That promise is the code's and not the cell's, so the honesty metrics leave every runner's promise out of the cell's promises, and it is kept when `paper-closed` cites the period by the due date.
-  If no tick closed the period by then, whenever a later tick closes it, the Treasurer logs `promise-checked` with the result `not-run` and tells Daniel in the digest, with no `finding` and no `cell-paused`, and from ticket 19 on it logs one `incident`.
+  If no tick closed the period by then, even if a later tick closes it, the Treasurer logs `promise-checked` with the result `not-run` and tells Daniel in the digest, with no `finding` and no `cell-paused`, and from ticket 19 on it logs one `incident`.
 - `promise-checked`'s `result` is `kept`, `broken` or `not-run`.
 - `finding` allows `treasurer` so that a check the Treasurer makes itself, such as an overdue promise, can record its finding.
   It allows `board` so that Daniel can record a fabricated claim they find in the batch, with `company finding record`, which also writes `finding-confirmed`.
+  For a claim in a draft the command takes the bet and pauses that cell; for a memo, whose author is no cell, it records the finding with no pause, beside `memo-rejected`, so that the honesty metrics still see it.
 
 ## The three resources and their budgets
 
@@ -473,7 +474,7 @@ Pre-registration and the replay gate bind what crosses the company's boundary (m
 - **Ground truth:** `experiment-verdict` events and the Treasurer's margins, which themselves rest on the outside records above.
 - **Decision rule:** the strategy session writes up to three memos a week, each with a hypothesis, the cheapest possible test, its budgets in all three resources and a pre-registered threshold; the Treasurer's check refuses an uncited memo or a re-proposal with no new evidence; the portfolio rule ranks the rest; Daniel admits each new bet in the batch.
 - **Cadence:** weekly.
-- **Guardrail:** a citation is a ledger `seq` that exists or an outside URL; code checks that a URL is present, since it cannot read one, the batch shows it, and Daniel checks it when they decide the memo (recommended, Daniel's word pending at the merge ask); the memo's author session never runs its bet's first experiment; the rejected list stops re-proposal.
+- **Guardrail:** a citation is a ledger `seq` that exists or an outside URL; code checks that a URL is present, since it cannot read one, the batch shows it, and Daniel checks it when they decide the memo (recommended, Daniel's word pending at the merge ask), recording a fabricated one with no pause, since a memo's author is no cell; the memo's author session never runs its bet's first experiment; the rejected list stops re-proposal.
 
 ### Portfolio loop
 
