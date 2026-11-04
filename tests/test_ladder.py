@@ -35,9 +35,7 @@ from usage_records import ALPHA, start_session
 #   3     160       5        5   150   none: bar 3 is the top
 
 
-@pytest.fixture(autouse=True)
-def digest_settings(settings, transcripts):
-    settings(**DIGEST_SETTINGS)
+pytestmark = pytest.mark.usefixtures("digest_settings")
 
 
 @pytest.fixture
@@ -134,7 +132,8 @@ def test_money_and_charges_outside_the_month_do_not_count(company):
 
 
 def test_the_newest_charge_of_a_window_and_line_replaces_the_earlier(company):
-    # A charge runs more than once a window, and each is the window so far, so only the newest counts.
+    # A charge runs more than once a window, and each is the window so far, so only the newest counts:
+    # overhead's 3 replaces its 1, and alpha's 7 is its own line, so 3 + 7 = 10.
     reading = seven_day_reading()
     money("revenue", "40.00")
     week_charge(WEEK_4, "1.00", reading)
@@ -164,6 +163,44 @@ def test_no_net_revenue_claims_no_bar_even_with_nothing_to_cover(company):
     assert "Margin against bar 1 (Own share): $0.00 (its line is $0.00)" in text
 
 
+SESSION_END = {"session": ALPHA, "exit": 0, "transcript_path": "p", "transcript_hash": "h", "weight": 1.0}
+
+
+def test_a_window_with_a_session_after_its_newest_charge_claims_no_bar(company):
+    # The charge is of the window so far, and read $0, so the session after it has a cost nobody has counted.
+    reading = seven_day_reading()
+    week_charge(WEEK_4, "0.000000", reading)
+    money("revenue", "40.00")
+    start_session(ALPHA, "cell", reading, bet="alpha", ledger=ledger_at(WEEK_4))
+
+    text = bar_section(company)
+
+    assert "Bar reached: 0 (Running)" in text
+    assert f"the window opening {WEEK_4} holds a session that no charge has counted" in text
+
+
+def test_a_session_ended_after_the_newest_charge_claims_no_bar(company):
+    # Started before the charge and ended after it, so some of its use came after.
+    reading = seven_day_reading()
+    start_session(ALPHA, "cell", reading, bet="alpha", ledger=ledger_at(WEEK_4))
+    week_charge(WEEK_4, "1.00", reading)
+    money("revenue", "40.00")
+    ledger_at(WEEK_4).append("session-ended", SESSION_END, "launcher")
+
+    assert "Bar reached: 0 (Running)" in bar_section(company)
+
+
+def test_a_window_charged_after_its_last_session_may_claim_a_bar(company):
+    reading = seven_day_reading()
+    start_session(ALPHA, "cell", reading, bet="alpha", ledger=ledger_at(WEEK_4))
+    ledger_at(WEEK_4).append("session-ended", SESSION_END, "launcher")
+    week_charge(WEEK_4, "1.00", reading)
+    money("revenue", "40.00")
+
+    # Its $1 is counted, so the net of 40 clears bar 1's line of 1 and bar 2's of 1 + 3 = 4.
+    assert "Bar reached: 2 (Self-funding)" in bar_section(company)
+
+
 def test_a_window_with_sessions_and_no_charge_claims_no_bar(company):
     # Its cost is unknown, so bar 1's line of 5 is too low: the margin is at most 35, and no bar is claimed.
     reading = seven_day_reading()
@@ -174,7 +211,7 @@ def test_a_window_with_sessions_and_no_charge_claims_no_bar(company):
     text = bar_section(company)
 
     assert "Bar reached: 0 (Running)" in text
-    assert f"the window opening {WEEK_4} holds sessions and no charge" in text
+    assert f"the window opening {WEEK_4} holds a session that no charge has counted" in text
     assert "Margin against bar 1 (Own share): at most $35.00" in text
 
 

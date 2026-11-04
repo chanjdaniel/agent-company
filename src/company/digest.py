@@ -1,4 +1,4 @@
-"""The one page Daniel reads each week: it prints the Treasurer's numbers and writes nothing."""
+"""The Treasurer's one page, which Daniel reads each week; it writes nothing."""
 
 from datetime import datetime
 from fractions import Fraction
@@ -18,7 +18,8 @@ def empty(now: datetime) -> str:
     return _render(now, {name: [] for name in _SECTIONS})
 
 
-def page(events: list[dict], share: treasurer.Share, terms: treasurer.Terms, now: datetime) -> str:
+def page(events: list[dict], share: treasurer.Share | str, terms: treasurer.Terms, now: datetime) -> str:
+    """The page; `share` is the share, or why the usage records behind it cannot be read."""
     ladder = treasurer.ladder(events, terms, now)
     week = treasurer.last_seven_days(now)
     return _render(
@@ -67,7 +68,7 @@ def _bar(ladder: treasurer.Ladder) -> list[str]:
         f"Against it: share cost {_dollars(total.cost)}, dollars spent {_dollars(total.spent)}",
     ]
     lines += [
-        f"No bar is claimed: the window opening {times.stamp(start)} holds sessions and no charge, so its cost is unknown"
+        f"No bar is claimed: the window opening {times.stamp(start)} holds a session that no charge has counted, so its cost is unknown"
         for start in ladder.uncharged
     ]
     if ladder.margin is None:
@@ -107,15 +108,10 @@ def _token_line(name: str, found, terms: treasurer.Terms) -> str:
 
 
 def _dollars_line(events: list[dict], week: treasurer.Span) -> str:
-    foreign = treasurer.foreign_money(events, week)
+    foreign = treasurer.foreign_money(events, week, ("spend",))
     if foreign:
         return "Dollars: " + _cannot_compute(foreign)[0]
-    return f"Dollars: {_dollars(_spent(events, week))} spent in the last seven days, against a budget of none"
-
-
-def _spent(events: list[dict], week: treasurer.Span) -> Fraction:
-    spends = (e for e in events if e["kind"] == "spend" and week.holds(e))
-    return sum((Fraction(e["amount"]) for e in spends), Fraction(0))
+    return f"Dollars: {_dollars(treasurer.spent(events, week))} spent in the last seven days, against a budget of none"
 
 
 def _minutes_line(events: list[dict], terms: treasurer.Terms, week: treasurer.Span) -> str:
@@ -124,30 +120,36 @@ def _minutes_line(events: list[dict], terms: treasurer.Terms, week: treasurer.Sp
     if not uncharged:
         return line
     decisions = "1 decision is" if uncharged == 1 else f"{uncharged} decisions are"
-    return f"{line}; {decisions} not charged yet: run `company treasurer charge`"
+    return f"{line}; {decisions} not charged yet: `company treasurer charge` charges them, or says why not"
 
 
-def _resources(events: list[dict], share: treasurer.Share, terms: treasurer.Terms, week: treasurer.Span) -> list[str]:
-    tokens = [
-        _token_line(name, found, terms)
-        for name, found in (("seven_day", share.seven_day), ("five_hour", share.five_hour))
-        if found is not None
-    ]
+def _token_lines(share: treasurer.Share | str, terms: treasurer.Terms) -> list[str]:
+    if isinstance(share, str):
+        return [f"Tokens: cannot be read: {share}"]
+    windows = (("seven_day", share.seven_day), ("five_hour", share.five_hour))
+    return [_token_line(name, found, terms) for name, found in windows if found is not None]
+
+
+def _resources(events: list[dict], share: treasurer.Share | str, terms: treasurer.Terms, week: treasurer.Span) -> list[str]:
+    tokens = _token_lines(share, terms)
     return [*tokens, _dollars_line(events, week), _minutes_line(events, terms, week)]
+
+
+def _bet_note(event: dict) -> str:
+    return f", bet {event['bet']}" if "bet" in event else ""
 
 
 def _incidents(events: list[dict], week: treasurer.Span) -> list[str]:
     lines = []
     for event in events:
         if event["kind"] == "incident" and week.holds(event):
-            bet = f", bet {event['bet']}" if "bet" in event else ""
-            lines.append(f"Event {event['seq']}: {event['class']}{bet}, caused by event {event['cause_seq']}")
+            lines.append(f"Event {event['seq']}: {event['class']}{_bet_note(event)}, caused by event {event['cause_seq']}")
     return lines
 
 
 def _promises_line(events: list[dict]) -> str | None:
     """The cells' promises against those kept: a runner's promise is the code's, so it is left out either way."""
-    made = {e["seq"] for e in events if e["kind"] == "promise-recorded" and e["writer"].startswith("cell:")}
+    made = {e["seq"] for e in events if e["kind"] == "promise-recorded" and e["writer"].startswith(treasurer.CELL_PREFIX)}
     if not made:
         return None
     results = {e["promise_seq"]: e["result"] for e in events if e["kind"] == "promise-checked" and e["promise_seq"] in made}
@@ -201,7 +203,7 @@ def _pending(events: list[dict]) -> list[str]:
         return []
     lines = []
     for ask in asks:
-        bet = f", bet {ask['bet']}" if "bet" in ask else ""
-        lines.append(f"Event {ask['seq']}: {ask['action']}, {_minutes(ask['minutes'])} minutes, expected margin {ask['expected_margin']}{bet}")
+        minutes = _minutes(ask["minutes"])
+        lines.append(f"Event {ask['seq']}: {ask['action']}, {minutes} minutes, expected margin {ask['expected_margin']}{_bet_note(ask)}")
     total = sum(Fraction(str(ask["minutes"])) for ask in asks)
     return [*lines, f"Total: {len(asks)} pending, {_minutes(total)} minutes"]

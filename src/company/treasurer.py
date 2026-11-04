@@ -16,7 +16,7 @@ WEEK = timedelta(days=7)
 _MONTH_WEEKS = 4
 _WEEKS_PER_YEAR = 52
 _MONTHS_PER_YEAR = 12
-_CELL_PREFIX = "cell:"
+CELL_PREFIX = "cell:"
 _MONEY_FIELDS = {"revenue": "revenue", "refund": "refunds", "fee": "fees", "spend": "spent"}
 
 
@@ -161,10 +161,7 @@ class Span:
     end: datetime
 
     def holds(self, event: dict) -> bool:
-        return self.holds_time(_when(event))
-
-    def holds_time(self, moment: datetime) -> bool:
-        return self.start <= moment < self.end
+        return self.start <= _when(event) < self.end
 
 
 @dataclass(frozen=True)
@@ -193,7 +190,7 @@ class Figures:
 @dataclass(frozen=True)
 class Ladder:
     """The trailing month's bar. `foreign` holds money the sums cannot add, and then the rest means nothing;
-    `uncharged` holds each window whose cost is unknown, and with any of them no bar is claimed."""
+    `uncharged` holds the opening of each window whose cost is unknown, and with any of them no bar is claimed."""
 
     month: Span
     lines: dict[str, Figures]
@@ -272,11 +269,15 @@ def _charges_by_window(events: list[dict], month: Span) -> dict[tuple[int, str],
     return charges
 
 
-def foreign_money(events: list[dict], span: Span) -> tuple[int, ...]:
-    """The money events in `span` that are not in the company's currency: there is no rate to add them with."""
-    return tuple(
-        event["seq"] for event in _of_kind(events, *_MONEY_FIELDS) if span.holds(event) and event["currency"] != CURRENCY
-    )
+def foreign_money(events: list[dict], span: Span, kinds=tuple(_MONEY_FIELDS)) -> tuple[int, ...]:
+    """The money events of `kinds` in `span` not in the company's currency: there is no rate to add them with."""
+    return tuple(event["seq"] for event in _of_kind(events, *kinds) if span.holds(event) and event["currency"] != CURRENCY)
+
+
+def spent(events: list[dict], span: Span) -> Fraction:
+    """Dollars spent in `span`, in the company's currency."""
+    spends = (e for e in _of_kind(events, "spend") if span.holds(e) and e["currency"] == CURRENCY)
+    return sum((Fraction(e["amount"]) for e in spends), Fraction(0))
 
 
 def figures(events: list[dict], month: Span) -> dict[str, Figures]:
@@ -296,15 +297,20 @@ def _sum(lines) -> Figures:
 
 
 def _uncharged_windows(events: list[dict], month: Span) -> tuple[datetime, ...]:
-    """Each window of the month that holds a company session and no charge, whose cost is therefore unknown."""
-    charged = {index for index, _ in _charges_by_window(events, month)}
-    windows = [Span(month.start + index * WEEK, month.start + (index + 1) * WEEK) for index in range(_MONTH_WEEKS)]
-    sessions = _of_kind(events, "session-started")
-    return tuple(
-        window.start
-        for index, window in enumerate(windows)
-        if index not in charged and any(window.holds(session) for session in sessions)
-    )
+    """Each window of the month with a session started or ended after its newest charge, or with no charge at all.
+
+    A charge is the window so far, so that session's use is in no charge, and the window's cost is unknown.
+    """
+    newest: dict[int, int] = {}
+    for (index, _), charge in _charges_by_window(events, month).items():
+        newest[index] = max(newest.get(index, 0), charge["seq"])
+    uncharged = []
+    for index in range(_MONTH_WEEKS):
+        window = Span(month.start + index * WEEK, month.start + (index + 1) * WEEK)
+        sessions = _of_kind(events, "session-started", "session-ended", "session-stopped")
+        if any(window.holds(session) and session["seq"] > newest.get(index, 0) for session in sessions):
+            uncharged.append(window.start)
+    return tuple(uncharged)
 
 
 def ladder(events: list[dict], terms: Terms, now: datetime) -> Ladder:
@@ -312,7 +318,7 @@ def ladder(events: list[dict], terms: Terms, now: datetime) -> Ladder:
     lines = figures(events, month)
     total = _sum(lines.values())
     covered = total.cost + total.spent
-    trial = terms.new_bet_token_share * terms.company_share * weekly_price(terms.monthly_price) * 4 + terms.new_bet_dollars
+    trial = terms.new_bet_token_share * terms.company_share * weekly_price(terms.monthly_price) * _MONTH_WEEKS + terms.new_bet_dollars
     bar_lines = {1: covered, 2: covered + trial, 3: terms.monthly_price + total.spent}
     uncharged = _uncharged_windows(events, month)
     cleared = (bar for bar, line in bar_lines.items() if total.net > 0 and total.net >= line)
@@ -335,7 +341,7 @@ def bets(events: list[dict], lines: dict[str, Figures]) -> dict[str, bool]:
 def minutes_due(events: list[dict], table: dict) -> MinutesDue:
     """What each decision and send owes, once each; any decision took Daniel's time, whichever way it went."""
     by_seq = {event["seq"]: event for event in events}
-    charged = {event["subject_seq"] for event in _of_kind(events, "minutes-charged")}
+    charged = _charged_subjects(events)
     charges, problems = [], []
     for event in _of_kind(events, "approval-decided", "send-confirmed"):
         if event["seq"] in charged:
@@ -358,37 +364,40 @@ def minutes_due(events: list[dict], table: dict) -> MinutesDue:
 
 def _cell_bet(event: dict) -> str | None:
     writer = event.get("writer", "")
-    return writer.removeprefix(_CELL_PREFIX) if writer.startswith(_CELL_PREFIX) else None
+    return writer.removeprefix(CELL_PREFIX) if writer.startswith(CELL_PREFIX) else None
+
+
+def _charged_subjects(events: list[dict]) -> set[int]:
+    return {event["subject_seq"] for event in _of_kind(events, "minutes-charged")}
 
 
 def uncharged_decisions(events: list[dict]) -> int:
     """How many decisions and sends have no charge yet."""
-    charged = {event["subject_seq"] for event in _of_kind(events, "minutes-charged")}
+    charged = _charged_subjects(events)
     return sum(event["seq"] not in charged for event in _of_kind(events, "approval-decided", "send-confirmed"))
 
 
-def minutes_by_charge(events: list[dict]) -> dict[int, Fraction]:
-    """What each charge stands at: its estimate, or Daniel's newest correction, which replaces it.
+def minutes_by_subject(events: list[dict]) -> dict[int, Fraction]:
+    """What each charged decision or send stands at: its estimate, or Daniel's newest correction, which replaces it.
 
-    Every total of Daniel-minutes reads this. A subject charged twice, by two charges racing, counts once.
+    Every total of Daniel-minutes reads this. A subject charged twice, by two charges racing, counts once,
+    and a correction of either charge holds.
     """
-    subjects, standing = set(), {}
+    subject_of: dict[int, int] = {}
+    standing: dict[int, Fraction] = {}
     for event in _of_kind(events, "minutes-charged", "minutes-corrected"):
-        if event["kind"] == "minutes-corrected":
-            if event["charge_seq"] in standing:
-                standing[event["charge_seq"]] = _exact(event["minutes"])
-        elif event["subject_seq"] not in subjects:
-            subjects.add(event["subject_seq"])
-            standing[event["seq"]] = _exact(event["minutes"])
+        if event["kind"] == "minutes-charged":
+            subject_of[event["seq"]] = event["subject_seq"]
+            standing.setdefault(event["subject_seq"], _exact(event["minutes"]))
+        elif event["charge_seq"] in subject_of:
+            standing[subject_of[event["charge_seq"]]] = _exact(event["minutes"])
     return standing
 
 
 def minutes_total(events: list[dict], span: Span) -> Fraction:
     """Daniel-minutes spent in `span`: a charge counts when its decision or send was made, however late it was charged."""
     by_seq = {event["seq"]: event for event in events}
-    standing = minutes_by_charge(events)
-    charges = [event for event in _of_kind(events, "minutes-charged") if event["seq"] in standing]
-    return sum((standing[event["seq"]] for event in charges if span.holds(by_seq[event["subject_seq"]])), Fraction(0))
+    return sum((minutes for subject, minutes in minutes_by_subject(events).items() if span.holds(by_seq[subject])), Fraction(0))
 
 
 def week_charges_due(result: Share, events: list[dict]) -> list[dict]:

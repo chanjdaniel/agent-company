@@ -17,12 +17,10 @@ from ledger_history import (
 )
 from usage_records import ALPHA, OPUS, PROBE, TEAM, start_session, transcript_line
 
-from company.ledger import Ledger
+from company import cli
+from company.ledger import Ledger, LedgerBroken
 
-
-@pytest.fixture(autouse=True)
-def digest_settings(settings, transcripts):
-    settings(**DIGEST_SETTINGS)
+pytestmark = pytest.mark.usefixtures("digest_settings")
 
 
 def events_of(kind):
@@ -163,6 +161,9 @@ def test_a_correction_must_cite_a_charge(company):
     assert f"event {reading} is not a minutes charge" in result.stderr
     assert "Nothing was recorded" in result.stderr
     assert events_of("minutes-corrected") == []
+    [refused] = events_of("append-refused")
+    assert (refused["attempted_kind"], refused["attempted_writer"], refused["reason"]) == ("minutes-corrected", "board", "not-a-charge")
+    assert f"event {refused['seq']} in the ledger" in result.stderr
 
 
 def test_a_negative_correction_is_refused_and_logged(company):
@@ -199,13 +200,24 @@ def test_a_second_charge_of_one_subject_counts_once(company):
     assert minutes_line(company) == "Daniel-minutes: 0.5 of 105 in the last seven days"
 
 
+def test_a_correction_of_the_second_of_two_racing_charges_still_stands(company):
+    seven_day_reading()
+    decided = decide(ask(1))
+    for _ in range(2):
+        event("minutes-charged", {"action": "templated-approval", "minutes": 0.5, "subject_seq": decided}, "treasurer")
+
+    company("minutes", "correct", "--charge", str(events_of("minutes-charged")[1]["seq"]), "--minutes", "3")
+
+    assert minutes_line(company) == "Daniel-minutes: 3 of 105 in the last seven days"
+
+
 def test_a_decision_not_charged_yet_is_said_beside_the_total(company):
     seven_day_reading()
     decide(ask(1))
     sent_draft()
 
     assert minutes_line(company) == (
-        "Daniel-minutes: 0 of 105 in the last seven days; 2 decisions are not charged yet: run `company treasurer charge`"
+        "Daniel-minutes: 0 of 105 in the last seven days; 2 decisions are not charged yet: `company treasurer charge` charges them, or says why not"
     )
 
 
@@ -339,6 +351,45 @@ def test_a_week_that_cannot_be_read_is_said_and_the_minutes_are_still_charged(co
     assert "company reading record" in result.stderr
     assert len(events_of("minutes-charged")) == 1
     assert events_of("resource-charged") == []
+
+
+def test_a_charge_at_a_time_that_is_no_time_charges_nothing_and_says_so(company):
+    seven_day_reading()
+    decide(ask(1))
+
+    result = company("treasurer", "charge", "--now", "yesterday")
+
+    assert result.returncode == 2
+    assert "Nothing was charged" in result.stderr
+    assert events_of("minutes-charged") == []
+
+
+def _refuse_appends(*_args, **_kwargs):
+    raise LedgerBroken("the ledger's end does not match its head record")
+
+
+def test_a_charge_stopped_part_way_says_so_and_that_running_it_again_is_safe(monkeypatch, capsys):
+    seven_day_reading()
+    decide(ask(1))
+    monkeypatch.setattr(Ledger, "append", _refuse_appends)
+
+    assert cli.main(["treasurer", "charge", "--now", NOW]) == 1
+
+    message = capsys.readouterr().err
+    assert "The charge stopped there" in message
+    assert "charges only what is still owed" in message
+
+
+def test_a_correction_the_ledger_will_not_take_says_nothing_was_recorded(monkeypatch, capsys, company):
+    seven_day_reading()
+    decide(ask(1))
+    charge(company)
+    charged = events_of("minutes-charged")[0]["seq"]
+    monkeypatch.setattr(Ledger, "append", _refuse_appends)
+
+    assert cli.main(["minutes", "correct", "--charge", str(charged), "--minutes", "4"]) == 1
+
+    assert "Nothing was recorded" in capsys.readouterr().err
 
 
 def test_charging_on_a_broken_ledger_writes_nothing(company):

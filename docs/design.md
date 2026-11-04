@@ -325,7 +325,7 @@ Minutes count in the week of the decision or send, however late the charge is wr
 A correction (`minutes-corrected`, from `company minutes correct`) replaces the estimate in every total, and the newest correction stands.
 
 `company treasurer charge` writes what is owed, and is safe to run twice: `minutes-charged` for each decision and send with no charge, and `resource-charged` for each line of the open window whose charge has changed.
-It charges only the open window, so a window keeps its last charge, which leaves out any use after that charge.
+It charges only the open window, so to count a window whole it must run after that window's last session and before its reset; a session started or ended after a window's newest charge leaves the window's cost unknown.
 It runs by Daniel's command until gate C opens the schedule.
 Real-money spending, when Daniel allows any, goes through a card or account with its own hard limit, never Daniel's main card.
 
@@ -384,8 +384,9 @@ The digest reports the bar reached and the margin against the next bar, which is
 Three rules keep a bar from being claimed on too little:
 
 - Net revenue equal to a line covers it, but a month with no net revenue clears no bar, even with nothing to cover.
-- A window of the month that holds a `session-started` and no `resource-charged` has an unknown cost, so no bar is claimed, and the margin against bar 1 is shown as "at most".
-- The sums are in US dollars, and `monthly_price` is read as US dollars. Money in another currency has no rate to add it with, so the bar and the bets' margins say which events stopped them, and print no sum.
+- A window of the month with a session started or ended after its newest `resource-charged`, or with none, has an unknown cost, so no bar is claimed, and the margin against the next bar is shown as "at most".
+- The sums are in US dollars, and `monthly_price` is read as US dollars.
+  Money in another currency has no rate to add it with, so the bar and the bets' margins say which events stopped them, and print no sum; the digest's dollars line does the same for spending in another currency alone.
 
 A bet's margin is its net revenue, minus its share of `company_cost`, minus its dollars spent, over the same trailing month.
 Money with no bet sits on the overhead line, so the lines add up to the company's net revenue less its cost and spending.
@@ -403,7 +404,7 @@ Before money flows, a pre-registered leading indicator stands in for it, counted
 A section with nothing to say prints "none", and an empty ledger prints that for every section and exits 0, with or without settings.
 A ledger whose chain is broken gets one line saying so and no numbers, and exits 1.
 A setting the page needs that is missing refuses the whole page, with no value assumed.
-A token window that cannot be read says why on its own line, and the rest of the page still prints.
+A token window that cannot be read, or usage records that cannot be, say why on their own line, and the rest of the page still prints.
 
 ## The account reading
 
@@ -801,6 +802,7 @@ Each phase ends in its own PR to `dev`, and leaves `dev` working.
 Phase 2 onward builds everything above except the following, which wait for the first revenue bet or later.
 
 - A real source of `revenue`, `refund`, `fee` and `spend` events, and so any real number on the bars.
+- A way to charge a window after its reset, from its newest reading and the usage records, since a charge that runs only while a window is open will often miss its last session, and then no bar is claimed for that month.
 - A merchant of record, then an entity, under Q2.
 - The first real outreach send, the send cap and the first service offer.
 - Any spending of real money, under Q1.

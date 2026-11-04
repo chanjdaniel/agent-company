@@ -5,6 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import ledger_history
 import pytest
 import usage_records
 
@@ -59,3 +60,9 @@ def settings(tmp_path):
 
     write()
     return write
+
+
+@pytest.fixture
+def digest_settings(settings, transcripts):
+    """The settings a digest reads, and transcripts of this test's own."""
+    settings(**ledger_history.DIGEST_SETTINGS)

@@ -4,7 +4,6 @@ import re
 
 import pytest
 from ledger_history import (
-    DIGEST_SETTINGS,
     LAST_FEW_DAYS,
     MONTH_DAY,
     NOW,
@@ -26,9 +25,7 @@ from company.ledger import Ledger
 SECTIONS = ("Bar", "Bets", "Resources", "Incidents", "Honesty", "Pending approvals")
 
 
-@pytest.fixture(autouse=True)
-def digest_settings(settings, transcripts):
-    settings(**DIGEST_SETTINGS)
+pytestmark = pytest.mark.usefixtures("digest_settings")
 
 
 def digest(company, now=NOW):
@@ -167,6 +164,26 @@ def test_a_token_window_that_cannot_be_read_says_why_and_the_digest_goes_on(comp
     assert "Daniel-minutes: 0 of 105" in text
 
 
+def test_usage_records_that_cannot_be_read_stop_the_token_line_alone(company, transcripts):
+    seven_day_reading()
+    money("revenue", "40.00")
+    (transcripts.projects / "-some-project" / "unreadable.jsonl").mkdir(parents=True)
+
+    text = digest(company)
+
+    assert "Tokens: cannot be read: the usage records cannot be read" in section(text, "Resources")
+    assert "Daniel-minutes: 0 of 105" in section(text, "Resources")
+    assert "Net revenue: $40.00" in section(text, "Bar")
+
+
+def test_foreign_money_that_is_no_spending_leaves_the_dollars_line_alone(company):
+    seven_day_reading()
+    money("spend", "5.00", when=LAST_FEW_DAYS)
+    money("refund", "9.00", when=LAST_FEW_DAYS, currency="EUR")
+
+    assert "Dollars: $5.00 spent in the last seven days" in section(digest(company), "Resources")
+
+
 def test_foreign_money_in_the_week_stops_the_dollars_line_alone(company):
     seven_day_reading()
     seq = money("spend", "5.00", when=LAST_FEW_DAYS, currency="EUR")
@@ -252,6 +269,7 @@ def test_the_pending_approvals_are_those_not_decided(company):
     first = ask(reading, action="message-review", minutes=2, bet="alpha")
     second = ask(reading, action="templated-approval", minutes=0.5)
 
+    # 2 + 0.5 = 2.5; the decided ask is not counted.
     assert section(digest(company), "Pending approvals").splitlines() == [
         f"Event {first}: message-review, 2 minutes, expected margin 3.00, bet alpha",
         f"Event {second}: templated-approval, 0.5 minutes, expected margin 3.00",

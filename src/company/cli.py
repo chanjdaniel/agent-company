@@ -93,9 +93,17 @@ def _report_time(text: str | None) -> datetime | None:
     return times.parse_stamp(text) if text is not None else times.now().replace(microsecond=0)
 
 
-def _bad_now() -> int:
-    print("company: --now must be a time like 2026-11-05T09:30:00Z. Nothing was computed.", file=sys.stderr)
+def _bad_now(outcome: str = "Nothing was computed") -> int:
+    print(f"company: --now must be a time like 2026-11-05T09:30:00Z. {outcome}.", file=sys.stderr)
     return EXIT_USAGE
+
+
+def _is_broken(ledger: Ledger) -> bool:
+    """Whether the chain is broken, having said so."""
+    verification = ledger.verify()
+    if not verification.ok:
+        print(_broken_report(verification))
+    return not verification.ok
 
 
 def _share_at(events: list[dict], loaded: dict, now: datetime) -> treasurer.Share:
@@ -113,9 +121,7 @@ def _treasurer_share(args) -> int:
     if now is None:
         return _bad_now()
     ledger = Ledger()
-    verification = ledger.verify()
-    if not verification.ok:
-        print(_broken_report(verification))
+    if _is_broken(ledger):
         return EXIT_REFUSED
     try:
         result = _share_at(ledger.read(), settings.load(), now)
@@ -132,11 +138,9 @@ def _treasurer_share(args) -> int:
 def _treasurer_charge(args) -> int:
     now = _report_time(args.now)
     if now is None:
-        return _bad_now()
+        return _bad_now("Nothing was charged")
     ledger = Ledger()
-    verification = ledger.verify()
-    if not verification.ok:
-        print(_broken_report(verification))
+    if _is_broken(ledger):
         return EXIT_REFUSED
     events = ledger.read()
     try:
@@ -156,7 +160,11 @@ def _treasurer_charge(args) -> int:
         for fields in lines:
             ledger.append("resource-charged", fields, "treasurer")
     except (AppendRefused, LedgerBroken) as refused:
-        print(f"company: refused: {refused}. See `company ledger verify`.", file=sys.stderr)
+        print(
+            f"company: refused: {refused}. The charge stopped there, and what came before it stands; "
+            "run it again once `company ledger verify` is clean, since it charges only what is still owed.",
+            file=sys.stderr,
+        )
         return EXIT_REFUSED
     print(f"Charged: decisions in Daniel-minutes, {len(due.charges)}; lines of the week's share, {len(lines)}.")
     for problem in due.problems:
@@ -172,21 +180,28 @@ def _treasurer_charge(args) -> int:
 
 def _minutes_correct(args) -> int:
     ledger = Ledger()
-    verification = ledger.verify()
-    if not verification.ok:
-        print(_broken_report(verification))
+    if _is_broken(ledger):
         return EXIT_REFUSED
     charges = {event["seq"] for event in ledger.read() if event["kind"] == "minutes-charged"}
     if args.charge not in charges:
-        print(f"company: event {args.charge} is not a minutes charge. Nothing was recorded.", file=sys.stderr)
+        refusal = {"attempted_kind": "minutes-corrected", "attempted_writer": "board", "reason": "not-a-charge"}
+        logged = ledger.append("append-refused", refusal, "treasurer")
+        print(
+            f"company: event {args.charge} is not a minutes charge. Nothing was recorded; "
+            f"event {logged['seq']} in the ledger records the refusal.",
+            file=sys.stderr,
+        )
         return EXIT_REFUSED
     fields = {"charge_seq": args.charge, "minutes": args.minutes}
     if args.reason is not None:
         fields["reason"] = args.reason
     try:
         event = ledger.append("minutes-corrected", fields, "board")
-    except (AppendRefused, LedgerBroken) as refused:
+    except AppendRefused as refused:
         print(f"company: refused: {refused}", file=sys.stderr)
+        return EXIT_REFUSED
+    except LedgerBroken as broken:
+        print(f"company: refused: {broken}. Nothing was recorded; see `company ledger verify`.", file=sys.stderr)
         return EXIT_REFUSED
     print(f"Recorded event {event['seq']}: charge {args.charge} is now {args.minutes:g} minutes.")
     return EXIT_OK
@@ -204,6 +219,7 @@ def _digest(args) -> int:
     if not events:
         sys.stdout.write(digest.empty(now))
         return EXIT_OK
+    result: treasurer.Share | str
     try:
         loaded = settings.load()
         terms = treasurer.Terms.from_settings(loaded)
@@ -212,8 +228,7 @@ def _digest(args) -> int:
         print(f"company: refused: {refused}. Nothing was computed.", file=sys.stderr)
         return EXIT_REFUSED
     except OSError as error:
-        print(f"company: refused: the usage records cannot be read: {error}. Nothing was computed.", file=sys.stderr)
-        return EXIT_REFUSED
+        result = f"the usage records cannot be read: {error}"
     sys.stdout.write(digest.page(events, result, terms, now))
     return EXIT_OK
 
