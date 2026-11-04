@@ -1,6 +1,6 @@
 """The model-provider variables no session may hold and no tracked file may name, in one place.
 
-The launcher and the preflight read this at run time, and the scan builds its rule from it.
+The launcher reads this at run time, and the scan builds its rule from it.
 So this file joins the scan's own files, as the one place in the package that names what it bans.
 """
 

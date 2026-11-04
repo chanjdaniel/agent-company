@@ -59,10 +59,10 @@ def writer_of(role: str, bet: str | None) -> str:
 class Server:
     """The tools one session may call, with its writer fixed."""
 
-    def __init__(self, role: str, bet: str | None, session: str, ledger: Ledger | None = None):
+    def __init__(self, role: str, bet: str | None, session: str):
         self.role, self.session = role, session
         self.writer = writer_of(role, bet)
-        self.ledger = ledger or Ledger()
+        self.ledger = Ledger()
 
     def _refused(self, kind: str, name, reason: str) -> dict:
         context = {"session": self.session, "tool": name}

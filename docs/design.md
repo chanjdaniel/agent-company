@@ -125,7 +125,7 @@ It starts `claude -p` in its own process group, rather than `claude --bg`, so it
 The flags are `--session-id`, `--output-format stream-json --verbose`, `--restricted`, `--strict-mcp-config --mcp-config`, `--settings`, `--disable-slash-commands` and `--model`, with a non-prompting permission mode (the docs' `dontAsk` denies whatever would otherwise prompt) and an explicit tool list in `--tools` and `--allowedTools`.
 The prompt, the role's goal text with any task after it, goes on stdin, since a flag that takes many values would swallow a prompt behind it.
 Ticket 06 checked each flag against `claude --help` of version 2.1.318, and the probe proves them on a real session.
-Before each launch the launcher reads `claude --help`, and a `claude` that does not list a flag it passes starts nothing and logs `launch-refused`.
+Before each launch the launcher reads `claude --help`, and a `claude` that does not list a flag the launch passes starts nothing and logs `launch-refused`.
 
 Rules every session starts under:
 
@@ -152,7 +152,9 @@ Rules every session starts under:
   So an instruction file an agent wrote in its workspace could carry instructions into a later session, and Daniel's `~/.claude/CLAUDE.md`, skills, subagents and auto memory would sit beside a cell's goal text and in the Auditor's fresh context.
   None of these enters a session, from the workspace, a folder above it or `~/.claude`.
 - **How the launcher holds these two rules.**
-  It keeps `--strict-mcp-config`, denies writes to `.claude/`, `.mcp.json`, `CLAUDE.md` and `CLAUDE.local.md` at any depth in the workspace, and refuses to start a session in a workspace that holds any of them, logging `launch-refused`.
+  It keeps `--strict-mcp-config`, denies the file tools writes to `.claude/`, `.mcp.json`, `CLAUDE.md` and `CLAUDE.local.md` at any depth in the workspace, and refuses to start a session in a workspace that holds any of them, logging `launch-refused`.
+  The sandbox denies the shell those names only at the top of the workspace, since the [settings reference](https://code.claude.com/docs/en/settings-reference) (read 2026-11-05) says that on Linux a sandbox write rule takes no wildcard but a trailing `/**`.
+  So a shell can write one deeper down, and what stops it reaching a session is the refusal: the next launch in that workspace starts nothing.
   A workspace must lie under the company home's `workspaces/`, and with none chosen a session gets a fresh one.
   The form that loads nothing else, from the [CLI reference](https://code.claude.com/docs/en/cli-reference) and the [environment variables page](https://code.claude.com/docs/en/env-vars) (read 2026-11-05), is these together:
   - `--restricted`, which "loads only managed settings and `--settings`", so no user, project or local settings, and so no plugin they enable;
@@ -164,7 +166,7 @@ Rules every session starts under:
   `--restricted` also removes the built-in tools that run commands unless `--tools` names them, and confines the file tools to the working directories, which is what the rules above ask.
   **The docs do not say in so many words that the sign-in survives `--restricted`.**
   They say bare mode never reads it and list no such limit for restricted mode, and they keep credentials outside the settings files, so the launcher relies on it, and the first real probe is what shows it.
-  If it does not, the session fails at sign-in, which costs nothing.
+  If it does not, the session fails at sign-in, which uses no model and spends the one launch of the go word that its `session-started` cited.
   **If no documented form does this with the sign-in still working, the launcher refuses every real launch and the builder asks; it never falls back to user settings.**
   Ticket 06 proves the refusals on the stub, and only Daniel's probe, read in ticket 14, can prove what a real session loads.
 - **Limits.**
@@ -175,6 +177,8 @@ Rules every session starts under:
   The next charge then counts the open window; the closed windows the session ran in stay named until they leave the trailing month, since nothing charges a window after its reset.
 - **One launch decides at a time.**
   A lock held from before `admit` until the session has started keeps two launches from both spending a word's last launch.
+- **A signal to the launcher.**
+  SIGTERM, SIGINT or SIGHUP stops the session's group and logs `session-stopped` with the reason `launcher-signalled`, since a Ctrl-C reaches only the launcher, the session being in a group of its own.
 - **At the end,** the launcher logs `session-ended` with the exit, the transcript's path and hash and the session's weight, and copies the transcript into the company home, so that it outlives Claude Code's own clean-up and the audit window can rely on it.
   A session with no transcript has `none` for its path and hash.
   Each run's directory, `runs/<run>/` in the company home, also keeps its raw output, settings, server configuration and prompt.

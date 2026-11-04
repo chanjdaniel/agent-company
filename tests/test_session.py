@@ -384,7 +384,7 @@ def test_the_sandbox_denies_reading_outside_the_workspace_and_allows_it(session,
     workspace_path = stub.session_calls()[-1]["cwd"]
     assert filesystem["allowRead"] == [workspace_path]
     assert "~/" in filesystem["denyRead"]
-    for root in (paths.home(), paths.config(), paths.claude_projects().parent):
+    for root in (paths.home(), paths.config(), paths.claude_directory()):
         assert str(root) in filesystem["denyRead"]
 
 
@@ -393,7 +393,7 @@ def test_the_sandbox_gives_no_write_beyond_its_working_directory(session, stub):
 
     filesystem = stub.settings()["sandbox"]["filesystem"]
     assert "allowWrite" not in filesystem
-    for root in (paths.config(), paths.claude_projects().parent):
+    for root in (paths.config(), paths.claude_directory()):
         assert str(root) in filesystem["denyWrite"]
 
 
@@ -410,7 +410,7 @@ def test_the_permission_rules_name_what_matters_most(session, stub, tool):
     session()
 
     deny = stub.settings()["permissions"]["deny"]
-    for root in (paths.config(), paths.claude_projects().parent, paths.runs()):
+    for root in (paths.config(), paths.claude_directory(), paths.runs()):
         assert f"{tool}(//{str(root).lstrip('/')}/**)" in deny
     assert f"{tool}(//{str(paths.home() / 'ledger*').lstrip('/')})" in deny
 
@@ -457,7 +457,30 @@ def test_the_settings_deny_writing_each_configuration_path_at_any_depth(session,
     settings = stub.settings()
     workspace_path = stub.session_calls()[-1]["cwd"]
     assert f"Edit(//{workspace_path.lstrip('/')}/**/{name})" in settings["permissions"]["deny"]
-    assert f"{workspace_path}/**/{name}" in settings["sandbox"]["filesystem"]["denyWrite"]
+    # On Linux a sandbox write rule takes no wildcard but a trailing one, so it can name only the top of the workspace.
+    assert f"{workspace_path}/{name}" in settings["sandbox"]["filesystem"]["denyWrite"]
+
+
+def test_no_sandbox_write_rule_holds_a_wildcard_that_does_nothing_on_linux(session, stub):
+    session()
+
+    for path in stub.settings()["sandbox"]["filesystem"]["denyWrite"]:
+        assert not set(path.removesuffix("/**")) & set("*?"), path
+
+
+def test_what_a_session_wrote_deep_in_its_workspace_refuses_the_next_session_there(session, stub):
+    # The sandbox cannot deny the shell this at depth on Linux, so this refusal is what keeps it from a later session.
+    root = workspace()
+    write = f"import pathlib; p = pathlib.Path({str(root / 'deep/er')!r}); p.mkdir(parents=True); (p / 'CLAUDE.md').write_text('x')"
+    stub.play({"do": "run", "command": [sys.executable, "-c", write]})
+    assert session("probe", "--workspace", str(root)).returncode == 0
+    stub.play()
+
+    done = session("probe", "--workspace", str(root))
+
+    assert done.returncode == 1
+    assert only("launch-refused")["check"] == "workspace"
+    assert "deep/er/CLAUDE.md" in done.stdout
 
 
 def test_the_settings_deny_writing_inside_a_claude_directory(session, stub):
@@ -940,6 +963,25 @@ def test_a_session_whose_launcher_died_is_closed_before_the_next_starts(company,
     wait_for(lambda: not any(pid_is_running(pid) for pid in pids))
 
 
+def test_a_process_group_whose_number_was_reused_is_left_alone(company, stub, board):
+    # Its launcher is gone, and the number it recorded now belongs to something else, which it must not kill.
+    other = subprocess.Popen(["/bin/sleep", "600"], start_new_session=True)
+    try:
+        start_session(TEAM, "probe", board)
+        run_dir = paths.runs() / "run-1"
+        run_dir.mkdir(parents=True)
+        state = {"session": TEAM, "launcher": -1, "launcher_started": None, "group": other.pid, "group_started": 1}
+        (run_dir / "session.json").write_text(json.dumps(state))
+
+        assert company("session", "start", "probe").returncode == 0
+
+        assert events("session-stopped")[0]["session"] == TEAM
+        assert other.poll() is None
+    finally:
+        other.kill()
+        other.wait()
+
+
 def test_a_refused_launch_still_closes_a_session_that_has_gone(company, stub, board):
     start_session(TEAM, "probe", board)
     assert company("go", "real-sessions", "--message", "9", "--sessions", "1").returncode == 0
@@ -988,6 +1030,7 @@ def test_a_dead_launchers_windows_count_after_the_next_charge_and_closed_ones_st
     # The session started 6 days ago, in that closed window, and its launcher died.
     from ledger_history import ledger_at
 
+    # Every time here comes from one `resets`, since the windows step from the newest reading's, to the second.
     now = datetime.now(UTC).replace(microsecond=0)
     resets = now + timedelta(hours=72)
     open_window = resets - timedelta(days=7)
@@ -997,7 +1040,7 @@ def test_a_dead_launchers_windows_count_after_the_next_charge_and_closed_ones_st
 
     assert company("session", "start", "probe").returncode == 0
     assert only("session-stopped")["session"] == TEAM
-    week_reading()
+    record_reading("seven_day", 40, stamp(resets), stamp(datetime.now(UTC)))
     done = company("treasurer", "charge")
     assert done.returncode == 0, done.stdout + done.stderr
 

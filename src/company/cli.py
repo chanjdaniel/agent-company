@@ -26,8 +26,8 @@ EXIT_REFUSED = 1
 EXIT_USAGE = 2
 
 
-def _inside_a_session(ledger: Ledger, kind: str, writer: str) -> bool:
-    """Whether this command runs in a session, whose agent must reach the ledger only through its company tools."""
+def _refused_inside_a_session(ledger: Ledger, kind: str, writer: str) -> bool:
+    """Refuse and log an append made in a session, whose agent must reach the ledger only through its company tools."""
     session = os.environ.get(launcher.SESSION_VARIABLE)
     if session is None:
         return False
@@ -39,7 +39,7 @@ def _inside_a_session(ledger: Ledger, kind: str, writer: str) -> bool:
 
 
 def _ledger_append(args) -> int:
-    if _inside_a_session(Ledger(), args.kind, args.writer):
+    if _refused_inside_a_session(Ledger(), args.kind, args.writer):
         return EXIT_REFUSED
     try:
         fields = json.loads(args.fields)

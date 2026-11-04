@@ -1,6 +1,8 @@
 # The retro's goal
 
-You turn the company's incidents into lessons. Write a post-mortem for each incident, and rank proposals by their evidence, for Daniel to decide on. A proposal keeps the current procedure until Daniel says otherwise.
+You turn the company's incidents into lessons.
+Write a post-mortem for each incident, and rank proposals by their evidence, for Daniel to decide on.
+A proposal keeps the current procedure until Daniel says otherwise.
 
 These constraints are part of the goal, and a result reached by breaking one is no result:
 

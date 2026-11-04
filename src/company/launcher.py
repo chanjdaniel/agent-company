@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from fractions import Fraction
 from pathlib import Path
+from typing import NamedTuple
 
 from company import banned, goals, governor, paths, settings, times, tools, usage
 from company.ledger import AppendRefused, Ledger, LedgerBroken
@@ -38,7 +39,6 @@ CONFIG_NAMES = (".claude", ".mcp.json", "CLAUDE.md", "CLAUDE.local.md")
 # call; and `_FORM_ENVIRONMENT` turns off instruction files and auto memory. Safe mode would also load no MCP server.
 FORM_FLAGS = ("--restricted", "--strict-mcp-config", "--disable-slash-commands", "--tools")
 _FORM_ENVIRONMENT = {"CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
-_OTHER_FLAGS = ("--print", "--session-id", "--output-format", "--verbose", "--mcp-config", "--settings", "--model", "--permission-mode", "--allowedTools")
 
 # Everything else is left out, so a new variable is excluded by default.
 ALLOWED_ENVIRONMENT = ("HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ", "TMPDIR", "CLAUDE_CONFIG_DIR")
@@ -115,8 +115,11 @@ def session_settings(workspace: Path) -> dict:
     A deny rule beats an allow, and the workspace sits inside the home directory, so no deny rule can say "outside the
     workspace" at the permission layer: the two `block` keys say it, and the deny rules name what matters most.
     A `Write(path)` rule never matches, as the docs say: `Edit` rules cover every tool that edits.
+
+    On Linux a sandbox write rule takes no wildcard but a trailing `/**`, so the shell is denied these names only at the
+    top of the workspace. A deeper one gets past the shell, and the next launch in that workspace refuses it.
     """
-    protected = (paths.config(), paths.claude_projects().parent)
+    protected = (paths.config(), paths.claude_directory())
     rules = [f"{_absolute(root)}/**" for root in (*protected, paths.runs())]
     rules += [_absolute(paths.home() / name) for name in ("ledger*", "*.lock", "*.state")]
     in_workspace = [f"{_absolute(workspace)}/**/{name}" for name in CONFIG_NAMES]
@@ -131,7 +134,7 @@ def session_settings(workspace: Path) -> dict:
             "filesystem": {
                 "denyRead": ["~/", str(paths.home()), *map(str, protected)],
                 "allowRead": [str(workspace)],
-                "denyWrite": [*map(str, protected), *(f"{workspace}/**/{name}" for name in CONFIG_NAMES)],
+                "denyWrite": [*map(str, protected), *(str(workspace / name) for name in CONFIG_NAMES)],
             },
             "network": {"allowedDomains": [], "strictAllowlist": True},
         },
@@ -220,15 +223,17 @@ def _check_workspace(workspace: Path) -> None:
         raise _Refuse("workspace", reason, f"remove it from {workspace}, after reading what wrote it")
 
 
-def _check_form(claude: str, environment: dict[str, str]) -> None:
+def _check_form(claude: str, role: str, environment: dict[str, str]) -> None:
     """Refuse a `claude` whose help does not list what this launch passes: it never falls back to loading more."""
+    passed = _command(claude, role, "session", "model", Path("mcp"), Path("settings"))
     try:
         done = subprocess.run([claude, "--help"], env=environment, capture_output=True, text=True, timeout=_HELP_TIMEOUT_SECONDS, check=False)
     except (OSError, subprocess.SubprocessError) as error:
         raise _Refuse("load-form", f"no-load-form: `claude --help` could not run: {error}", _FIX_LOAD_FORM) from None
     if done.returncode != 0:
         raise _Refuse("load-form", f"no-load-form: `claude --help` exited {done.returncode}", _FIX_LOAD_FORM)
-    missing = [flag for flag in (*FORM_FLAGS, *_OTHER_FLAGS) if not re.search(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", done.stdout)]
+    flags = [argument for argument in passed if argument.startswith("-")]
+    missing = [flag for flag in flags if not re.search(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", done.stdout)]
     if missing:
         raise _Refuse("load-form", "no-load-form: its help does not list " + ", ".join(missing), _FIX_LOAD_FORM)
 
@@ -239,7 +244,13 @@ def _write_json(path: Path, value: dict) -> None:
     temporary.replace(path)
 
 
-def _process_stat(pid: int) -> tuple[str, int, int] | None:
+class _ProcessStat(NamedTuple):
+    state: str
+    group: int
+    started: int
+
+
+def _process_stat(pid: int) -> _ProcessStat | None:
     """A process's state, process group and start time, or None if it has gone."""
     try:
         text = Path(f"/proc/{pid}/stat").read_text()
@@ -247,13 +258,13 @@ def _process_stat(pid: int) -> tuple[str, int, int] | None:
         return None
     # The name may hold spaces and brackets, so the fields count from the last bracket.
     fields = text.rsplit(")", 1)[1].split()
-    return fields[0], int(fields[2]), int(fields[19])
+    return _ProcessStat(fields[0], int(fields[2]), int(fields[19]))
 
 
 def _alive(pid: int, started: int | None) -> bool:
     """Whether this process, and not a later one with its number, still runs."""
     found = _process_stat(pid)
-    return found is not None and found[0] != "Z" and found[2] == started
+    return found is not None and found.state != "Z" and found.started == started
 
 
 def group_alive(group: int) -> bool:
@@ -261,16 +272,16 @@ def group_alive(group: int) -> bool:
     for entry in Path("/proc").iterdir():
         if entry.name.isdigit():
             found = _process_stat(int(entry.name))
-            if found is not None and found[1] == group and found[0] != "Z":
+            if found is not None and found.group == group and found.state != "Z":
                 return True
     return False
 
 
-def stop_group(group: int, grace: float = GRACE_SECONDS) -> None:
+def stop_group(group: int) -> None:
     """Stop a session's whole process group: ask, wait, then kill what is left."""
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(group, signal.SIGTERM)
-    deadline = time.monotonic() + grace
+    deadline = time.monotonic() + GRACE_SECONDS
     while time.monotonic() < deadline:
         if not group_alive(group):
             return
@@ -330,6 +341,15 @@ def _elapsed_minutes(started_ts: str) -> float | None:
     return None if started is None else round((times.now() - started) / timedelta(minutes=1), 3)
 
 
+def _still_its_group(state: dict) -> bool:
+    """Whether the recorded group is still this session's: a leader with another start time means the number was reused."""
+    group, recorded = state.get("group"), state.get("group_started")
+    if not group or recorded is None or not group_alive(group):
+        return False
+    leader = _process_stat(group)
+    return leader is None or leader.started == recorded
+
+
 def _close_if_gone(ledger: Ledger, started: dict) -> None:
     run_dir = paths.runs() / Path(started["run"]).name
     try:
@@ -339,7 +359,7 @@ def _close_if_gone(ledger: Ledger, started: dict) -> None:
     if _alive(state.get("launcher", -1), state.get("launcher_started")):
         return
     # Its launcher has gone, so nothing watches its limits: it must not run on unwatched.
-    if state.get("group") and group_alive(state["group"]):
+    if _still_its_group(state):
         stop_group(state["group"])
     # With its launcher gone, nothing more can come from it, so this read is the last word on whether it ended.
     if started["session"] not in {event["session"] for event in _open_sessions(ledger.read())}:
@@ -388,11 +408,13 @@ class _Launch:
     run: str
     run_dir: Path
     workspace: Path
+    model: str
+    command: list[str]
     max_minutes: Fraction
     max_weight: Fraction
 
 
-def _prepare(admitted: governor.Admitted, prompt: str, chosen: str | None) -> tuple[_Launch, list[str], str]:
+def _prepare(admitted: governor.Admitted, prompt: str, chosen: str | None) -> _Launch:
     """Everything a launch needs short of starting it, where each thing wrong refuses and nothing has started."""
     role, bet = admitted.role, admitted.bet
     try:
@@ -409,7 +431,7 @@ def _prepare(admitted: governor.Admitted, prompt: str, chosen: str | None) -> tu
     claude = binary()
     if claude is None:
         raise _Refuse("binary", "no-binary: no `claude` is on PATH", f"install Claude Code, or set {BINARY_VARIABLE}")
-    _check_form(claude, child_environment())
+    _check_form(claude, role, child_environment())
     session = str(uuid.uuid4())
     run = f"{times.now().strftime('%Y%m%dT%H%M%SZ')}-{session[:8]}"
     workspace = _workspace(chosen, run)
@@ -420,15 +442,15 @@ def _prepare(admitted: governor.Admitted, prompt: str, chosen: str | None) -> tu
     _write_json(mcp, _mcp_config(role, bet, session))
     _write_json(session_file, session_settings(workspace))
     (run_dir / "prompt.txt").write_text(goal.text + (f"\n{prompt}\n" if prompt else ""))
-    launch = _Launch(role, bet, session, run, run_dir, workspace, max_minutes, max_weight)
-    return launch, _command(claude, role, session, model, mcp, session_file), model
+    command = _command(claude, role, session, model, mcp, session_file)
+    return _Launch(role, bet, session, run, run_dir, workspace, model, command, max_minutes, max_weight)
 
 
-def _log_start(launch: _Launch, admitted: governor.Admitted, model: str) -> None:
+def _log_start(launch: _Launch, admitted: governor.Admitted) -> None:
     fields = {
         "session": launch.session,
         "role": launch.role,
-        "model": model,
+        "model": launch.model,
         "run": launch.run,
         "gate": admitted.gate,
         "account_used": admitted.account_used,
@@ -440,21 +462,27 @@ def _log_start(launch: _Launch, admitted: governor.Admitted, model: str) -> None
     Ledger().append("session-started", fields, "launcher")
 
 
-def _state(launch: _Launch, group: int | None) -> None:
-    """What a later launcher reads to tell whether this one died; the kill switch reads it for the group."""
-    stat = _process_stat(os.getpid())
-    value = {"launcher": os.getpid(), "launcher_started": stat[2] if stat else None, "session": launch.session}
-    _write_json(launch.run_dir / "session.json", {**value, "group": group})
+def _record_processes(launch: _Launch, group: int | None) -> None:
+    """Note who runs this session, which a later launcher reads to tell whether this one died."""
+    launcher_stat, group_stat = _process_stat(os.getpid()), _process_stat(group) if group else None
+    value = {
+        "session": launch.session,
+        "launcher": os.getpid(),
+        "launcher_started": launcher_stat.started if launcher_stat else None,
+        "group": group,
+        "group_started": group_stat.started if group_stat else None,
+    }
+    _write_json(launch.run_dir / "session.json", value)
 
 
-def _spawn(launch: _Launch, command: list[str]) -> subprocess.Popen:
+def _spawn(launch: _Launch) -> subprocess.Popen:
     with (
         (launch.run_dir / "prompt.txt").open("rb") as prompt,
         (launch.run_dir / "output.jsonl").open("wb") as output,
         (launch.run_dir / "stderr.txt").open("wb") as errors,
     ):
         return subprocess.Popen(
-            command,
+            launch.command,
             stdin=prompt,
             stdout=output,
             stderr=errors,
@@ -525,20 +553,20 @@ def start(role: str, bet: str | None = None, prompt: str = "", workspace: str | 
         if isinstance(admitted, governor.Refused):
             return admitted
         try:
-            launch, command, model = _prepare(admitted, prompt, workspace)
+            launch = _prepare(admitted, prompt, workspace)
         except _Refuse as refusal:
             return _refuse(role, bet, refusal)
-        _state(launch, None)
+        _record_processes(launch, None)
         try:
-            _log_start(launch, admitted, model)
+            _log_start(launch, admitted)
         except (AppendRefused, LedgerBroken, OSError) as error:
             return _refuse(role, bet, _Refuse("ledger", f"unlogged: the session's start could not be logged: {error}", governor.FIX_LEDGER))
         try:
-            process = _spawn(launch, command)
+            process = _spawn(launch)
         except OSError as error:
             # If the ledger will not take this either, the next launch closes the session, since it has no group.
             with contextlib.suppress(AppendRefused, LedgerBroken, OSError):
                 Ledger().append("session-stopped", {"session": launch.session, "reason": "not-started"}, "launcher")
-            return _refuse(role, bet, _Refuse("binary", f"no-start: `claude` could not start: {error.strerror}", f"check {command[0]}"))
-        _state(launch, process.pid)
+            return _refuse(role, bet, _Refuse("binary", f"no-start: `claude` could not start: {error.strerror}", f"check {launch.command[0]}"))
+        _record_processes(launch, process.pid)
     return _run(launch, process)

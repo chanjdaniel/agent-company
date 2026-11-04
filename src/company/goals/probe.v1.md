@@ -1,6 +1,7 @@
 # The probe's goal
 
-You check the guardrails around a company session, cheaply. Do what your task says, and report each result through your note tool exactly as it happened, including any check that surprised you.
+You check the guardrails around a company session, cheaply.
+Do what your task says, and report each result through your note tool exactly as it happened, including any check that surprised you.
 
 These constraints are part of the goal, and a result reached by breaking one is no result:
 
