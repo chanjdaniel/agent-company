@@ -237,7 +237,7 @@ A kind that a later ticket finds it needs joins this table and the contract in t
 | `schedule-disabled` | Governance | `board`, `killswitch` | `reason` | |
 | `append-refused` | Governance | `treasurer`, `governor`, `launcher`, `scheduler`, `killswitch`, `runner` | `attempted_kind`, `attempted_writer`, `reason` | `session`, `tool` |
 | `usage-reading` | Resources | `board`, `governor` | `window`, `used_percent`, `resets_at`, `taken_at`, `source` | |
-| `resource-charged` | Resources | `treasurer` | `week_start`, `line`, `weight`, `fraction`, `company_used`, `cost`, `reading_seq` | |
+| `resource-charged` | Resources | `treasurer` | `week_start`, `line`, `weight`, `fraction`, `company_used`, `cost`, `reading_seq`, `charge_id`, `charge_lines` | |
 | `minutes-charged` | Resources | `treasurer` | `action`, `minutes`, `subject_seq` | `bet` |
 | `minutes-corrected` | Resources | `board` | `charge_seq`, `minutes` | `reason` |
 | `revenue` | Money | `treasurer` | `amount`, `currency`, `source`, `record` | `bet` |
@@ -302,6 +302,7 @@ Notes on single kinds:
 - `session-note` is a cell's or the probe's free text, so it is kept out of the strategy session's view, since that session never talks to a cell; that view still holds a cell's registrations and proposals, which it reads as data.
 - `session-started`'s `gate` is `go:<seq>` or `schedule`, and a `go-given` word's launches left are its `sessions` minus the `session-started` events citing it.
 - `resource-charged`'s `line` is a bet's id or `overhead`, and each event is that line's whole window so far, so the newest of a window and line replaces the rest.
+  A charge writes its lines one at a time, so each holds the charge's `charge_id` and its count of lines, `charge_lines`, and only a whole charge, one with all its lines in the ledger, is read: a charge stopped part way counts for nothing.
 - `minutes-charged`'s `subject_seq` is the `approval-decided` or `send-confirmed` it charges, and its `action` is a key of `minutes_table`.
 - `cell-paused`'s and `cell-resumed`'s `scope` is `cell`, or `outside-actions` for the company-wide pause.
 - `retro-proposal`'s `daniel_only` is set by code from a fixed list of what the proposal changes, never by the session.
@@ -328,7 +329,7 @@ Minutes count in the week of the decision or send, however late the charge is wr
 A correction (`minutes-corrected`, from `company minutes correct`) replaces the estimate in every total, and the newest correction stands.
 
 `company treasurer charge` writes what is owed, and is safe to run twice: `minutes-charged` for each decision and send with no charge, and `resource-charged` for each line of the open window whose charge has changed, or for every line of it when a session has started or ended since its newest charge.
-It charges only the open window, so to count a window whole it must run after that window's last session has ended and before its reset; a session that ran in a window and has no end before that window's newest charge leaves the window's cost unknown.
+It charges only the open window, so to count a window whole it must run after that window's last session has ended and before its reset; a session that ran in a window and has no end before that window's newest whole charge leaves the window's cost unknown.
 It has no flag to set the time it charges at, since what it writes stands for good.
 It runs by Daniel's command until gate C opens the schedule, and then at each session's end and shortly before the newest reading's reset, since a plain daily timer would often miss a window's last session.
 Real-money spending, when Daniel allows any, goes through a card or account with its own hard limit, never Daniel's main card.
@@ -388,7 +389,7 @@ The digest reports the bar reached and the margin against the next bar, which is
 Three rules keep a bar from being claimed on too little:
 
 - Net revenue equal to a line covers it, but a month with no net revenue clears no bar, even with nothing to cover.
-- A window of the month that a session ran in, without that session having ended before the window's newest `resource-charged`, has an unknown cost, so no bar is claimed, and the margin against the next bar and each bet's margin are shown as "at most".
+- A window of the month that a session ran in, without that session having ended before the window's newest whole charge, has an unknown cost, so no bar is claimed, and the margin against the next bar and each bet's margin are shown as "at most".
   A session with no end event counts as still running, in every window from its start on.
 - The sums are in US dollars, and `monthly_price` is read as US dollars.
   Money in another currency has no rate to add it with, so the bar and the bets' margins say which events stopped them, and print no sum; the digest's dollars line does the same for spending in another currency alone.

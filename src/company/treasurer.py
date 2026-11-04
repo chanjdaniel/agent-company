@@ -1,6 +1,6 @@
 """The Treasurer's numbers: pure functions over the ledger's events, the usage records and Daniel's settings."""
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from fractions import Fraction
@@ -260,10 +260,17 @@ def _window_index(week_start: str, month: Span) -> int:
     return round((start - month.start) / WEEK)
 
 
+def _whole_charges(events: list[dict]) -> list[dict]:
+    """The `resource-charged` lines of each charge that wrote them all: a charge stopped part way counts for nothing."""
+    lines = _of_kind(events, "resource-charged")
+    written = Counter(event["charge_id"] for event in lines)
+    return [event for event in lines if written[event["charge_id"]] == event["charge_lines"]]
+
+
 def _charges_by_window(events: list[dict], month: Span) -> dict[tuple[int, str], dict]:
-    """The newest charge of each window and line in the month: each charge is the whole window so far."""
+    """The newest line of each window and line in the month, from whole charges: each is the window so far."""
     charges = {}
-    for event in _of_kind(events, "resource-charged"):
+    for event in _whole_charges(events):
         index = _window_index(event["week_start"], month)
         if 0 <= index < _MONTH_WEEKS:
             charges[index, event["line"]] = event
@@ -435,7 +442,7 @@ def week_charges_due(result: Share, events: list[dict]) -> list[dict]:
     if not isinstance(week, WindowShare) or result.cost_lines is None or result.line_weights is None:
         return []
     week_start = times.stamp(week.reading.window_start)
-    charges = [event for event in _of_kind(events, "resource-charged") if event["week_start"] == week_start]
+    charges = [event for event in _whole_charges(events) if event["week_start"] == week_start]
     newest = {event["line"]: (event["weight"], event["cost"]) for event in charges}
     newest_seq = max((event["seq"] for event in charges), default=0)
     window = Span(week.reading.window_start, week.reading.resets_at)

@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+import uuid
 
 from usage_records import at
 
@@ -66,6 +67,8 @@ def week_charge(week_start: str, cost: str, reading_seq: int, line: str = "overh
         "company_used": 1.0,
         "cost": cost,
         "reading_seq": reading_seq,
+        "charge_id": str(uuid.uuid4()),
+        "charge_lines": 1,
     }
     return ledger_at(when or week_start).append("resource-charged", fields, "treasurer")["seq"]
 

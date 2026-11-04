@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from company import digest, reading, settings, times, treasurer, usage
@@ -155,11 +156,13 @@ def _treasurer_charge(args) -> int:
     try:
         for fields in due.charges:
             ledger.append("minutes-charged", fields, "treasurer")
+        # Lines go in one at a time, so each says which charge it is part of, and only a whole charge is read.
+        charge_id = str(uuid.uuid4())
         for fields in lines:
-            ledger.append("resource-charged", fields, "treasurer")
+            ledger.append("resource-charged", {**fields, "charge_id": charge_id, "charge_lines": len(lines)}, "treasurer")
     except (AppendRefused, LedgerBroken) as refused:
         print(
-            f"company: refused: {refused}. The charge stopped there, and what came before it stands; "
+            f"company: refused: {refused}. The charge stopped there: the minutes it wrote stand, and part of a week's charge counts for nothing; "
             "run it again once `company ledger verify` is clean, since it charges only what is still owed.",
             file=sys.stderr,
         )

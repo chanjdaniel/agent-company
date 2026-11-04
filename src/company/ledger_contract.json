@@ -12,7 +12,7 @@
     "agents": ["cell:<bet>", "strategy", "auditor", "retro", "probe"]
   },
   "field_types": {
-    "names": {"session": "uuid", "bet": "bet", "message": "discord-id", "amount": "decimal", "cost": "decimal", "weight": "number", "minutes": "minutes", "week_start": "timestamp"},
+    "names": {"session": "uuid", "bet": "bet", "message": "discord-id", "amount": "decimal", "cost": "decimal", "weight": "number", "minutes": "minutes", "week_start": "timestamp", "charge_id": "uuid", "charge_lines": "count"},
     "suffixes": {"_seq": "seq", "_seqs": "seqs", "_at": "timestamp", "_date": "date"}
   },
   "kinds": {
@@ -23,7 +23,7 @@
     "schedule-disabled": {"group": "Governance", "writers": ["board", "killswitch"], "required": ["reason"], "optional": []},
     "append-refused": {"group": "Governance", "writers": ["treasurer", "governor", "launcher", "scheduler", "killswitch", "runner"], "required": ["attempted_kind", "attempted_writer", "reason"], "optional": ["session", "tool"]},
     "usage-reading": {"group": "Resources", "writers": ["board", "governor"], "required": ["window", "used_percent", "resets_at", "taken_at", "source"], "optional": []},
-    "resource-charged": {"group": "Resources", "writers": ["treasurer"], "required": ["week_start", "line", "weight", "fraction", "company_used", "cost", "reading_seq"], "optional": []},
+    "resource-charged": {"group": "Resources", "writers": ["treasurer"], "required": ["week_start", "line", "weight", "fraction", "company_used", "cost", "reading_seq", "charge_id", "charge_lines"], "optional": []},
     "minutes-charged": {"group": "Resources", "writers": ["treasurer"], "required": ["action", "minutes", "subject_seq"], "optional": ["bet"]},
     "minutes-corrected": {"group": "Resources", "writers": ["board"], "required": ["charge_seq", "minutes"], "optional": ["reason"]},
     "revenue": {"group": "Money", "writers": ["treasurer"], "required": ["amount", "currency", "source", "record"], "optional": ["bet"]},

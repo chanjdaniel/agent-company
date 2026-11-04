@@ -166,6 +166,8 @@ REVENUE = {"amount": "5.00", "currency": "USD", "source": "broker", "record": "r
                 "company_used": 1,
                 "cost": 3.6,
                 "reading_seq": 1,
+                "charge_id": "11111111-2222-4333-8444-555555555555",
+                "charge_lines": 1,
             },
             "bad-field:cost",
         ),
@@ -180,6 +182,8 @@ REVENUE = {"amount": "5.00", "currency": "USD", "source": "broker", "record": "r
                 "company_used": 1,
                 "cost": "3.60",
                 "reading_seq": 1,
+                "charge_id": "11111111-2222-4333-8444-555555555555",
+                "charge_lines": 1,
             },
             "bad-field:week_start",
         ),
@@ -483,7 +487,7 @@ def test_money_below_zero_is_refused(append, ledger_file, kind):
 
 def test_a_cost_below_zero_is_refused(append, notes, ledger_file):
     notes(1)
-    fields = {"week_start": "2026-10-04T00:00:00Z", "line": "overhead", "weight": 1.0, "fraction": 0.1, "company_used": 1.0, "cost": "-1.00", "reading_seq": 1}
+    fields = {"week_start": "2026-10-04T00:00:00Z", "line": "overhead", "weight": 1.0, "fraction": 0.1, "company_used": 1.0, "cost": "-1.00", "reading_seq": 1, "charge_id": SESSION, "charge_lines": 1}
 
     result = append("resource-charged", "treasurer", fields)
 
@@ -556,3 +560,29 @@ def test_an_edit_of_the_last_line_during_a_lag_passes(company, notes, ledger_fil
     rewrite(ledger_file, edit_field(-1))
 
     assert company("ledger", "verify").returncode == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("charge_id", "not-a-uuid"), ("charge_id", ["a", "list"]), ("charge_lines", 0), ("charge_lines", 1.5), ("charge_lines", "2"), ("charge_lines", True)],
+)
+def test_a_charges_line_must_say_which_charge_it_is_part_of(append, notes, ledger_file, field, value):
+    # A reader counts a charge's lines by these, so a value it could not count must never reach the ledger.
+    notes(1)
+    fields = {
+        "week_start": "2026-10-04T00:00:00Z",
+        "line": "overhead",
+        "weight": 1.0,
+        "fraction": 0.1,
+        "company_used": 1.0,
+        "cost": "1.00",
+        "reading_seq": 1,
+        "charge_id": SESSION,
+        "charge_lines": 1,
+        field: value,
+    }
+
+    result = append("resource-charged", "treasurer", fields)
+
+    assert result.returncode == 1
+    assert events(ledger_file)[-1]["reason"] == f"bad-field:{field}"
