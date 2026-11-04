@@ -3,7 +3,7 @@
 This is the design the first slice builds, written 2026-11-04.
 It turns the research in [`docs/research/2026-11-02-org-and-profit-loops/`](research/2026-11-02-org-and-profit-loops/report.md) and Daniel's decisions into one document that later work is checked against.
 Where this document and the report or critique differ, this document holds; where this document and Daniel's word differ, Daniel's word holds, and this document is wrong.
-So far the code holds the `company` command, the ledger and its contract, the test suite with its guards and scan, and CI; nothing else here exists as code yet.
+So far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, the test suite with its guards and scan, and CI; nothing else here exists as code yet.
 
 Words used throughout:
 
