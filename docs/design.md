@@ -122,16 +122,23 @@ The launcher is the only code that starts `claude`, and it calls the governor fi
 It takes the binary from `COMPANY_CLAUDE_BIN` or `PATH`, so tests use the stub.
 
 It starts `claude -p` in its own process group, rather than `claude --bg`, so it holds the process, needs no session-management command, sets the session id itself and captures the output.
-The flags are `--session-id`, `--output-format stream-json --verbose`, `--strict-mcp-config --mcp-config`, `--settings`, `--setting-sources` and `--model`, with a non-prompting permission mode (the docs' `dontAsk` denies whatever would otherwise prompt) and an explicit tool list.
-Ticket 06 checks each flag against `claude --help`, and the probe proves them on a real session.
+The flags are `--session-id`, `--output-format stream-json --verbose`, `--restricted`, `--strict-mcp-config --mcp-config`, `--settings`, `--disable-slash-commands` and `--model`, with a non-prompting permission mode (the docs' `dontAsk` denies whatever would otherwise prompt) and an explicit tool list in `--tools` and `--allowedTools`.
+The prompt, the role's goal text with any task after it, goes on stdin, since a flag that takes many values would swallow a prompt behind it.
+Ticket 06 checked each flag against `claude --help` of version 2.1.318, and the probe proves them on a real session.
+Before each launch the launcher reads `claude --help`, and a `claude` that does not list a flag it passes starts nothing and logs `launch-refused`.
 
 Rules every session starts under:
 
 - **Never `--bare`,** since it authenticates only by API key.
 - **An allow-listed environment.**
-  The child keeps only named variables, so a new one is excluded by default, and that list excludes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY` and anything else the scan's list names.
+  The child keeps only named variables, so a new one is excluded by default, and that list excludes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY` and anything else the scan's list names, which the launcher and the scan both read from `src/company/banned.py`.
+  Its `PATH` is fixed at `/usr/local/bin:/usr/bin:/bin`, so no directory of Daniel's own tools is on a session's path, and neither `COMPANY_HOME` nor `COMPANY_CONFIG` reaches it.
 - **Generated settings.**
-  They set `sandbox.enabled`, `sandbox.failIfUnavailable` and `sandbox.allowUnsandboxedCommands: false`, a read boundary (`sandbox.filesystem.denyRead` of the home directory, with the workspace allowed), no network hosts, and permission rules denying `Read`, `Write` and `Edit` outside the workspace.
+  They set `sandbox.enabled`, `sandbox.failIfUnavailable` and `sandbox.allowUnsandboxedCommands: false`, a read boundary (`sandbox.filesystem.denyRead` of the home directory, the company home, the config directory and Claude Code's directory, with the workspace allowed), no write beyond the working directory the sandbox already allows and its per-user temporary directory, no network hosts, and permission rules keeping the file tools inside the workspace.
+  At the sandbox layer the read boundary is those directories and not the whole disk, since commands need to read the system's own files.
+  At the permission layer, `permissions.blockReadsOutsideWorkingDirectories` and `permissions.blockWritesOutsideWorkingDirectories` say "outside the workspace", because no deny rule can: a deny beats an allow, and the workspace sits inside the home directory.
+  Deny rules also name the config directory, Claude Code's directory, and the ledger, locks and runs in the company home.
+  They are `Read` and `Edit` rules, since the [permission docs](https://code.claude.com/docs/en/permissions) (read 2026-11-05) say a `Write(path)` rule is accepted and never matches, and that `Edit` rules cover every tool that edits.
   They set no `apiKeyHelper`, no hook and no status line, and the session loads no user-level settings, instructions, skills, subagents, plugins, auto memory or MCP servers.
 - **Both layers are needed.**
   The [sandbox docs](https://code.claude.com/docs/en/sandboxing) (read 2026-11-04) say "The sandbox covers shell commands only", and that tools such as `Read`, `Edit`, `Write`, `WebFetch` and `WebSearch` "follow permission rules instead".
@@ -146,14 +153,31 @@ Rules every session starts under:
   None of these enters a session, from the workspace, a folder above it or `~/.claude`.
 - **How the launcher holds these two rules.**
   It keeps `--strict-mcp-config`, denies writes to `.claude/`, `.mcp.json`, `CLAUDE.md` and `CLAUDE.local.md` at any depth in the workspace, and refuses to start a session in a workspace that holds any of them, logging `launch-refused`.
-  It loads no user, project or local settings, and turns off the rest, in the form ticket 06 finds.
-  That form is not settled: the docs list only those three sources for `--setting-sources`, do not say it gates instruction files, skills, subagents or auto memory, and advise `--setting-sources user`, which would load what this rule keeps out.
-  The candidates ticket 06 checks, from the [CLI reference](https://code.claude.com/docs/en/cli-reference) and the [environment variables page](https://code.claude.com/docs/en/env-vars) (read 2026-11-04), are `--restricted`, which "loads only managed settings and `--settings`"; `--safe-mode`, under which MCP servers do not load, and the company tools are MCP servers; `--disable-slash-commands`; `CLAUDE_CODE_DISABLE_CLAUDE_MDS`; and `CLAUDE_CODE_DISABLE_AUTO_MEMORY`.
+  A workspace must lie under the company home's `workspaces/`, and with none chosen a session gets a fresh one.
+  The form that loads nothing else, from the [CLI reference](https://code.claude.com/docs/en/cli-reference) and the [environment variables page](https://code.claude.com/docs/en/env-vars) (read 2026-11-05), is these together:
+  - `--restricted`, which "loads only managed settings and `--settings`", so no user, project or local settings, and so no plugin they enable;
+  - `--disable-slash-commands`, which disables "all skills and commands";
+  - a `--tools` list that never names the Agent tool, so no subagent can be called;
+  - `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`, which prevents "loading any CLAUDE.md memory files into context, including user, project, and auto memory files", and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`.
+  The settings also turn off hooks, connectors and what syncs from the claude.ai account.
+  `--safe-mode` would load no MCP server, and the company tools are MCP servers; `--setting-sources` is never passed, since the docs list only three sources for it and advise `user`, which would load what this rule keeps out.
+  `--restricted` also removes the built-in tools that run commands unless `--tools` names them, and confines the file tools to the working directories, which is what the rules above ask.
+  **The docs do not say in so many words that the sign-in survives `--restricted`.**
+  They say bare mode never reads it and list no such limit for restricted mode, and they keep credentials outside the settings files, so the launcher relies on it, and the first real probe is what shows it.
+  If it does not, the session fails at sign-in, which costs nothing.
   **If no documented form does this with the sign-in still working, the launcher refuses every real launch and the builder asks; it never falls back to user settings.**
   Ticket 06 proves the refusals on the stub, and only Daniel's probe, read in ticket 14, can prove what a real session loads.
 - **Limits.**
-  `session_max_minutes` and `session_max_weight` are enforced from the live output, and a session past either has its group stopped and `session-stopped` logged.
+  `session_max_minutes` and `session_max_weight` are enforced as the session runs, the weight from its live output or its transcript, whichever has seen more, and a session past either has its group stopped and `session-stopped` logged, followed by `session-ended`.
+  A session's group is also stopped when it ends by itself, so that nothing it started runs on.
+- **A launcher that dies.**
+  A session with no end event claims no bar for any window from its start on, so before each launch, refused or not, the launcher closes each session whose launcher has gone: it stops any of the session's group that is left, since nothing watches its limits any more, and logs `session-stopped` with the reason `launcher-gone`.
+  The next charge then counts the open window; the closed windows the session ran in stay named until they leave the trailing month, since nothing charges a window after its reset.
+- **One launch decides at a time.**
+  A lock held from before `admit` until the session has started keeps two launches from both spending a word's last launch.
 - **At the end,** the launcher logs `session-ended` with the exit, the transcript's path and hash and the session's weight, and copies the transcript into the company home, so that it outlives Claude Code's own clean-up and the audit window can rely on it.
+  A session with no transcript has `none` for its path and hash.
+  Each run's directory, `runs/<run>/` in the company home, also keeps its raw output, settings, server configuration and prompt.
 
 ### Roles
 
@@ -168,6 +192,7 @@ Rules every session starts under:
 The defaults are `claude-opus-5-5` for `cell_model`, `claude-sonnet-5-5` for `auditor_model`, and `claude-haiku-5-5` for the probe.
 
 Every goal text states the honesty constraints as part of the goal, and none says "whatever it takes" or "at all costs".
+Goal texts are files in the package, `src/company/goals/<role>.v<n>.md`, the newest of a role's being the one used, and one that fails the scan starts nothing.
 The evidence behind this is in the report's section 1.3: under such a prompt, agents lied about refunds and fixed prices.
 
 ### Company tools
@@ -175,7 +200,10 @@ The evidence behind this is in the report's section 1.3: under such a prompt, ag
 Agents reach the ledger only through company tools on a local stdio MCP server, one per session.
 The launcher starts it with the role and bet fixed, so the writer is settled when the session starts, which a flag or an environment variable inside a session could not do.
 A tool call that names another writer still writes as the session's own, and a call to a tool outside the role is refused and logged.
-A session's shell cannot write the company home outside its workspace, so it cannot run `company` as anyone else.
+A refused call logs `append-refused` with its `session` and `tool`.
+Each server starts in the workspace, outside the sandbox, so it runs with Python's `-P`, and a file an agent planted there cannot run as the company's code.
+A session's shell cannot write the company home outside its workspace, so it cannot run `company` as anyone else, and `company ledger append`, which takes any writer, is the person's and the tests' door.
+As second layers, `company` is not on a session's path, the settings deny the shell `company` and `claude`, and `company ledger append` refuses and logs when the launcher's `COMPANY_SESSION` variable is set.
 
 ## The ledger
 
@@ -303,7 +331,7 @@ Notes on single kinds:
 - `settings-changed` holds the changed keys' names and the new digest, not their values.
 - `session-note` is a cell's or the probe's free text, so it is kept out of the strategy session's view, since that session never talks to a cell; that view still holds a cell's registrations and proposals, which it reads as data.
 - `session-started`'s `gate` is `go:<seq>` or `schedule`, and a `go-given` word's launches left are its `sessions` minus the `session-started` events citing it.
-- `launch-refused`'s `check` is the governor's step that refused (`ledger`, `settings`, `go`, `pause`, `reading`, `floor` or `share`) or, written by the launcher, its own; its `reason` starts with a code, such as `stale`, followed by a sentence, and `fix` is what to do about it.
+- `launch-refused`'s `check` is the governor's step that refused (`ledger`, `settings`, `go`, `pause`, `reading`, `floor` or `share`) or, written by the launcher, its own (`goal`, `settings`, `binary`, `load-form`, `workspace` or `ledger`); its `reason` starts with a code, such as `stale`, followed by a sentence, and `fix` is what to do about it.
 - `resource-charged`'s `line` is a bet's id or `overhead`, and each event is that line's whole window so far, so the newest of a window and line replaces the rest.
   A charge writes its lines one at a time, so each holds the charge's `charge_id` and its count of lines, `charge_lines`, and only a whole charge, one with all its lines in the ledger, is read: a charge stopped part way counts for nothing.
 - `minutes-charged`'s `subject_seq` is the `approval-decided` or `send-confirmed` it charges, and its `action` is a key of `minutes_table`.
@@ -808,6 +836,7 @@ The file holds it as `count` 2, `days` 30 and `outside_action_fraction` 0.02.
 The suite runs with no network and no model session, and fails on any attempt at either.
 It tests through the `company` command or the company tools over stdio, using a stub `claude` that plays a script through the same tools a real session uses.
 Its guards are in `tests/harness/`: each Python process has an audit hook on sockets and on Daniel's real paths, and a `claude` first on `PATH` fails the test.
+The launcher's allow-list strips the guard from a session's environment, as it must, so the seam is in the test's own executable and never in the company's code: the stub's wrapper notes the environment it was given, then sets the guard and the blocker again for the stub and the company tools it starts.
 Its scan, `tests/scan_rules.py`, walks every tracked file for what the runtime section bans; `docs/design.md`, `docs/first-run.md` and the research may name a banned variable, setting or flag and any URL, but no file but the scan's own may hold a real key's shape, a model vendor's host or SDK import, or the live broker host.
 
 ## Phases

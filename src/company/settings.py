@@ -215,7 +215,7 @@ def percent(settings: dict, key: str) -> int | float:
     return value
 
 
-def _text(settings: dict, key: str) -> str:
+def text(settings: dict, key: str) -> str:
     value = settings.get(key)
     if not isinstance(value, str) or not value:
         raise SettingsRefused(f"the setting {key} is missing or is not a text")
@@ -295,9 +295,9 @@ KEYS: dict[str, Callable[[dict, str], object]] = {
     "company_share": fraction,
     "team_floor": percent,
     "monthly_price": positive_number,
-    "plan_name": _text,
-    "cell_model": _text,
-    "auditor_model": _text,
+    "plan_name": text,
+    "cell_model": text,
+    "auditor_model": text,
     "reading_max_age_minutes": positive_number,
     "session_max_minutes": positive_number,
     "session_max_weight": positive_number,

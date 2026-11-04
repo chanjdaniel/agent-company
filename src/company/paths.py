@@ -17,3 +17,13 @@ def config() -> Path:
 def claude_projects() -> Path:
     """Where Claude Code keeps its transcripts, which only Usage reads."""
     return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+
+
+def workspaces() -> Path:
+    """Where sessions work; the only part of the company home a session can reach."""
+    return home() / "workspaces"
+
+
+def runs() -> Path:
+    """Each session's saved record: its settings, output and copy of its transcript."""
+    return home() / "runs"

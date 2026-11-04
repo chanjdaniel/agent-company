@@ -1,12 +1,24 @@
 """The `company` command: a thin command line over the company's modules."""
 
 import argparse
+import contextlib
 import json
+import os
 import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from company import digest, governor, reading, settings, times, treasurer, usage
+from company import (
+    contract,
+    digest,
+    governor,
+    launcher,
+    reading,
+    settings,
+    times,
+    treasurer,
+    usage,
+)
 from company.ledger import AppendRefused, Ledger, LedgerBroken
 
 EXIT_OK = 0
@@ -14,7 +26,21 @@ EXIT_REFUSED = 1
 EXIT_USAGE = 2
 
 
+def _inside_a_session(ledger: Ledger, kind: str, writer: str) -> bool:
+    """Whether this command runs in a session, whose agent must reach the ledger only through its company tools."""
+    session = os.environ.get(launcher.SESSION_VARIABLE)
+    if session is None:
+        return False
+    context = {"tool": "ledger-append", **({"session": session} if contract.UUID.fullmatch(session) else {})}
+    with contextlib.suppress(LedgerBroken, OSError):
+        ledger.refuse(kind, writer, "inside-a-session", context)
+    print("company: refused: an agent reaches the ledger only through its company tools. Nothing was appended.", file=sys.stderr)
+    return True
+
+
 def _ledger_append(args) -> int:
+    if _inside_a_session(Ledger(), args.kind, args.writer):
+        return EXIT_REFUSED
     try:
         fields = json.loads(args.fields)
     except ValueError:
@@ -279,15 +305,31 @@ def _go(args) -> int:
     return EXIT_OK
 
 
+def _print_refusal(answer: governor.Refused) -> None:
+    print(f"Refused at the {answer.check} check: {answer.reason}.")
+    print(f"Fix: {answer.fix}.")
+    if answer.seq is None:
+        print("This refusal could not be logged: see `company ledger verify`.")
+    else:
+        print(f"Event {answer.seq} in the ledger records this refusal.")
+
+
+def _session_start(args) -> int:
+    answer = launcher.start(args.role, args.bet, args.prompt or "", args.workspace)
+    if isinstance(answer, governor.Refused):
+        _print_refusal(answer)
+        return EXIT_REFUSED
+    how = f"stopped ({answer.stopped})" if answer.stopped else "ended"
+    print(f"Session {answer.session} {how}: exit {answer.exit}, weight {answer.weight:.6f}, run {answer.run}.")
+    if answer.unlogged:
+        print(f"company: {answer.unlogged}.", file=sys.stderr)
+    return EXIT_OK if answer.exit == 0 and not answer.stopped and not answer.unlogged else EXIT_REFUSED
+
+
 def _governor_check(args) -> int:
     answer = governor.admit(args.role, args.bet)
     if isinstance(answer, governor.Refused):
-        print(f"Refused at the {answer.check} check: {answer.reason}.")
-        print(f"Fix: {answer.fix}.")
-        if answer.seq is None:
-            print("This refusal could not be logged: see `company ledger verify`.")
-        else:
-            print(f"Event {answer.seq} in the ledger records this refusal.")
+        _print_refusal(answer)
         return EXIT_REFUSED
     print(f"Admitted: {args.role}, on {answer.gate}, with {_launches(answer.launches_left)} left on that word.")
     shown = {window.reading.window: window for window in answer.windows}
@@ -405,6 +447,16 @@ def _parser() -> argparse.ArgumentParser:
     check.add_argument("role", choices=governor.ROLES)
     check.add_argument("--bet", help="The bet's id, which a cell must name.")
     check.set_defaults(run=_governor_check)
+
+    sessions = commands.add_parser("session", help="Run a company session.")
+    actions = sessions.add_subparsers(dest="action", required=True)
+
+    begin = actions.add_parser("start", help="Run one session to its end, if the governor admits it; a refusal starts nothing.")
+    begin.add_argument("role", choices=governor.ROLES)
+    begin.add_argument("--bet", help="The bet's id, which a cell must name.")
+    begin.add_argument("--prompt", help="The task, added after the role's goal text.")
+    begin.add_argument("--workspace", help="A workspace under the company's; with none, a fresh one.")
+    begin.set_defaults(run=_session_start)
 
     return parser
 

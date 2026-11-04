@@ -7,7 +7,7 @@ The research behind it, with its critique, Daniel's decisions and draft tickets,
 
 ## The code
 
-The first slice is being built, and so far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the test suite and CI.
+The first slice is being built, and so far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the session launcher and company tools, the test suite and CI.
 It is Python 3.13 with no runtime dependency outside the standard library, and needs `uv` to run.
 
 ```sh
@@ -32,12 +32,14 @@ uv run company go real-sessions --message 1234 --sessions 3
                                        # Daniel's go: exactly this many real launches
 uv run company governor check cell --bet alpha
                                        # whether a session may start now, and why not
+uv run company session start probe --prompt "say hello"
+                                       # run one session to its end, if the governor admits it; this spends real use
 ```
 
-The share, the charge, the governor and a digest of a ledger with events read `settings.json` in Daniel's config directory, and refuse without it, since no share or floor is compiled in.
+The share, the charge, the governor, a session and a digest of a ledger with events read `settings.json` in Daniel's config directory, and refuse without it, since no share or floor is compiled in.
 Only `company settings init` and `company settings set` change that file, and a file changed any other way refuses them all, until `company settings init` writes a new one.
 The two shares are fractions, such as 0.25 for 25%, and a number above 1 is refused.
 
 Runtime state lives outside the repository.
-The company home, `~/.local/state/agent-company/` or `COMPANY_HOME`, holds the ledger, and will hold session workspaces and the replay set.
+The company home, `~/.local/state/agent-company/` or `COMPANY_HOME`, holds the ledger, session workspaces and each session's run, and will hold the replay set.
 Daniel's config directory, `~/.config/agent-company/` or `COMPANY_CONFIG`, holds their settings, and will hold the paper key.

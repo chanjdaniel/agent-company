@@ -76,27 +76,43 @@ class Ledger:
         self.contract = contract or Contract.load()
         self._clock = clock
 
-    def append(self, kind: str, fields: dict, writer: str) -> dict:
-        """Add one event and return it; raise `AppendRefused`, after logging it, if the contract says no."""
+    def append(self, kind: str, fields: dict, writer: str, refusal_context: dict | None = None) -> dict:
+        """Add one event and return it; raise `AppendRefused`, after logging it, if the contract says no.
+
+        `refusal_context` is the `session` and `tool` that a refusal names, for an append a company tool makes.
+        """
         self.home.mkdir(parents=True, exist_ok=True, mode=0o700)
         with self._locked(fcntl.LOCK_EX):
             tail = self._tail()
             reason = self.contract.refusal(kind, fields, writer, tail.seq + 1)
             if reason is None:
                 return self._write(kind, fields, writer, tail)
-            refusal = self._write(
-                "append-refused",
-                {
-                    "attempted_kind": self.contract.safe_label(kind),
-                    "attempted_writer": self.contract.safe_label(writer),
-                    "reason": reason,
-                },
-                self.contract.refusal_writer(writer),
-                tail,
-            )
+            refusal = self._write_refusal(kind, writer, reason, refusal_context, self.contract.refusal_writer(writer), tail)
             raise AppendRefused(
                 self.contract.safe_label(kind), self.contract.safe_label(writer), reason, refusal["seq"]
             )
+
+    def refuse(self, kind: str, writer: str, reason: str, refusal_context: dict | None = None) -> dict:
+        """Log an agent's attempt refused before any append, such as a tool outside its role, and return the event.
+
+        The Treasurer writes it, as for any attempt from an agent, whichever writer the attempt claimed.
+        """
+        self.home.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with self._locked(fcntl.LOCK_EX):
+            return self._write_refusal(kind, writer, reason, refusal_context, "treasurer", self._tail())
+
+    def _write_refusal(self, kind, writer, reason: str, context: dict | None, logged_by: str, tail: _Tail) -> dict:
+        """Log `append-refused`; `context` is set by the company's code, and a tool's name in it is the caller's text."""
+        extra = dict(context or {})
+        if "tool" in extra:
+            extra["tool"] = self.contract.safe_label(extra["tool"])
+        fields = {
+            "attempted_kind": self.contract.safe_label(kind),
+            "attempted_writer": self.contract.safe_label(writer),
+            "reason": reason,
+            **extra,
+        }
+        return self._write("append-refused", fields, logged_by, tail)
 
     def read(self) -> list[dict]:
         """Every event, oldest first, with no check of the chain; raise `LedgerBroken` on a line that is no event."""
