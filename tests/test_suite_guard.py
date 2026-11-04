@@ -133,6 +133,19 @@ def test_an_unchosen_claude_fails_the_test(tmp_path):
     assert "the suite's guard caught this, in this test or just before it: model" in result.stdout
 
 
+def test_an_unchosen_claude_in_a_child_python_fails_the_test(tmp_path):
+    child = "import subprocess; subprocess.run(['claude', '-p', 'hello'], capture_output=True)"
+    source = bare_test(
+        f"""
+        import subprocess, sys
+        subprocess.run([sys.executable, "-c", {child!r}], capture_output=True)
+        """
+    )
+    result = run_child_suite(tmp_path, source)
+    assert result.returncode == TEST_FAILED, result.stdout + result.stderr
+    assert "the suite's guard caught this, in this test or just before it: model" in result.stdout
+
+
 def test_a_claude_a_test_chose_passes(tmp_path):
     stub = tmp_path / "stub" / "claude"
     stub.parent.mkdir()
@@ -194,6 +207,21 @@ def test_opening_a_real_path_fails_the_test(what, tmp_path):
             open({REAL_PATHS[what]!r}).close()
         except BaseException as swallowed:
             print("swallowed", swallowed)
+        """
+    )
+    result = run_child_suite(tmp_path, source)
+    assert result.returncode == TEST_FAILED, result.stdout + result.stderr
+    assert "the suite's guard caught this, in this test or just before it: real path" in result.stdout
+
+
+@pytest.mark.parametrize("what", REAL_PATHS)
+def test_opening_a_real_path_in_a_child_python_fails_the_test(what, tmp_path):
+    # The child swallows the refusal and exits cleanly: only the guard's log can tell the parent.
+    child = f"try:\\n    open({REAL_PATHS[what]!r}).close()\\nexcept BaseException:\\n    pass\\n"
+    source = bare_test(
+        f"""
+        import subprocess, sys
+        subprocess.run([sys.executable, "-c", "{child}"], check=True)
         """
     )
     result = run_child_suite(tmp_path, source)
@@ -285,8 +313,12 @@ def test_a_custom_real_home_exported_in_the_shell_is_out_of_reach(tmp_path):
     assert "real path" in result.stdout
 
 
-def test_a_model_provider_variable_in_the_shell_does_not_reach_a_test(tmp_path):
-    name = "ANTHROPIC_" + "API_KEY"
+# Assembled, since the scan bans these names everywhere but its own files.
+@pytest.mark.parametrize(
+    "name",
+    ["ANTHROPIC_" + "API_KEY", "CLAUDE_CODE_" + "USE_BEDROCK", "CLAUDE_CODE_" + "OAUTH_TOKEN", "AWS_BEARER_" + "TOKEN_BEDROCK"],
+)
+def test_a_model_provider_variable_in_the_shell_does_not_reach_a_test(tmp_path, name):
     source = bare_test(f"import os\nassert {name!r} not in os.environ")
     result = run_child_suite(tmp_path, source, env={name: "planted"})
     assert result.returncode == PASSED, result.stdout + result.stderr

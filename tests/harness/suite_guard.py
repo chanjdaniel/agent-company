@@ -21,8 +21,8 @@ HARNESS = Path(__file__).resolve().parent
 ISOLATED = ("HOME", "COMPANY_HOME", "COMPANY_CONFIG", "CLAUDE_CONFIG_DIR")
 REFUSED_START = 3
 
-# A session must not be able to pick another provider, or a real binary, from the shell that ran pytest.
-DROPPED_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_USE_")
+# A session must not be able to pick another provider, sign in by a token, or find a real binary, from the shell that ran pytest.
+DROPPED_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "AWS_BEARER_")
 DROPPED_ENV = ("COMPANY_CLAUDE_BIN",)
 
 
