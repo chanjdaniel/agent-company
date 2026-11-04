@@ -3,7 +3,7 @@
 This is the design the first slice builds, written 2026-11-04.
 It turns the research in [`docs/research/2026-11-02-org-and-profit-loops/`](research/2026-11-02-org-and-profit-loops/report.md) and Daniel's decisions into one document that later work is checked against.
 Where this document and the report or critique differ, this document holds; where this document and Daniel's word differ, Daniel's word holds, and this document is wrong.
-Nothing here exists as code yet.
+So far the code holds the `company` command, the ledger and its contract, the test suite with its guards and scan, and CI; nothing else here exists as code yet.
 
 Words used throughout:
 
@@ -187,6 +187,9 @@ Each line holds `seq`, `ts`, `kind`, `writer`, the kind's fields, and `prev`, th
 - `verify()` runs at each `company` command that decides anything.
   A broken chain refuses every launch and is reported to Daniel.
 - Other refusals with no kind of their own (a second verdict, a repeated proposal with no new evidence) also log `append-refused`, with a short reason code.
+- A chain alone cannot see lines removed from its end, so a head record beside the ledger holds the last line's `seq` and hash.
+  It may lag by one line after a crash between the two writes; any other difference is a broken ledger, and an append to a ledger whose end is broken is refused with nothing written.
+- The chain and the head record find an edit by hand; someone rewriting the whole ledger and the head record together would pass, which is why the session rules keep agents from writing the company home.
 
 ### Writers
 
@@ -208,12 +211,14 @@ An `append-refused` event's writer is the code writer making the append, or `tre
 ### Field conventions
 
 - A field ending in `_seq` holds the `seq` of an earlier event, and `_seqs` a list of them.
-- A field ending in `_at` is a UTC timestamp, and one ending in `_date` is a date.
-- `bet` is a bet's id, and `session` a session's UUID.
-- `message` is the Discord id of Daniel's word.
+- A field ending in `_at` is a UTC timestamp like `2026-11-05T09:30:00Z`, and one ending in `_date` is a date like `2026-11-05`.
+- `bet` is a bet's id (lower-case letters, digits and hyphens), and `session` a session's UUID.
+- `message` is the Discord id of Daniel's word, as a string of digits.
 - `amount` is a decimal string, always with `currency`.
 - `weight` is a list-price weight, which is an apportioning key and never a cost.
 - On events written through company tools, `session` and `data_hash` are filled in by the tool, not by the agent.
+
+The contract holds the conventions on a field's form too, and an append whose field breaks one is refused.
 
 ### Event kinds
 
@@ -737,6 +742,8 @@ Each of these is **Daniel's to change,** with `company settings set`.
 
 The suite runs with no network and no model session, and fails on any attempt at either.
 It tests through the `company` command or the company tools over stdio, using a stub `claude` that plays a script through the same tools a real session uses.
+Its guards are in `tests/harness/`: each Python process has an audit hook on sockets and on Daniel's real paths, and a `claude` first on `PATH` fails the test.
+Its scan, `tests/scan_rules.py`, walks every tracked file for what the runtime section bans; `docs/design.md`, `docs/first-run.md` and the research may name a banned variable, setting or flag and any URL, but no file but the scan's own may hold a real key's shape, a model vendor's host or SDK import, or the live broker host.
 
 ## Phases
 

@@ -1,0 +1,23 @@
+[project]
+name = "agent-company"
+version = "0.1.0"
+description = "An organized company of agents collaborating toward one goal, earning a profit."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = []
+
+[project.scripts]
+company = "company.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["uv_build>=0.10.12,<0.11"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "company"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
