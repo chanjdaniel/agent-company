@@ -5,7 +5,14 @@ An experiment in agentic business: an organized company of agents collaborating 
 ## Status
 
 The project has its design and is building its first slice: `docs/design.md` is the document later work is checked against, and it records Daniel's decisions.
-There is no code yet; the research behind the design is in `docs/research/2026-11-02-org-and-profit-loops/` (`report.md`, `critique.md`, `decisions.md` and the draft `tickets/`).
+So far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, the test suite and CI; the research behind the design is in `docs/research/2026-11-02-org-and-profit-loops/` (`report.md`, `critique.md`, `decisions.md` and the draft `tickets/`).
+
+## Working in the code
+
+- The test command is `uv run --locked pytest`; `pytest` is the one development dependency, and the runtime is Python 3.13's standard library alone.
+- Runtime state lives outside the repository: the company home is `~/.local/state/agent-company/` or `COMPANY_HOME`, and Daniel's config directory is `~/.config/agent-company/` or `COMPANY_CONFIG`.
+- The suite moves all of that into a scratch directory and fails on any network attempt, any unchosen `claude` or any touch of the real paths (`tests/harness/`).
+- `tests/scan_rules.py` bans model API keys, hosts and SDKs and outside URLs in every tracked file, and says which documents may name them.
 
 ## Conventions
 

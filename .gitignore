@@ -1,2 +1,5 @@
 .scratch/
 .claude/worktrees/
+.venv/
+__pycache__/
+.pytest_cache/
