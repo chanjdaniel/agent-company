@@ -219,6 +219,7 @@ An `append-refused` event's writer is the code writer making the append, or `tre
 - `amount` is a decimal string from zero up, always with `currency`, and `cost` is a decimal string from zero up in US dollars, so a refund is a positive `amount` of kind `refund`.
 - `minutes` is a number from zero up.
 - `week_start` is the UTC time a seven-day window opens.
+- `charge_id` is a UUID, one per run of the charge, and `charge_lines` a whole number from 1 up.
 - `weight` is a list-price weight, which is an apportioning key and never a cost.
 - On events written through company tools, `session` and `data_hash` are filled in by the tool, not by the agent.
 
@@ -328,7 +329,7 @@ So a draft's ask names `message-review`, and one message reviewed and sent costs
 Minutes count in the week of the decision or send, however late the charge is written.
 A correction (`minutes-corrected`, from `company minutes correct`) replaces the estimate in every total, and the newest correction stands.
 
-`company treasurer charge` writes what is owed, and is safe to run twice: `minutes-charged` for each decision and send with no charge, and `resource-charged` for each line of the open window whose charge has changed, or for every line of it when a session has started or ended since its newest charge.
+`company treasurer charge` writes what is owed, and is safe to run twice: `minutes-charged` for each decision and send with no charge, and `resource-charged` for each line of the open window whose charge has changed, or for every line of it when a session has started or ended since its newest whole charge.
 It charges only the open window, so to count a window whole it must run after that window's last session has ended and before its reset; a session that ran in a window and has no end before that window's newest whole charge leaves the window's cost unknown.
 It has no flag to set the time it charges at, since what it writes stands for good.
 It runs by Daniel's command until gate C opens the schedule, and then at each session's end and shortly before the newest reading's reset, since a plain daily timer would often miss a window's last session.

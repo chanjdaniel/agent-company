@@ -329,7 +329,7 @@ def _session_runs(events: list[dict]) -> list[_SessionRun]:
 
 
 def _uncharged_windows(events: list[dict], month: Span) -> tuple[datetime, ...]:
-    """Each window of the month that a session ran in without having ended before its newest charge.
+    """Each window of the month that a session ran in without having ended before its newest whole charge.
 
     A charge is the window so far, so what that session did after it is in no charge, and the window's cost is unknown.
     """
@@ -435,7 +435,7 @@ def minutes_total(events: list[dict], span: Span) -> Fraction:
 def week_charges_due(result: Share, events: list[dict]) -> list[dict]:
     """A `resource-charged` event for each line of the open window whose charge has changed; each is the window so far.
 
-    A session started or ended since the newest charge writes every line, changed or not: with no reply of its own it
+    A session started or ended since the newest whole charge writes every line, changed or not: with no reply of its own it
     moves no number, and only a charge after it can show that it was counted.
     """
     week = result.seven_day

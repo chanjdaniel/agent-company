@@ -519,7 +519,7 @@ def test_the_charge_after_one_stopped_part_way_writes_every_line_and_counts_the_
     assert "Against it: share cost $7.20" in text
 
 
-def test_a_week_that_cannot_be_read_is_said_and_the_minutes_are_still_charged(company):
+def test_a_week_that_cannot_be_read_is_said_and_the_minutes_are_still_charged():
     decided = ledger_at(LAST_FEW_DAYS).append(
         "usage-reading",
         {"window": "five_hour", "used_percent": 1, "resets_at": RESETS, "taken_at": TAKEN, "source": "hand"},
