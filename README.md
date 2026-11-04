@@ -7,7 +7,7 @@ The research behind it, with its critique, Daniel's decisions and draft tickets,
 
 ## The code
 
-The first slice is being built, and so far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, the test suite and CI.
+The first slice is being built, and so far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the test suite and CI.
 It is Python 3.13 with no runtime dependency outside the standard library, and needs `uv` to run.
 
 ```sh
@@ -23,11 +23,19 @@ uv run company treasurer charge        # write each decision's minutes and the o
 uv run company minutes correct --charge 12 --minutes 6
                                        # replace a charge's minutes in every total
 uv run company digest                  # the one page to read each week
+uv run company settings init --company-share 0.25 --team-floor 60 --monthly-price 130 --plan-name a-plan \
+  --reading-max-age-minutes 120 --session-max-minutes 60 --session-max-weight 20
+                                       # write Daniel's settings; these numbers are only an example
+uv run company settings set team_floor 50
+                                       # change one setting
+uv run company go real-sessions --message 1234 --sessions 3
+                                       # Daniel's go: exactly this many real launches
+uv run company governor check cell --bet alpha
+                                       # whether a session may start now, and why not
 ```
 
-The share, the charge and a digest of a ledger with events read `settings.json` in Daniel's config directory, and refuse without it, since no value is compiled in.
-No command writes that file yet, so for now it is written by hand.
-The share reads `monthly_price` and `reading_max_age_minutes`, the charge also `minutes_table`, and the digest also `company_share`, `daily_minutes` and the `portfolio` setting's `new_bet_token_share` and `new_bet_dollars`.
+The share, the charge, the governor and a digest of a ledger with events read `settings.json` in Daniel's config directory, and refuse without it, since no share or floor is compiled in.
+Only `company settings init` and `company settings set` change that file, and a file changed any other way refuses them all, until `company settings init` writes a new one.
 The two shares are fractions, such as 0.25 for 25%, and a number above 1 is refused.
 
 Runtime state lives outside the repository.

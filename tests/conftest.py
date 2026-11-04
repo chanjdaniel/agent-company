@@ -9,6 +9,9 @@ import ledger_history
 import pytest
 import usage_records
 
+from company import settings as settings_module
+from company.ledger import Ledger
+
 sys.path.insert(0, str(Path(__file__).resolve().parent / "harness"))
 
 pytest_plugins = ["suite_guard"]
@@ -51,12 +54,15 @@ def transcripts(tmp_path, monkeypatch):
 
 @pytest.fixture
 def settings(tmp_path):
-    """Write Daniel's settings file with what the share reads, and return a way to change it."""
+    """Write Daniel's settings file with what the share reads, past the checks of `company settings set` so that a
+    test can hold a bad value, and record its digest as that command does; return a way to change it."""
 
     def write(**changes):
         path = tmp_path / "company-config" / "settings.json"
         path.parent.mkdir(exist_ok=True)
         path.write_text(json.dumps({**usage_records.SETTINGS, **changes}))
+        fields = {"digest": settings_module.digest_of(path.read_bytes()), "keys": sorted(changes)}
+        Ledger().append("settings-changed", fields, "board")
 
     write()
     return write

@@ -1,0 +1,186 @@
+"""The governor: whether a session may start, checked in the design's order, stopping at the first refusal.
+
+Only a refusal writes: `launch-refused`, with the reason, the share and the reading behind it.
+Whatever cannot be read refuses, and never assumes room.
+It cannot tell a stub from a real `claude`, so every launch it admits needs a `go-given` word.
+"""
+
+from collections import Counter
+from dataclasses import dataclass
+from datetime import datetime
+from fractions import Fraction
+
+from company import contract, reading, settings, times, treasurer, usage
+from company.ledger import AppendRefused, Ledger, LedgerBroken
+
+ROLES = ("probe", "cell", "strategy", "auditor", "retro")
+GO_SCOPE = "real-sessions"
+FIX_GO = f"company go {GO_SCOPE} --message <Discord id> --sessions <n>"
+FIX_LEDGER = "company ledger verify"
+FIX_PAUSE = "company cell resume"
+
+
+@dataclass(frozen=True)
+class Admitted:
+    """Room for one launch. `gate` is what `session-started` cites, and the numbers are the seven-day window's."""
+
+    role: str
+    bet: str | None
+    gate: str
+    launches_left: int
+    account_used: float
+    company_used: float
+    reading_seq: int
+    windows: tuple[treasurer.WindowShare, ...]
+
+
+@dataclass(frozen=True)
+class Refused:
+    """No launch. `seq` is the `launch-refused` event, or None if the ledger could not take it."""
+
+    role: str
+    bet: str | None
+    check: str
+    reason: str
+    fix: str
+    seq: int | None
+
+
+class _Stop(Exception):
+    def __init__(self, check: str, reason: str, fix: str, numbers: dict | None = None):
+        super().__init__(reason)
+        self.check, self.reason, self.fix, self.numbers = check, reason, fix, numbers or {}
+
+
+def _events(ledger: Ledger) -> list[dict]:
+    try:
+        verification = ledger.verify()
+        if not verification.ok:
+            raise _Stop("ledger", "broken: " + "; ".join(verification.problems), FIX_LEDGER)
+        return ledger.read()
+    except (LedgerBroken, OSError) as error:
+        raise _Stop("ledger", f"broken: {error}", FIX_LEDGER) from None
+
+
+def _settings() -> tuple[dict, Fraction, Fraction]:
+    """The file, with the share as a percent and the floor; every number the later checks read is checked here."""
+    try:
+        loaded = settings.load()
+        share = Fraction(str(settings.fraction(loaded, "company_share"))) * 100
+        floor = Fraction(str(settings.percent(loaded, "team_floor")))
+        settings.positive_number(loaded, "monthly_price")
+        settings.positive_number(loaded, "reading_max_age_minutes")
+        settings.day_dirs(loaded)
+    except settings.SettingsRefused as refused:
+        raise _Stop("settings", f"{refused.code}: {refused}", refused.fix) from None
+    except (LedgerBroken, OSError) as error:
+        raise _Stop("settings", f"unusable: the digest cannot be compared: {error}", FIX_LEDGER) from None
+    return loaded, share, floor
+
+
+def _go(events: list[dict]) -> tuple[str, int]:
+    """The oldest word with launches left, and how many; a launch uses one by citing it in `session-started`."""
+    words = [e for e in events if e["kind"] == "go-given" and e["scope"] == GO_SCOPE]
+    if not words:
+        raise _Stop("go", "no-go: no go-given word is on record", FIX_GO)
+    used = Counter(e["gate"] for e in events if e["kind"] == "session-started")
+    for word in words:
+        gate = f"go:{word['seq']}"
+        left = word["sessions"] - used[gate]
+        if left > 0:
+            return gate, left
+    raise _Stop("go", "go-used-up: every go-given word's launches are used", FIX_GO)
+
+
+def _not_paused(events: list[dict], role: str, bet: str | None) -> None:
+    if bet is None:
+        if role == "cell":
+            raise _Stop("pause", "no-bet: a cell runs one bet, and with none named its pause cannot be read", FIX_PAUSE)
+        return
+    if not contract.is_bet(bet):
+        raise _Stop("pause", "bad-bet: the bet named is no bet's id, so its pause cannot be read", FIX_PAUSE)
+    pauses = (
+        e
+        for e in reversed(events)
+        if e["kind"] in ("cell-paused", "cell-resumed") and e["scope"] == "cell" and e.get("bet", bet) == bet
+    )
+    newest = next(pauses, None)
+    if newest is not None and newest["kind"] == "cell-paused":
+        raise _Stop("pause", f"paused: the bet {bet} was paused by event {newest['seq']}", FIX_PAUSE)
+
+
+def _unreadable(found: reading.Unreadable) -> _Stop:
+    numbers = {} if found.seq is None else {"reading_seq": found.seq}
+    return _Stop("reading", f"{found.reason}: {found.detail}", reading.FIX, numbers)
+
+
+def _windows(events: list[dict], loaded: dict, now: datetime) -> tuple[treasurer.WindowShare, ...]:
+    """The share of each window with a reading; anything wrong in reading them refuses, whatever it is."""
+    try:
+        max_age = settings.positive_number(loaded, "reading_max_age_minutes")
+        records = usage.load(now - treasurer.WEEK, settings.day_dirs(loaded))
+        result = treasurer.share(events, records, settings.positive_number(loaded, "monthly_price"), max_age, now)
+    except Exception as error:  # noqa: BLE001 - a failure of any kind is a window that cannot be read, never room.
+        raise _Stop("reading", f"read-error: the window's use cannot be read: {error}", reading.FIX) from None
+    found = []
+    for window in (result.seven_day, result.five_hour):
+        if isinstance(window, reading.Unreadable):
+            raise _unreadable(window)
+        if window is not None:
+            found.append(window)
+    return tuple(found)
+
+
+def _numbers(window: treasurer.WindowShare) -> dict:
+    return {
+        "account_used": float(window.reading.used_percent),
+        "company_used": float(window.company_used),
+        "reading_seq": window.reading.seq,
+    }
+
+
+def _under_floor(windows: tuple[treasurer.WindowShare, ...], floor: Fraction) -> None:
+    for window in windows:
+        seen = window.reading
+        if seen.used_percent >= floor:
+            reason = f"above-floor: the account has used {float(seen.used_percent):.2f}% of {seen.window}, at or past the floor of {float(floor):g}%"
+            fix = f"wait for the reset at {times.stamp(seen.resets_at)}; only `{settings.SET} team_floor` moves the floor"
+            raise _Stop("floor", reason, fix, _numbers(window))
+
+
+def _under_share(windows: tuple[treasurer.WindowShare, ...], share: Fraction) -> None:
+    for window in windows:
+        seen = window.reading
+        if window.company_used >= share:
+            reason = f"share-used: the company has used {float(window.company_used):.2f}% of {seen.window}, at or past its share of {float(share):g}%"
+            fix = f"wait for the reset at {times.stamp(seen.resets_at)}; only `{settings.SET} company_share` moves the share"
+            raise _Stop("share", reason, fix, _numbers(window))
+
+
+def _log(role: str, bet: str | None, stop: _Stop) -> int | None:
+    fields = {"role": role, "check": stop.check, "reason": stop.reason, "fix": stop.fix, **stop.numbers}
+    if contract.is_bet(bet):
+        fields["bet"] = bet
+    try:
+        return Ledger().append("launch-refused", fields, "governor")["seq"]
+    except (AppendRefused, LedgerBroken, OSError):
+        return None
+
+
+def admit(role: str, bet: str | None = None) -> Admitted | Refused:
+    """Whether `role` may start now, for `bet`; this uses up nothing, since a launch does that by citing the `gate`."""
+    if role not in ROLES:
+        raise ValueError(f"no such role: {role}")
+    now = times.now().replace(microsecond=0)
+    try:
+        events = _events(Ledger())
+        loaded, share, floor = _settings()
+        gate, left = _go(events)
+        _not_paused(events, role, bet)
+        windows = _windows(events, loaded, now)
+        _under_floor(windows, floor)
+        _under_share(windows, share)
+    except _Stop as stop:
+        return Refused(role, bet, stop.check, stop.reason, stop.fix, _log(role, bet, stop))
+    week = _numbers(windows[0])
+    return Admitted(role, bet, gate, left, week["account_used"], week["company_used"], week["reading_seq"], windows)

@@ -27,6 +27,11 @@ def _matches(pattern: re.Pattern, value) -> bool:
     return isinstance(value, str) and pattern.fullmatch(value) is not None
 
 
+def is_bet(value) -> bool:
+    """Whether this is a bet's id."""
+    return _matches(_BET, value)
+
+
 def _is_seq(value, next_seq: int) -> bool:
     return _whole(value) and 1 <= value < next_seq
 

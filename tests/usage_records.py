@@ -14,6 +14,18 @@ OPUS = "claude-opus-5-5"
 SONNET = "claude-sonnet-5-5"
 SETTINGS = {"monthly_price": 120, "reading_max_age_minutes": 120, "usage_day_dirs": []}
 
+# Daniel's first command, with every value the design leaves to them.
+SETTINGS_INIT = (
+    "settings", "init",
+    "--company-share", "0.25",
+    "--team-floor", "60",
+    "--monthly-price", "130",
+    "--plan-name", "a-plan",
+    "--reading-max-age-minutes", "120",
+    "--session-max-minutes", "60",
+    "--session-max-weight", "20",
+)  # fmt: skip
+
 TEAM = "aaaaaaaa-0000-4000-8000-000000000000"
 ALPHA = "bbbbbbbb-0000-4000-8000-000000000000"
 BETA = "cccccccc-0000-4000-8000-000000000000"

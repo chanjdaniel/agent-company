@@ -6,7 +6,7 @@ import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from company import digest, reading, settings, times, treasurer, usage
+from company import digest, governor, reading, settings, times, treasurer, usage
 from company.ledger import AppendRefused, Ledger, LedgerBroken
 
 EXIT_OK = 0
@@ -222,7 +222,7 @@ def _digest(args) -> int:
         return EXIT_OK
     result: treasurer.Share | str
     try:
-        loaded = settings.load()
+        loaded = settings.load(log_tamper=False)
         terms = treasurer.Terms.from_settings(loaded)
         result = _share_at(events, loaded, now)
     except settings.SettingsRefused as refused:
@@ -232,6 +232,89 @@ def _digest(args) -> int:
         result = f"the usage records cannot be read: {error}"
     sys.stdout.write(digest.page(events, result, terms, now))
     return EXIT_OK
+
+
+def _settings_change(change) -> int:
+    """Make a change to the settings by Daniel's command, on a ledger that verifies; `change` returns its event."""
+    if _is_broken(Ledger()):
+        return EXIT_REFUSED
+    try:
+        event = change()
+    except settings.SettingsRefused as refused:
+        # A bad value's fix is the same command with a good one, so only the other refusals name theirs.
+        fix = "" if refused.fix == settings.SET else f" Fix: `{refused.fix}`."
+        print(f"company: refused: {refused}. Nothing was changed.{fix}", file=sys.stderr)
+        return EXIT_REFUSED
+    except (AppendRefused, LedgerBroken) as refused:
+        print(f"company: refused: {refused}. Nothing was changed.", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"Recorded event {event['seq']}: changed {', '.join(event['keys'])}; the new digest is {event['digest']}.")
+    return EXIT_OK
+
+
+def _settings_init(args) -> int:
+    given = {key: settings.parse(getattr(args, key)) for key in _INIT_FLAGS if getattr(args, key) is not None}
+    return _settings_change(lambda: settings.init(given, args.message))
+
+
+def _settings_set(args) -> int:
+    return _settings_change(lambda: settings.set_value(args.key, args.value, args.message))
+
+
+def _launches(count: int) -> str:
+    return f"{count} real launch" if count == 1 else f"{count} real launches"
+
+
+def _go(args) -> int:
+    ledger = Ledger()
+    if _is_broken(ledger):
+        return EXIT_REFUSED
+    fields = {"scope": governor.GO_SCOPE, "message": args.message, "sessions": args.sessions}
+    try:
+        event = ledger.append("go-given", fields, "board")
+    except (AppendRefused, LedgerBroken) as refused:
+        print(f"company: refused: {refused}. No launch was granted.", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"Recorded event {event['seq']}: a go for {_launches(args.sessions)}, on message {args.message}.")
+    return EXIT_OK
+
+
+def _governor_check(args) -> int:
+    answer = governor.admit(args.role, args.bet)
+    if isinstance(answer, governor.Refused):
+        print(f"Refused at the {answer.check} check: {answer.reason}.")
+        print(f"Fix: {answer.fix}.")
+        if answer.seq is None:
+            print("This refusal could not be logged: see `company ledger verify`.")
+        else:
+            print(f"Event {answer.seq} in the ledger records this refusal.")
+        return EXIT_REFUSED
+    print(f"Admitted: {args.role}, on {answer.gate}, with {_launches(answer.launches_left)} left on that word.")
+    shown = {window.reading.window: window for window in answer.windows}
+    for name in reading.WINDOWS:
+        window = shown.get(name)
+        if window is None:
+            print(f"{name}: no reading")
+            continue
+        print(
+            f"{name}: account used {float(window.reading.used_percent):.2f}%, "
+            f"company used {float(window.company_used):.2f}%, from event {window.reading.seq}"
+        )
+    return EXIT_OK
+
+
+# `settings init`'s flags: every one is the setting of the same name, and those with no value in the design are required.
+_INIT_FLAGS = {
+    "company_share": True,
+    "team_floor": True,
+    "monthly_price": True,
+    "plan_name": True,
+    "reading_max_age_minutes": True,
+    "session_max_minutes": True,
+    "session_max_weight": True,
+    "cell_model": False,
+    "auditor_model": False,
+}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -291,6 +374,37 @@ def _parser() -> argparse.ArgumentParser:
     report = commands.add_parser("digest", help="The one page Daniel reads each week. It writes nothing.")
     report.add_argument("--now", help="Report as if it were this UTC time, to check a report's arithmetic.")
     report.set_defaults(run=_digest)
+
+    configuration = commands.add_parser("settings", help="Daniel's settings, which only these commands change.")
+    actions = configuration.add_subparsers(dest="action", required=True)
+
+    init = actions.add_parser("init", help="Write the whole file, and log its digest; also the way back from tamper.")
+    for key, required in _INIT_FLAGS.items():
+        init.add_argument("--" + key.replace("_", "-"), dest=key, required=required)
+    init.add_argument("--message", help="The Discord id of Daniel's word, if there is one.")
+    init.set_defaults(run=_settings_init)
+
+    change = actions.add_parser("set", help="Change one setting, and log its name and the file's new digest.")
+    change.add_argument("key")
+    change.add_argument("value", help="A JSON value, or else plain text.")
+    change.add_argument("--message", help="The Discord id of Daniel's word, if there is one.")
+    change.set_defaults(run=_settings_set)
+
+    words = commands.add_parser("go", help="Daniel's go for real sessions.")
+    actions = words.add_subparsers(dest="action", required=True)
+
+    real = actions.add_parser(governor.GO_SCOPE, help="Grant exactly this many real launches; nothing else grants any.")
+    real.add_argument("--message", required=True, help="The Discord id of Daniel's word.")
+    real.add_argument("--sessions", required=True, type=int, help="How many launches the word grants.")
+    real.set_defaults(run=_go)
+
+    governs = commands.add_parser("governor", help="Whether a session may start.")
+    actions = governs.add_subparsers(dest="action", required=True)
+
+    check = actions.add_parser("check", help="Answer admitted or refused now; a refusal is logged, and an admission writes nothing.")
+    check.add_argument("role", choices=governor.ROLES)
+    check.add_argument("--bet", help="The bet's id, which a cell must name.")
+    check.set_defaults(run=_governor_check)
 
     return parser
 

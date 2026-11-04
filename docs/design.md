@@ -3,7 +3,7 @@
 This is the design the first slice builds, written 2026-11-04.
 It turns the research in [`docs/research/2026-11-02-org-and-profit-loops/`](research/2026-11-02-org-and-profit-loops/report.md) and Daniel's decisions into one document that later work is checked against.
 Where this document and the report or critique differ, this document holds; where this document and Daniel's word differ, Daniel's word holds, and this document is wrong.
-So far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, the test suite with its guards and scan, and CI; nothing else here exists as code yet.
+So far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the test suite with its guards and scan, and CI; nothing else here exists as code yet.
 
 Words used throughout:
 
@@ -220,6 +220,7 @@ An `append-refused` event's writer is the code writer making the append, or `tre
 - `minutes` is a number from zero up.
 - `week_start` is the UTC time a seven-day window opens.
 - `charge_id` is a UUID, one per run of the charge, and `charge_lines` a whole number from 1 up.
+- `sessions` is a whole number of launches, from 1 up.
 - `weight` is a list-price weight, which is an apportioning key and never a cost.
 - On events written through company tools, `session` and `data_hash` are filled in by the tool, not by the agent.
 
@@ -302,6 +303,7 @@ Notes on single kinds:
 - `settings-changed` holds the changed keys' names and the new digest, not their values.
 - `session-note` is a cell's or the probe's free text, so it is kept out of the strategy session's view, since that session never talks to a cell; that view still holds a cell's registrations and proposals, which it reads as data.
 - `session-started`'s `gate` is `go:<seq>` or `schedule`, and a `go-given` word's launches left are its `sessions` minus the `session-started` events citing it.
+- `launch-refused`'s `check` is the governor's step that refused (`ledger`, `settings`, `go`, `pause`, `reading`, `floor` or `share`) or, written by the launcher, its own; its `reason` starts with a code, such as `stale`, followed by a sentence, and `fix` is what to do about it.
 - `resource-charged`'s `line` is a bet's id or `overhead`, and each event is that line's whole window so far, so the newest of a window and line replaces the rest.
   A charge writes its lines one at a time, so each holds the charge's `charge_id` and its count of lines, `charge_lines`, and only a whole charge, one with all its lines in the ledger, is read: a charge stopped part way counts for nothing.
 - `minutes-charged`'s `subject_seq` is the `approval-decided` or `send-confirmed` it charges, and its `action` is a key of `minutes_table`.
@@ -451,6 +453,15 @@ The governor is code.
 `company_share` is 25% by Daniel's decision, and the settings file holds it as the fraction 0.25.
 `team_floor` is the percent of a window above which the company stops, to protect the agent team's own work even when the company's share has room; its value is open and Daniel's to set.
 No value of either is compiled in, and missing settings refuse every launch.
+
+`company governor check <role> [--bet <id>]` answers admitted or refused, with the number of launches left and each window's use, or with the reason and the fix.
+An admission writes nothing and uses no launch: a launch uses one by citing the admission's `gate` in `session-started`, and the oldest word with launches left is the one cited.
+`company go real-sessions --message <Discord id> --sessions <n>` writes a word, needs both flags, and is the only command that does.
+The governor cannot tell a stub from a real `claude`, so every launch it admits needs a word.
+A floor or share refusal's `launch-refused` holds the window's `account_used`, `company_used` and `reading_seq`, and a reading refusal holds the reading's `reading_seq` when there is a reading to cite.
+A ledger that cannot take the event, one broken at its end, still refuses, and the command says it was not logged.
+Step 5 reads only a pause of scope `cell`, since the company-wide pause stops new outside actions and not sessions; a cell with no bet named is refused, since its pause cannot be read.
+The code holds steps 1, 3, 4 with the go word alone, 5, 6, 7 and 8 so far: ticket 07 adds step 2 and step 4's scheduled session, and ticket 18 adds step 9.
 
 **When the account's window use cannot be read, the governor refuses the launch and never assumes room.**
 It cannot be read, and the launch is refused, for each of these reasons:
@@ -745,12 +756,21 @@ A JSON file in Daniel's config directory holds `company_share`, `team_floor`, `m
 - Only `company settings init` and `company settings set` change it, and each logs `settings-changed` as `board` with the new digest.
 - `load()` compares the file with the last recorded digest; a mismatch logs `settings-tamper` and refuses.
 - A session cannot write it, because of the session rules; the digest catches anything that gets past them.
+- `company settings init` takes `--company-share`, `--team-floor`, `--monthly-price`, `--plan-name`, `--reading-max-age-minutes`, `--session-max-minutes` and `--session-max-weight`, all required since this document gives them no value, and optionally `--cell-model`, `--auditor-model` and `--message`.
+  It writes the numbers this document records for the rest, except `weekly_send_cap`, which stays unset until Daniel sets it.
+- `company settings set <key> <value> [--message <id>]` changes one setting, where the value is JSON or else plain text; `init` and `set` refuse a value that cannot be right, and change nothing.
+- A file removed after a change was recorded, or present with none recorded, counts as a mismatch too; with neither, the settings are just missing, and nothing is logged.
+- `set` refuses a file that no longer matches, since it would bless the edit, and `init` refuses a file that still does.
+  So `init` is the way back from a mismatch: it logs `settings-tamper` for the file it replaces, and writes a whole new file that takes nothing from it.
+- `company digest` refuses on a mismatch too, and logs nothing, since it promises to write nothing; the next launch, charge or share logs it.
+- The digest goes in the ledger just before the file moves into place, so a refused append changes nothing, a lock keeps a reader from falling between the two, and a crash between them reads as a mismatch.
 
 ### Numbers set here
 
 Each of these is **Daniel's to change,** with `company settings set`.
 
 **The complaint threshold** (`complaint_threshold`): complaints and spam flags together reaching two in a trailing 30 days, or 2% of outside actions in that time if that is higher, pause new outside actions company-wide until Daniel reviews.
+The file holds it as `count` 2, `days` 30 and `outside_action_fraction` 0.02.
 
 **The portfolio rule's numbers** (`portfolio`), where the file holds each percent as a fraction, such as 0.1 for 10%, and a share above 1 is refused:
 
@@ -835,7 +855,7 @@ No worker reads or writes a secret, Daniel's settings or the real company home, 
 | S1 | Say which jurisdiction's commercial-email law applies to them; answered with CASL as the planning default | With the plan's approval | Ticket 01 |
 | S2 | Say the merge word for each PR, or give the plan-time word | The end of each phase | The next phase |
 | S3 | Create the free paper-trading account and save its key in the path `docs/first-run.md` names, mode 600 | Once phase 4 is merged | Ticket 14 |
-| S4 | Install the merged `company` command, then run `company settings init` with the 25% share, the floor (recommended 60%, and open), the subscription's tier and monthly price, and the models | Once phase 4 is merged | Ticket 14 |
+| S4 | Install the merged `company` command, then run `company settings init` with the 25% share, the floor (recommended 60%, and open), the subscription's tier and monthly price, the reading's maximum age, a session's limits, and the models if not the defaults | Once phase 4 is merged | Ticket 14 |
 | S5 | Check on the account page that extra usage is off, since no code can see or set it, and that the dependencies under "Dependencies to re-check" still say what this document cites | Once phase 4 is merged, and before each go | Ticket 14 |
 | S6 | Record a reading of the account's use from the usage page with `company reading record`, and optionally install the status-line recorder in their interactive session's settings | Once phase 4 is merged, and whenever a launch refuses for a stale reading | Tickets 14 and 21 |
 | S7 | Gate A: give the go with `company go real-sessions`, then run the commands in `docs/first-run.md` | Ticket 13 merged and `company preflight` passing | Ticket 14 |

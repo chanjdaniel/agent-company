@@ -17,6 +17,7 @@ from usage_records import (
     transcript_line,
 )
 
+from company.ledger import Ledger
 from company.usage import Prices
 
 NOW = "2026-10-15T12:00:00Z"
@@ -62,9 +63,9 @@ TAKEN = "2026-10-15T11:00:00Z"
 #   overhead, the probe = 50 / 300 x 4.153846 = 0.692308, so $0.69
 WORKED_WEEK_REPORT = """\
 The company's share at 2026-10-15T12:00:00Z
-seven_day: account used 66.00%: 60.00% read at 2026-10-15T11:00:00Z by hand (event 1), and 6.00% since
+seven_day: account used 66.00%: 60.00% read at 2026-10-15T11:00:00Z by hand (event 2), and 6.00% since
 seven_day: list-price weight 300.000000 of 1320.000000, fraction 0.227273, company used 15.00%
-five_hour: account used 32.00%: 20.00% read at 2026-10-15T11:00:00Z by hand (event 2), and 12.00% since
+five_hour: account used 32.00%: 20.00% read at 2026-10-15T11:00:00Z by hand (event 3), and 12.00% since
 five_hour: list-price weight 100.000000 of 320.000000, fraction 0.312500, company used 10.00%
 Weekly price: $27.69
 Company cost this week: $4.15
@@ -326,6 +327,18 @@ def test_with_no_seven_day_reading_it_refuses_to_print_a_number(company, transcr
     assert "no-reading" in result.stdout
     assert "company reading record" in result.stdout
     assert "$" not in result.stdout
+
+
+def test_changed_settings_are_refused_and_logged(company, worked_week, tmp_path):
+    (tmp_path / "company-config" / "settings.json").write_text("{}")
+
+    result = share(company)
+
+    assert result.returncode == 1
+    assert "company settings init" in result.stderr
+    assert "Nothing was computed" in result.stderr
+    assert result.stdout == ""
+    assert [event["kind"] for event in Ledger().read()][-1] == "settings-tamper"
 
 
 def test_with_no_settings_it_says_nothing_was_computed(company, transcripts):
