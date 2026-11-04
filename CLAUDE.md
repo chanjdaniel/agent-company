@@ -4,8 +4,8 @@ An experiment in agentic business: an organized company of agents collaborating 
 
 ## Status
 
-The project is at its first step: research and planning for the organizational structure and self-improving loops for profit seeking.
-There is no code yet; the research is in `docs/research/2026-11-02-org-and-profit-loops/` (`report.md`, `critique.md`, `decisions.md` and the next-phase `tickets/`).
+The project has its design and is building its first slice: `docs/design.md` is the document later work is checked against, and it records Daniel's decisions.
+There is no code yet; the research behind the design is in `docs/research/2026-11-02-org-and-profit-loops/` (`report.md`, `critique.md`, `decisions.md` and the draft `tickets/`).
 
 ## Conventions
 

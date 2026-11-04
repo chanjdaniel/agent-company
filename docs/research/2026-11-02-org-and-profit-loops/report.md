@@ -1,7 +1,7 @@
 # AgentCompany: organization and self-improving loops for profit
 
 Research report for T188, first written 2026-11-02 and revised the same day from `critique.md` and Daniel's decisions.
-It is meant to move unchanged to `docs/` in `chanjdaniel/agent-company`.
+It now lives in `docs/research/2026-11-02-org-and-profit-loops/` in `chanjdaniel/agent-company`, and `docs/design.md` is the design built from it.
 
 ## Summary
 
