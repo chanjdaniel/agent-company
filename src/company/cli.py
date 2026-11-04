@@ -5,7 +5,7 @@ import json
 import sys
 from datetime import UTC, datetime, timedelta
 
-from company import reading, settings, times, treasurer, usage
+from company import digest, reading, settings, times, treasurer, usage
 from company.ledger import AppendRefused, Ledger, LedgerBroken
 
 EXIT_OK = 0
@@ -88,34 +88,134 @@ def _reading_statusline(args) -> int:
     return EXIT_OK
 
 
+def _report_time(text: str | None) -> datetime | None:
+    """The time a report is as of: `--now`, or the real time; None if `--now` is not a time."""
+    return times.parse_stamp(text) if text is not None else times.now().replace(microsecond=0)
+
+
+def _bad_now() -> int:
+    print("company: --now must be a time like 2026-11-05T09:30:00Z. Nothing was computed.", file=sys.stderr)
+    return EXIT_USAGE
+
+
+def _share_at(events: list[dict], loaded: dict, now: datetime) -> treasurer.Share:
+    """The share as these events and the usage records stand; raises `SettingsRefused`, or `OSError` on unreadable records."""
+    monthly_price = settings.positive_number(loaded, "monthly_price")
+    max_age = settings.positive_number(loaded, "reading_max_age_minutes")
+    records = usage.load(now - timedelta(days=7), settings.day_dirs(loaded))
+    for warning in records.warnings():
+        print(f"company: {warning}", file=sys.stderr)
+    return treasurer.share(events, records, monthly_price, max_age, now)
+
+
 def _treasurer_share(args) -> int:
-    now = times.parse_stamp(args.now) if args.now is not None else times.now().replace(microsecond=0)
+    now = _report_time(args.now)
     if now is None:
-        print("company: --now must be a time like 2026-11-05T09:30:00Z. Nothing was computed.", file=sys.stderr)
-        return EXIT_USAGE
+        return _bad_now()
     ledger = Ledger()
     verification = ledger.verify()
     if not verification.ok:
         print(_broken_report(verification))
         return EXIT_REFUSED
     try:
-        loaded = settings.load()
-        monthly_price = settings.positive_number(loaded, "monthly_price")
-        max_age = settings.positive_number(loaded, "reading_max_age_minutes")
-        day_dirs = settings.day_dirs(loaded)
+        result = _share_at(ledger.read(), settings.load(), now)
     except settings.SettingsRefused as refused:
         print(f"company: refused: {refused}. Nothing was computed.", file=sys.stderr)
         return EXIT_REFUSED
-    try:
-        records = usage.load(now - timedelta(days=7), day_dirs)
     except OSError as error:
         print(f"company: refused: the usage records cannot be read: {error}. Nothing was computed.", file=sys.stderr)
         return EXIT_REFUSED
-    for warning in records.warnings():
-        print(f"company: {warning}", file=sys.stderr)
-    result = treasurer.share(ledger.read(), records, monthly_price, max_age, now)
     sys.stdout.write(treasurer.report(result))
     return EXIT_REFUSED if result.company_cost is None else EXIT_OK
+
+
+def _treasurer_charge(args) -> int:
+    now = _report_time(args.now)
+    if now is None:
+        return _bad_now()
+    ledger = Ledger()
+    verification = ledger.verify()
+    if not verification.ok:
+        print(_broken_report(verification))
+        return EXIT_REFUSED
+    events = ledger.read()
+    try:
+        loaded = settings.load()
+        due = treasurer.minutes_due(events, settings.minutes_table(loaded))
+        result = _share_at(events, loaded, now)
+    except settings.SettingsRefused as refused:
+        print(f"company: refused: {refused}. Nothing was charged.", file=sys.stderr)
+        return EXIT_REFUSED
+    except OSError as error:
+        print(f"company: refused: the usage records cannot be read: {error}. Nothing was charged.", file=sys.stderr)
+        return EXIT_REFUSED
+    lines = treasurer.week_charges_due(result, events)
+    try:
+        for fields in due.charges:
+            ledger.append("minutes-charged", fields, "treasurer")
+        for fields in lines:
+            ledger.append("resource-charged", fields, "treasurer")
+    except (AppendRefused, LedgerBroken) as refused:
+        print(f"company: refused: {refused}. See `company ledger verify`.", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"Charged: decisions in Daniel-minutes, {len(due.charges)}; lines of the week's share, {len(lines)}.")
+    for problem in due.problems:
+        print(f"company: {problem}.", file=sys.stderr)
+    week = result.seven_day
+    if isinstance(week, reading.Unreadable):
+        print(
+            f"company: the week was not charged: {week.reason}: {week.detail}. Fix: `{reading.FIX}`.",
+            file=sys.stderr,
+        )
+    return EXIT_REFUSED if due.problems or isinstance(week, reading.Unreadable) else EXIT_OK
+
+
+def _minutes_correct(args) -> int:
+    ledger = Ledger()
+    verification = ledger.verify()
+    if not verification.ok:
+        print(_broken_report(verification))
+        return EXIT_REFUSED
+    charges = {event["seq"] for event in ledger.read() if event["kind"] == "minutes-charged"}
+    if args.charge not in charges:
+        print(f"company: event {args.charge} is not a minutes charge. Nothing was recorded.", file=sys.stderr)
+        return EXIT_REFUSED
+    fields = {"charge_seq": args.charge, "minutes": args.minutes}
+    if args.reason is not None:
+        fields["reason"] = args.reason
+    try:
+        event = ledger.append("minutes-corrected", fields, "board")
+    except (AppendRefused, LedgerBroken) as refused:
+        print(f"company: refused: {refused}", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"Recorded event {event['seq']}: charge {args.charge} is now {args.minutes:g} minutes.")
+    return EXIT_OK
+
+
+def _digest(args) -> int:
+    now = _report_time(args.now)
+    if now is None:
+        return _bad_now()
+    ledger = Ledger()
+    if not ledger.verify().ok:
+        sys.stdout.write(digest.broken())
+        return EXIT_REFUSED
+    events = ledger.read()
+    if not events:
+        sys.stdout.write(digest.empty(now))
+        return EXIT_OK
+    try:
+        loaded = settings.load()
+        terms = treasurer.Terms.from_settings(loaded)
+        result = _share_at(events, loaded, now)
+    except settings.SettingsRefused as refused:
+        print(f"company: refused: {refused}. Nothing was computed.", file=sys.stderr)
+        return EXIT_REFUSED
+    except OSError as error:
+        print(f"company: refused: the usage records cannot be read: {error}. Nothing was computed.", file=sys.stderr)
+        return EXIT_REFUSED
+    sys.stdout.write(digest.page(events, result, terms, now))
+    return EXIT_OK
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -157,6 +257,25 @@ def _parser() -> argparse.ArgumentParser:
     share = actions.add_parser("share", help="The company's share of each window, the week's cost and each bet's cost.")
     share.add_argument("--now", help="Report as if it were this UTC time, to check a report's arithmetic.")
     share.set_defaults(run=_treasurer_share)
+
+    charge = actions.add_parser(
+        "charge", help="Charge what is owed: each decision's Daniel-minutes, and the open window's share, line by line."
+    )
+    charge.add_argument("--now", help="Charge as if it were this UTC time, to check the arithmetic.")
+    charge.set_defaults(run=_treasurer_charge)
+
+    minutes = commands.add_parser("minutes", help="Daniel's own word on the minutes charged.")
+    actions = minutes.add_subparsers(dest="action", required=True)
+
+    correct = actions.add_parser("correct", help="Replace a charge's minutes in every total.")
+    correct.add_argument("--charge", required=True, type=int, help="The seq of the `minutes-charged` event.")
+    correct.add_argument("--minutes", required=True, type=float)
+    correct.add_argument("--reason")
+    correct.set_defaults(run=_minutes_correct)
+
+    report = commands.add_parser("digest", help="The one page Daniel reads each week. It writes nothing.")
+    report.add_argument("--now", help="Report as if it were this UTC time, to check a report's arithmetic.")
+    report.set_defaults(run=_digest)
 
     return parser
 

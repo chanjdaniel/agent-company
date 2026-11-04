@@ -32,6 +32,27 @@ def positive_number(settings: dict, key: str) -> int | float:
     return value
 
 
+def portfolio_number(settings: dict, key: str) -> int | float:
+    """One of the `portfolio` setting's numbers, which may be zero, as a new bet's dollars are."""
+    portfolio = settings.get("portfolio")
+    value = portfolio.get(key) if isinstance(portfolio, dict) else None
+    if value is None or not _is_amount(value):
+        raise SettingsRefused(f"the setting portfolio.{key} is missing or is not a number from zero up")
+    return value
+
+
+def minutes_table(settings: dict) -> dict[str, int | float]:
+    """What each action charges in Daniel-minutes."""
+    table = settings.get("minutes_table")
+    if not isinstance(table, dict) or not all(_is_amount(value) for value in table.values()):
+        raise SettingsRefused("the setting minutes_table is missing or is not a table of numbers from zero up")
+    return table
+
+
+def _is_amount(value) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int | float) and value >= 0
+
+
 def day_dirs(settings: dict) -> list[str]:
     """The team's `usage/` directories to read, which are optional."""
     value = settings.get("usage_day_dirs", [])

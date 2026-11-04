@@ -12,8 +12,9 @@ import fcntl
 import hashlib
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from company import paths, times
@@ -61,14 +62,18 @@ def _hash(line: bytes) -> str:
 
 
 class Ledger:
-    """The ledger in a company home; `home` defaults to the current one."""
+    """The ledger in a company home; `home` defaults to the current one, and `clock` to the real time.
 
-    def __init__(self, home: Path | None = None, contract: Contract | None = None):
+    No command sets `clock`: it is how a test's fixture writes a ledger with a past.
+    """
+
+    def __init__(self, home: Path | None = None, contract: Contract | None = None, clock: Callable[[], datetime] = times.now):
         self.home = home or paths.home()
         self.path = self.home / "ledger.jsonl"
         self._head_path = self.home / "ledger.head"
         self._lock_path = self.home / "ledger.lock"
         self.contract = contract or Contract.load()
+        self._clock = clock
 
     def append(self, kind: str, fields: dict, writer: str) -> dict:
         """Add one event and return it; raise `AppendRefused`, after logging it, if the contract says no."""
@@ -206,7 +211,7 @@ class Ledger:
         return data.rsplit(b"\n", 2)[-2] + b"\n" if data.endswith(b"\n") else data.rsplit(b"\n", 1)[-1]
 
     def _write(self, kind: str, fields: dict, writer: str, tail: _Tail) -> dict:
-        event = {"seq": tail.seq + 1, "ts": times.stamp(times.now()), "kind": kind, "writer": writer, **fields, "prev": tail.hash}
+        event = {"seq": tail.seq + 1, "ts": times.stamp(self._clock()), "kind": kind, "writer": writer, **fields, "prev": tail.hash}
         line = json.dumps(event, separators=(",", ":"), allow_nan=False).encode()
         if not self._head_path.exists():
             self._write_head(_Tail(0, None))

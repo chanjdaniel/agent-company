@@ -149,6 +149,36 @@ REVENUE = {"amount": "5.00", "currency": "USD", "source": "broker", "record": "r
             {"session": SESSION, "exit": 0, "transcript_path": "p", "transcript_hash": "h", "weight": "lots"},
             "bad-field:weight",
         ),
+        ("minutes-corrected", "board", {"minutes": -1, "charge_seq": 1}, "bad-field:minutes"),
+        ("minutes-corrected", "board", {"minutes": "half", "charge_seq": 1}, "bad-field:minutes"),
+        (
+            "resource-charged",
+            "treasurer",
+            {
+                "week_start": "2026-10-11T00:00:00Z",
+                "line": "overhead",
+                "weight": 1,
+                "fraction": 0.1,
+                "company_used": 1,
+                "cost": 3.6,
+                "reading_seq": 1,
+            },
+            "bad-field:cost",
+        ),
+        (
+            "resource-charged",
+            "treasurer",
+            {
+                "week_start": "2026-10-11",
+                "line": "overhead",
+                "weight": 1,
+                "fraction": 0.1,
+                "company_used": 1,
+                "cost": "3.60",
+                "reading_seq": 1,
+            },
+            "bad-field:week_start",
+        ),
     ],
 )
 def test_a_wrong_event_is_refused_and_logged_without_its_values(append, ledger_file, kind, writer, fields, reason):

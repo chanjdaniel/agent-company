@@ -64,6 +64,8 @@ def _type_holds(type_name: str, value, next_seq: int) -> bool:
             return _matches(_DECIMAL, value)
         case "number":
             return _is_number(value)
+        case "minutes":
+            return _is_number(value) and value >= 0
     raise ValueError(f"the contract names an unknown field type: {type_name}")
 
 

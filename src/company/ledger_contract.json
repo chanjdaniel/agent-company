@@ -12,7 +12,7 @@
     "agents": ["cell:<bet>", "strategy", "auditor", "retro", "probe"]
   },
   "field_types": {
-    "names": {"session": "uuid", "bet": "bet", "message": "discord-id", "amount": "decimal", "weight": "number"},
+    "names": {"session": "uuid", "bet": "bet", "message": "discord-id", "amount": "decimal", "cost": "decimal", "weight": "number", "minutes": "minutes", "week_start": "timestamp"},
     "suffixes": {"_seq": "seq", "_seqs": "seqs", "_at": "timestamp", "_date": "date"}
   },
   "kinds": {

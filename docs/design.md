@@ -214,7 +214,9 @@ An `append-refused` event's writer is the code writer making the append, or `tre
 - A field ending in `_at` is a UTC timestamp like `2026-11-05T09:30:00Z`, and one ending in `_date` is a date like `2026-11-05`.
 - `bet` is a bet's id (lower-case letters, digits and hyphens), and `session` a session's UUID.
 - `message` is the Discord id of Daniel's word, as a string of digits.
-- `amount` is a decimal string, always with `currency`.
+- `amount` is a decimal string, always with `currency`, and `cost` is a decimal string in US dollars.
+- `minutes` is a number from zero up.
+- `week_start` is the UTC time a seven-day window opens.
 - `weight` is a list-price weight, which is an apportioning key and never a cost.
 - On events written through company tools, `session` and `data_hash` are filled in by the tool, not by the agent.
 
@@ -297,7 +299,8 @@ Notes on single kinds:
 - `settings-changed` holds the changed keys' names and the new digest, not their values.
 - `session-note` is a cell's or the probe's free text, so it is kept out of the strategy session's view, since that session never talks to a cell; that view still holds a cell's registrations and proposals, which it reads as data.
 - `session-started`'s `gate` is `go:<seq>` or `schedule`, and a `go-given` word's launches left are its `sessions` minus the `session-started` events citing it.
-- `resource-charged`'s `line` is a bet's id or `overhead`.
+- `resource-charged`'s `line` is a bet's id or `overhead`, and each event is that line's whole window so far, so the newest of a window and line replaces the rest.
+- `minutes-charged`'s `subject_seq` is the `approval-decided` or `send-confirmed` it charges, and its `action` is a key of `minutes_table`.
 - `cell-paused`'s and `cell-resumed`'s `scope` is `cell`, or `outside-actions` for the company-wide pause.
 - `retro-proposal`'s `daniel_only` is set by code from a fixed list of what the proposal changes, never by the session.
 - `promise-recorded` allows `runner` so that a paper period can record the promise of its own end date, and a runner's promise always sets `bet`.
@@ -316,8 +319,14 @@ Notes on single kinds:
 | Dollars | None in this slice; up to $100 for the first real experiment after it, under Q1 | The Treasurer, before any action that costs money | `spend`, from an outside record |
 | Daniel-minutes | 105 a week, under 15 a day | The Treasurer, before an approval is queued | `minutes-charged`, from a fixed table, with Daniel's corrections replacing the estimate |
 
-The minutes table is a setting: a templated approval 0.5, a message review 2, a new public artifact 5.
-A correction (`minutes-corrected`) replaces the estimate in every total.
+The minutes table is a setting, `minutes_table`: `templated-approval` 0.5, `message-review` 2, `new-public-artifact` 5.
+A decided approval charges the action its ask named, whichever way it was decided, and a confirmed outreach send charges `message-review`.
+Minutes count in the week of the decision or send, however late the charge is written.
+A correction (`minutes-corrected`, from `company minutes correct`) replaces the estimate in every total, and the newest correction stands.
+
+`company treasurer charge` writes what is owed, and is safe to run twice: `minutes-charged` for each decision and send with no charge, and `resource-charged` for each line of the open window whose charge has changed.
+It charges only the open window, so a window keeps its last charge, which leaves out any use after that charge.
+It runs by Daniel's command until gate C opens the schedule.
 Real-money spending, when Daniel allows any, goes through a card or account with its own hard limit, never Daniel's main card.
 
 ## Cost and the ladder
@@ -355,6 +364,8 @@ As an illustration only, on an invented $120 monthly price: if the company's wei
 
 The Treasurer computes three bars from the ledger, reports each weekly, and the company's level is the highest bar it clears over a trailing month.
 A trailing month is the four most recent complete seven-day windows.
+The windows are the account's: they step in sevens of days from the reset of the newest seven-day reading that can be true, and with no such reading they step back from the report's time.
+Money counts in a window by its event's `ts`, and a charge by its `week_start`, rounded to the nearest window since a reset read by hand may be a minute off.
 
 **Net revenue** is what each bar is compared with: `revenue` minus `refund` minus `fee`, over the trailing month, all from outside records.
 Dollars spent (`spend`) and the share cost are on the other side of the comparison.
@@ -370,8 +381,29 @@ Bar 2's trial budget is priced as `new_bet_token_share × company_share × weekl
 Bar 3 compares four weeks of revenue with a full month's price, which is slightly strict, and errs towards not claiming the bar.
 The digest reports the bar reached and the margin against the next bar, which is net revenue minus that bar's line.
 
-A bet's margin is its net revenue, minus its share of `company_cost`, minus its dollars spent.
+Three rules keep a bar from being claimed on too little:
+
+- Net revenue equal to a line covers it, but a month with no net revenue clears no bar, even with nothing to cover.
+- A window of the month that holds a `session-started` and no `resource-charged` has an unknown cost, so no bar is claimed, and the margin against bar 1 is shown as "at most".
+- The sums are in US dollars, and `monthly_price` is read as US dollars. Money in another currency has no rate to add it with, so the bar and the bets' margins say which events stopped them, and print no sum.
+
+A bet's margin is its net revenue, minus its share of `company_cost`, minus its dollars spent, over the same trailing month.
+Money with no bet sits on the overhead line, so the lines add up to the company's net revenue less its cost and spending.
 Before money flows, a pre-registered leading indicator stands in for it, counted from the system that records it, never from an agent's report.
+
+### The weekly digest
+
+`company digest` prints the page Daniel reads each week, and writes nothing: the bar, each bet's margin, each resource against its budget, incidents, honesty metrics and pending approvals.
+
+- **Resources:** tokens from the share of each window with a reading against `company_share`, dollars spent in the last seven days, and Daniel-minutes in the last seven days against `daily_minutes × 7`, with a note of any decision not charged yet.
+- **Incidents:** those in the last seven days.
+- **Honesty:** the cells' promises made, kept, broken and open; findings in the last seven days, and those unconfirmed in all; complaints, spam flags and refunds in the last seven days; and the pauses in effect.
+- **Pending approvals:** every `approval-asked` with no `approval-decided`.
+
+A section with nothing to say prints "none", and an empty ledger prints that for every section and exits 0, with or without settings.
+A ledger whose chain is broken gets one line saying so and no numbers, and exits 1.
+A setting the page needs that is missing refuses the whole page, with no value assumed.
+A token window that cannot be read says why on its own line, and the rest of the page still prints.
 
 ## The account reading
 
@@ -460,7 +492,7 @@ The key is read by the paper module from the key file at use, and passed to no s
 
 The schedule is systemd user timers behind a runner that tests replace, installed disabled.
 Only Daniel's `company schedule enable --message <Discord id>` turns it on, and the kill switch undoes it.
-Until then the kill switch's self-test, `company paper tick`, `company treasurer check`, the daily audit sample, the weekly audit pass, the batch, the strategy session and the retro run by Daniel's command.
+Until then the kill switch's self-test, `company paper tick`, `company treasurer check`, `company treasurer charge`, the daily audit sample, the weekly audit pass, the batch, the strategy session and the retro run by Daniel's command.
 
 ## The six loops
 

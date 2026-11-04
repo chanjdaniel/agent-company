@@ -101,7 +101,7 @@ def record_reading(window, used_percent, resets_at, taken_at, source="hand", wri
     return Ledger().append("usage-reading", fields, writer)["seq"]
 
 
-def start_session(session, role, reading_seq, bet=None):
+def start_session(session, role, reading_seq, bet=None, ledger=None):
     """A `session-started` event, which is what makes a session the company's."""
     fields = {
         "session": session,
@@ -115,4 +115,4 @@ def start_session(session, role, reading_seq, bet=None):
     }
     if bet:
         fields["bet"] = bet
-    Ledger().append("session-started", fields, "launcher")
+    (ledger or Ledger()).append("session-started", fields, "launcher")
