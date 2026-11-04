@@ -1,10 +1,12 @@
 """Fixtures for the whole suite, whose guards live in `harness/suite_guard.py`."""
 
+import json
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+import usage_records
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "harness"))
 
@@ -36,3 +38,24 @@ def company():
         return subprocess.run([script, *args], capture_output=True, check=False, text=True, timeout=60, **kwargs)
 
     return run
+
+
+@pytest.fixture
+def transcripts(tmp_path, monkeypatch):
+    """An empty `CLAUDE_CONFIG_DIR` of this test's own, to write transcripts into."""
+    config_dir = tmp_path / "claude-config"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    return usage_records.Transcripts(config_dir / "projects")
+
+
+@pytest.fixture
+def settings(tmp_path):
+    """Write Daniel's settings file with what the share reads, and return a way to change it."""
+
+    def write(**changes):
+        path = tmp_path / "company-config" / "settings.json"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps({**usage_records.SETTINGS, **changes}))
+
+    write()
+    return write

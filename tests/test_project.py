@@ -57,6 +57,16 @@ def test_runtime_state_defaults_outside_the_repository(monkeypatch):
     assert paths.config() == user_home / ".config/agent-company"
 
 
+def test_transcripts_default_to_claude_codes_own_place_and_follow_its_variable(monkeypatch, tmp_path):
+    from company import paths
+
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    assert paths.claude_projects() == Path(os.environ["HOME"]) / ".claude/projects"
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    assert paths.claude_projects() == tmp_path / "projects"
+
+
 def test_runtime_state_follows_its_variables(monkeypatch, tmp_path):
     from company import paths
 

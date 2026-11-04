@@ -335,8 +335,9 @@ The fraction and `company_used` are worked out per window, since the governor en
 - `weekly_price = monthly_price × 12 / 52`.
 - `company_cost = company_used / 100 × weekly_price`, with the seven-day window's `company_used`.
 
-Usage reads `~/.claude/projects/*/*.jsonl` with each session's `subagents/*.jsonl`, and, when a setting names them, the team's exported day files, read-only.
+Usage reads `~/.claude/projects/*/*.jsonl` (under `CLAUDE_CONFIG_DIR` in place of `~/.claude` when that is set) with each session's `subagents/*.jsonl`, and, read-only, the team's exported day files when `usage_day_dirs` lists their `usage/` directories, each holding `<machine>/<day>.jsonl`.
 A reply is one line per request id, wherever it appears, taking each count's largest value.
+A subagent's reply counts to its parent session, the directory its transcript sits under.
 A missing cache lifetime counts as one-hour for a main session and five-minute for a subagent.
 A model with no price is weighed as the most expensive model in the table, with a warning.
 
@@ -375,18 +376,22 @@ Before money flows, a pre-registered leading indicator stands in for it, counted
 ## The account reading
 
 A reading is `{window, used_percent, resets_at, taken_at, source}`, for `seven_day` and, when the account has one, `five_hour`.
+A window opens at its `resets_at` less its length, seven days or five hours.
 
 Sources today:
 
-- `company reading record`, by Daniel's hand from the usage page.
-- `company reading statusline`, a status-line command that reads Claude Code's documented `rate_limits.<window>.used_percentage` and `resets_at` from its input and keeps the reading.
+- `company reading record`, by Daniel's hand from the usage page: `source` is `hand`, and the writer `board`.
+- `company reading statusline`, a status-line command that reads Claude Code's documented `rate_limits.<window>.used_percentage` and `resets_at` from its input and keeps the reading: `source` is `statusline`, and the writer `governor`, since it is code and not Daniel's word.
   The [status-line docs](https://code.claude.com/docs/en/statusline) (read 2026-11-04) say this appears only for subscribers, only after the session's first reply, and that each window may be absent.
+  Claude Code runs a status line as often as after each reply, so the command keeps a window's reading once in five minutes, or at once for a new window, and it never fails the status bar: input it cannot use keeps nothing, and a ledger it cannot write says "(not kept)".
 
 Anything that reads Daniel's sign-in token, or calls an account endpoint with it, is out: it would be a secret and an external API.
 The agent team's tooling holds only list-price weights and no window reading, despite what the critique says.
 
 `current(window)` returns the newest reading, plus the percent the usage records say has been used since, using the weight per percent at the reading.
 A reading has no weight per percent when it reads zero percent, or when the usage records hold no weight in the window up to it, so once any use follows either, it is unusable until a new one is taken.
+A malformed reading is one whose percent is not a number from 0 to 100, whose source is unknown, whose time taken has not come, or which resets no later than it was taken or further off than the window is long.
+The newest reading decides: a malformed one hides any older good one.
 
 ## The governor
 

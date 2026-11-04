@@ -14,10 +14,9 @@ import json
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 
-from company import paths
+from company import paths, times
 from company.contract import Contract
 
 
@@ -59,10 +58,6 @@ class _Tail:
 
 def _hash(line: bytes) -> str:
     return hashlib.sha256(line).hexdigest()
-
-
-def _now() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class Ledger:
@@ -211,7 +206,7 @@ class Ledger:
         return data.rsplit(b"\n", 2)[-2] + b"\n" if data.endswith(b"\n") else data.rsplit(b"\n", 1)[-1]
 
     def _write(self, kind: str, fields: dict, writer: str, tail: _Tail) -> dict:
-        event = {"seq": tail.seq + 1, "ts": _now(), "kind": kind, "writer": writer, **fields, "prev": tail.hash}
+        event = {"seq": tail.seq + 1, "ts": times.stamp(times.now()), "kind": kind, "writer": writer, **fields, "prev": tail.hash}
         line = json.dumps(event, separators=(",", ":"), allow_nan=False).encode()
         if not self._head_path.exists():
             self._write_head(_Tail(0, None))

@@ -7,7 +7,7 @@ The research behind it, with its critique, Daniel's decisions and draft tickets,
 
 ## The code
 
-The first slice is being built, and so far the code holds the `company` command, the ledger and its contract, the test suite and CI.
+The first slice is being built, and so far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share of the subscription, the test suite and CI.
 It is Python 3.13 with no runtime dependency outside the standard library, and needs `uv` to run.
 
 ```sh
@@ -16,6 +16,9 @@ uv run company ledger verify           # check the ledger's hash chain
 uv run company ledger show             # print every event
 uv run company ledger append session-note --writer probe \
   --fields '{"session": "11111111-2222-4333-8444-555555555555", "text": "hello"}'
+uv run company reading record --window seven_day --used-percent 41 \
+  --resets-at 2026-11-08T00:00:00Z     # keep a reading from the usage page
+uv run company treasurer share         # the company's share of each window, and the week's cost
 ```
 
 Runtime state lives outside the repository.

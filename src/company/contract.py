@@ -3,8 +3,10 @@
 import json
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from importlib import resources
+
+from company import times
 
 _NAME = re.compile(r"[a-z0-9][a-z0-9_:-]{0,63}")
 _BET = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
@@ -14,7 +16,6 @@ _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 _DISCORD_ID = re.compile(r"[0-9]{1,32}")
 _DECIMAL = re.compile(r"-?[0-9]+(\.[0-9]+)?")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
-_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 def _whole(value) -> bool:
@@ -27,16 +28,6 @@ def _matches(pattern: re.Pattern, value) -> bool:
 
 def _is_seq(value, next_seq: int) -> bool:
     return _whole(value) and 1 <= value < next_seq
-
-
-def _is_timestamp(value) -> bool:
-    if not isinstance(value, str):
-        return False
-    try:
-        datetime.strptime(value, _TIMESTAMP_FORMAT)
-    except ValueError:
-        return False
-    return True
 
 
 def _is_date(value) -> bool:
@@ -60,7 +51,7 @@ def _type_holds(type_name: str, value, next_seq: int) -> bool:
         case "seqs":
             return isinstance(value, list) and all(_is_seq(item, next_seq) for item in value)
         case "timestamp":
-            return _is_timestamp(value)
+            return isinstance(value, str) and times.parse_stamp(value) is not None
         case "date":
             return _is_date(value)
         case "uuid":
