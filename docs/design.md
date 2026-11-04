@@ -547,7 +547,7 @@ Crypto and prediction markets count as trading under the same rule.
   It feeds a strategy's bars one at a time from the in-sample period, takes its target positions, applies the registered costs itself and records the returns.
   Strategy code runs in its own `bwrap` with no network, no writes and a time limit.
 - **The holdout is never shown to the cell.**
-  The cell names one configuration, once per registration, and the Treasurer runs it on the holdout, then computes the deflated Sharpe ratio (Bailey and Lopez de Prado, 2014) over the trials actually run, the holdout return and the maximum drawdown, from `config-run` records alone.
+  The cell names one configuration, once per registration, and the Treasurer runs it on the holdout, then computes the deflated Sharpe ratio (Bailey and López de Prado, 2014) over the trials actually run, the holdout return and the maximum drawdown, from `config-run` records alone.
   The report allowed the probability of backtest overfitting instead; this slice builds the deflated Sharpe ratio, because it needs only the records and the standard library.
 - **About three months of paper trading.**
   A passing verdict opens a paper period of `paper_days`, with an end date, a promise for that date, and the registration's `max_drawdown` as its drawdown kill.
