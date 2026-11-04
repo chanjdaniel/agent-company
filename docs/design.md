@@ -109,7 +109,11 @@ Each of these can move, and Daniel re-checks them before each go (S5).
   With no key in the environment, such a release would make every company session fail at sign-in, which stops the company and costs nothing, and the launcher would then need whatever flag keeps the sign-in.
 - **The terms.**
   Claude Code's [legal page](https://code.claude.com/docs/en/legal-and-compliance) (read 2026-11-04) says subscription sign-in "is designed to support ordinary use of Claude Code and other native Anthropic applications", and that advertised limits "assume ordinary, individual usage of Claude Code and the Agent SDK".
-  A company of scheduled agents sits at the edge of that wording; Daniel has accepted this as their risk (Q7).
+  The same page says developers building products or services, "including those using the Agent SDK, should use API key authentication", and that this does not "prevent an end user from signing in to the unmodified Claude Code binary with their own Claude subscription".
+  The [Consumer Terms](https://www.anthropic.com/legal/consumer-terms) (effective 2025-10-08, read 2026-11-04), section 3, item 7, restrict access "through automated or non-human means, whether through a bot, script, or otherwise", "Except when you are accessing our Services via an Anthropic API Key or where we otherwise explicitly permit it".
+  A company of scheduled agents sits at the edge of that wording, and the `claude -p` it runs is what these docs call the Agent SDK.
+  Daniel has accepted the "ordinary, individual usage" wording as their risk (Q7).
+  This document draws no legal conclusion from the other sentences, and records them so that S5's re-check sees them.
 
 ### The launcher and its session rules
 
@@ -127,7 +131,7 @@ Rules every session starts under:
   The child keeps only named variables, so a new one is excluded by default, and that list excludes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY` and anything else the scan's list names.
 - **Generated settings.**
   They set `sandbox.enabled`, `sandbox.failIfUnavailable` and `sandbox.allowUnsandboxedCommands: false`, a read boundary (`sandbox.filesystem.denyRead` of the home directory, with the workspace allowed), no network hosts, and permission rules denying `Read`, `Write` and `Edit` outside the workspace.
-  They set no `apiKeyHelper`, no hook and no status line, and the session loads no user-level settings, plugins or MCP servers.
+  They set no `apiKeyHelper`, no hook and no status line, and the session loads no user-level settings, instructions, skills, subagents, plugins, auto memory or MCP servers.
 - **Both layers are needed.**
   The [sandbox docs](https://code.claude.com/docs/en/sandboxing) (read 2026-11-04) say "The sandbox covers shell commands only", and that tools such as `Read`, `Edit`, `Write`, `WebFetch` and `WebSearch` "follow permission rules instead".
   They also say local MCP servers run with full access, which is why the company tools can write the ledger when the agent's shell cannot.
@@ -135,7 +139,17 @@ Rules every session starts under:
 - **A workspace supplies no configuration.**
   The [permission docs](https://code.claude.com/docs/en/permissions) (read 2026-11-04) say a `claude -p` run uses hooks, the `env` block and helper commands from a folder's settings, and connects the servers in its `.mcp.json`, with no trust prompt.
   Hooks and local MCP servers run outside the sandbox, so a file an agent wrote there could escape it in a later session.
-  So the launcher uses `--setting-sources` to load no user, project or local settings (ticket 06 finds the exact form, since the docs list only those three sources), keeps `--strict-mcp-config`, denies writes to `.claude/` and `.mcp.json` in the workspace, and refuses to start a session in a workspace that holds either.
+- **A session's context is only what the launcher gives it.**
+  The [headless docs](https://code.claude.com/docs/en/headless) (read 2026-11-04) say `--bare` skips "hooks, skills, custom commands, subagents, installed plugins, MCP servers, auto memory, and CLAUDE.md", and that without it `claude -p` "discovers and loads them as an interactive session would, including anything configured in the working directory or `~/.claude`".
+  So an instruction file an agent wrote in its workspace could carry instructions into a later session, and Daniel's `~/.claude/CLAUDE.md`, skills, subagents and auto memory would sit beside a cell's goal text and in the Auditor's fresh context.
+  None of these enters a session, from the workspace, a folder above it or `~/.claude`.
+- **How the launcher holds these two rules.**
+  It keeps `--strict-mcp-config`, denies writes to `.claude/`, `.mcp.json`, `CLAUDE.md` and `CLAUDE.local.md` at any depth in the workspace, and refuses to start a session in a workspace that holds any of them, logging `launch-refused`.
+  It loads no user, project or local settings, and turns off the rest, in the form ticket 06 finds.
+  That form is not settled: the docs list only those three sources for `--setting-sources`, do not say it gates instruction files, skills, subagents or auto memory, and advise `--setting-sources user`, which would load what this rule keeps out.
+  The candidates ticket 06 checks, from the [CLI reference](https://code.claude.com/docs/en/cli-reference) and the [environment variables page](https://code.claude.com/docs/en/env-vars) (read 2026-11-04), are `--restricted`, which "loads only managed settings and `--settings`"; `--safe-mode`, under which MCP servers do not load, and the company tools are MCP servers; `--disable-slash-commands`; `CLAUDE_CODE_DISABLE_CLAUDE_MDS`; and `CLAUDE_CODE_DISABLE_AUTO_MEMORY`.
+  **If no documented form does this with the sign-in still working, the launcher refuses every real launch and the builder asks; it never falls back to user settings.**
+  Ticket 06 proves the refusals on the stub, and only Daniel's probe, read in ticket 14, can prove what a real session loads.
 - **Limits.**
   `session_max_minutes` and `session_max_weight` are enforced from the live output, and a session past either has its group stopped and `session-stopped` logged.
 - **At the end,** the launcher logs `session-ended` with the exit, the transcript's path and hash and the session's weight, and copies the transcript into the company home, so that it outlives Claude Code's own clean-up and the audit window can rely on it.
@@ -146,7 +160,7 @@ Rules every session starts under:
 | - | - | - | - |
 | `probe` | The cheapest model | A fixed guardrail script | File tools, shell, one note tool |
 | `cell` | `cell_model` | Its goal text and its own bet's filtered ledger, with no findings | File tools, shell, web read, its company tools |
-| `strategy` | `cell_model` | Goal text, whole ledger with findings removed, rejected list | File tools, web read, memo tool |
+| `strategy` | `cell_model` | Goal text, whole ledger with findings and session notes removed, rejected list | File tools, web read, memo tool |
 | `auditor` | `auditor_model`, which must differ from the audited cell's | Rubric, whole ledger, audited transcripts | Read-only file tools, finding tool |
 | `retro` | `cell_model` | Ledger since the last retro, with findings | Read-only file tools, post-mortem and proposal tools |
 
@@ -160,7 +174,7 @@ The evidence behind this is in the report's section 1.3: under such a prompt, ag
 Agents reach the ledger only through company tools on a local stdio MCP server, one per session.
 The launcher starts it with the role and bet fixed, so the writer is settled when the session starts, which a flag or an environment variable inside a session could not do.
 A tool call that names another writer still writes as the session's own, and a call to a tool outside the role is refused and logged.
-A session's shell cannot write the company home, so it cannot run `company` as anyone else.
+A session's shell cannot write the company home outside its workspace, so it cannot run `company` as anyone else.
 
 ## The ledger
 
@@ -224,7 +238,7 @@ A kind that a later ticket finds it needs joins this table and the contract in t
 | `session-ended` | Sessions | `launcher` | `session`, `exit`, `transcript_path`, `transcript_hash`, `weight` | |
 | `session-stopped` | Sessions | `launcher` | `session`, `reason` | `elapsed_minutes`, `weight` |
 | `session-note` | Sessions | `cell:<bet>`, `probe` | `session`, `text` | |
-| `launch-refused` | Sessions | `governor` | `role`, `check`, `reason`, `fix` | `bet`, `account_used`, `company_used`, `reading_seq` |
+| `launch-refused` | Sessions | `governor`, `launcher` | `role`, `check`, `reason`, `fix` | `bet`, `account_used`, `company_used`, `reading_seq` |
 | `kill-pulled` | Kill switch | `killswitch` | `by`, `reason` | `loop` |
 | `kill-step` | Kill switch | `killswitch` | `step`, `target`, `result` | `detail` |
 | `resumed` | Kill switch | `board` | `kill_seq` | `message` |
@@ -275,11 +289,15 @@ Notes on single kinds:
 - `revenue`, `refund`, `fee` and `spend` need an outside record; this slice has no source for them, so only fixtures write them.
   A chargeback is recorded as a `refund`.
 - `settings-changed` holds the changed keys' names and the new digest, not their values.
+- `session-note` is a cell's or the probe's free text, so it is kept out of the strategy session's view, since that session never talks to a cell; that view still holds a cell's registrations and proposals, which it reads as data.
 - `session-started`'s `gate` is `go:<seq>` or `schedule`, and a `go-given` word's launches left are its `sessions` minus the `session-started` events citing it.
 - `resource-charged`'s `line` is a bet's id or `overhead`.
 - `cell-paused`'s and `cell-resumed`'s `scope` is `cell`, or `outside-actions` for the company-wide pause.
 - `retro-proposal`'s `daniel_only` is set by code from a fixed list of what the proposal changes, never by the session.
-- `promise-recorded` allows `runner` so that a paper period can record the promise of its own end date.
+- `promise-recorded` allows `runner` so that a paper period can record the promise of its own end date, and a runner's promise always sets `bet`.
+  That promise is the code's and not the cell's, and it is kept when `paper-closed` cites the period by the due date.
+  If no tick closed the period by then, the Treasurer logs `promise-checked` with the result `not-run` and tells Daniel in the digest, with no `finding` and no `cell-paused`, the honesty metrics leave it out of the cell's promises, and from ticket 19 on it logs one `incident`.
+- `promise-checked`'s `result` is `kept`, `broken` or `not-run`.
 - `finding` allows `treasurer` so that a check the Treasurer makes itself, such as an overdue promise, can record its finding.
 
 ## The three resources and their budgets
@@ -301,12 +319,13 @@ Real-money spending, when Daniel allows any, goes through a card or account with
 Model cost is the company's share of the subscription's weekly limit times the subscription's price.
 It is a fraction of what Daniel pays, and never a list-price bill.
 
-The share is apportioned from the usage records as follows, over the seven-day window:
+The share is apportioned from the usage records as follows.
+The fraction and `company_used` are worked out per window, since the governor enforces each window with a reading, and the cost comes from the seven-day window only:
 
 - `company_fraction = company_weight / all_weight`, where each weight is the list-price weight of the window's replies.
-- `company_used = company_fraction × account_used_percent`, where `account_used_percent` comes from the account reading.
+- `company_used = company_fraction × account_used_percent`, where `account_used_percent` comes from that window's account reading.
 - `weekly_price = monthly_price × 12 / 52`.
-- `company_cost = company_used / 100 × weekly_price`.
+- `company_cost = company_used / 100 × weekly_price`, with the seven-day window's `company_used`.
 
 Usage reads `~/.claude/projects/*/*.jsonl` with each session's `subagents/*.jsonl`, and, when a setting names them, the team's exported day files, read-only.
 A reply is one line per request id, wherever it appears, taking each count's largest value.
@@ -321,7 +340,7 @@ List-price weights are the apportioning key, and no report calls one a cost.
 A bet's cost is the part of `company_cost` from its sessions' weight.
 Sessions with no bet (strategy, Auditor, retro, probe) are overhead on their own line, and the bars count them.
 
-As an illustration only, on an assumed $200 monthly price: if the company's weight is 300 of a window's 1,500, and the account reads 60% used, then the fraction is 0.2, `company_used` is 12, the weekly price is $46.15, and `company_cost` is $5.54.
+As an illustration only, on an invented $120 monthly price: if the company's weight is 300 of a window's 1,500, and the account reads 60% used, then the fraction is 0.2, `company_used` is 12, the weekly price is $27.69, and `company_cost` is $3.32.
 
 ### The ladder
 
@@ -359,7 +378,7 @@ Anything that reads Daniel's sign-in token, or calls an account endpoint with it
 The agent team's tooling holds only list-price weights and no window reading, despite what the critique says.
 
 `current(window)` returns the newest reading, plus the percent the usage records say has been used since, using the weight per percent at the reading.
-A reading of zero percent has no weight per percent, so once any use follows it, it is unusable until a new one is taken.
+A reading has no weight per percent when it reads zero percent, or when the usage records hold no weight in the window up to it, so once any use follows either, it is unusable until a new one is taken.
 
 ## The governor
 
@@ -387,6 +406,8 @@ It cannot be read, and the launch is refused, for each of these reasons:
 - The newest reading is older than `reading_max_age_minutes`.
 - The reading's window has already reset.
 - The reading is malformed.
+- The reading reads zero percent, and use has followed it.
+- The usage records hold no weight in the window up to the reading, and use has followed it.
 - Reading it raises an error.
 
 Each refusal logs its own reason and names the command that fixes it, `company reading record`.
@@ -426,7 +447,7 @@ The key is read by the paper module from the key file at use, and passed to no s
 
 The schedule is systemd user timers behind a runner that tests replace, installed disabled.
 Only Daniel's `company schedule enable --message <Discord id>` turns it on, and the kill switch undoes it.
-Until then the daily audit sample, the weekly audit pass, the batch, the strategy session and the retro run by Daniel's command.
+Until then the kill switch's self-test, `company paper tick`, `company treasurer check`, the daily audit sample, the weekly audit pass, the batch, the strategy session and the retro run by Daniel's command.
 
 ## The six loops
 
@@ -439,7 +460,7 @@ Pre-registration and the replay gate bind what crosses the company's boundary (m
 - **Improves:** which offers, prices, channels and products a bet uses.
 - **Metric:** contribution margin per experiment: net revenue, minus the bet's model cost, minus outside costs.
 - **Ground truth:** the payment processor's records, the usage records and the account reading; before money flows, the system that counts a pre-registered leading indicator, such as the paper account's profit and loss at the broker.
-- **Decision rule:** each outside-facing experiment is pre-registered before it starts, with its hypothesis, metric, keep and kill thresholds, budgets in all three resources and end date; at the end date the Treasurer evaluates the thresholds, and the result is keep, iterate once, or kill, with no extension without a new registration.
+- **Decision rule:** each outside-facing experiment is pre-registered before it starts, with its hypothesis, metric, keep and kill thresholds, budgets in all three resources and end date; at the end date `company treasurer check` evaluates the thresholds (ticket 18), and the result is keep, iterate once, or kill, with no extension without a new registration.
 - **Cadence:** one to two weeks per outside-facing experiment, at most one live per cell at first, and no cap on internal ones.
 - **Guardrail:** the metric is computed by code the agents cannot edit, refunds and complaints subtract, the honesty loop can veto a keep, and thresholds cannot change after the start.
 
@@ -484,7 +505,7 @@ Pre-registration and the replay gate bind what crosses the company's boundary (m
 - **Protects:** customers, counterparties, platforms and Daniel; it can stop the company.
 - **Metric:** complaints, refund requests and their outcome, platform warnings, spam flags on outreach (counted separately), Auditor findings, and promises made against promises kept.
 - **Ground truth:** what reaches Daniel's own inbox and accounts, recorded by Daniel; `promise-recorded` events checked by the Treasurer when due; the `config-run` and `verdict` records against what a transcript claims.
-- **Decision rule:** a confirmed deception, broken payment promise, fabricated claim in a draft or terms-of-service breach pauses the cell at once and tells Daniel; a check the Treasurer can make itself (an overdue promise, a result in a transcript that no record shows) is confirmed by code, and anything else by Daniel's `company finding confirm`; past the complaint threshold, new outside actions pause company-wide until Daniel reviews.
+- **Decision rule:** a confirmed deception, broken payment promise, fabricated claim in a draft or terms-of-service breach pauses the cell at once and tells Daniel; a check the Treasurer can make itself (an overdue promise a cell made, a result in a transcript that no record shows) is confirmed by code, and anything else by Daniel's `company finding confirm`; past the complaint threshold, new outside actions pause company-wide until Daniel reviews.
 - **Cadence:** Treasurer checks at `company treasurer check`, the Auditor's sample daily and a full pass weekly.
 - **Guardrail:** the Auditor runs fresh on a different Claude model and reports to Daniel only; no cell can read or argue with a finding; every goal text carries the honesty constraints.
 
@@ -550,7 +571,7 @@ Crypto and prediction markets count as trading under the same rule.
   The cell names one configuration, once per registration, and the Treasurer runs it on the holdout, then computes the deflated Sharpe ratio (Bailey and López de Prado, 2014) over the trials actually run, the holdout return and the maximum drawdown, from `config-run` records alone.
   The report allowed the probability of backtest overfitting instead; this slice builds the deflated Sharpe ratio, because it needs only the records and the standard library.
 - **About three months of paper trading.**
-  A passing verdict opens a paper period of `paper_days`, with an end date, a promise for that date, and the registration's `max_drawdown` as its drawdown kill.
+  A passing verdict opens a paper period of `paper_days`, with an end date, a promise for that date, and the registration's `max_drawdown` as its drawdown kill, and the first tick on or after the end date closes it.
   Only code places orders, in `company paper tick`, on the paper host, and the Treasurer reads the account's profit and loss as the cell's metric.
   One strategy holds the paper account at a time in this slice.
 - **Paper results are paper results.**
@@ -572,6 +593,7 @@ Daniel checks and approves the people to contact, reviews the messages, and does
 - **Sourcing.**
   Targets come only from public professional sources, each with a one-line reason the offer fits them and the source it came from.
   The source must show the address published by the person or their organization, with no statement refusing unsolicited messages, since implied consent rests on that (see below).
+  Code checks only that a source and a reason are present, since it cannot read the page, and Daniel checks what the source shows in the batch, when they approve the person.
 - **Cited claims.**
   Every factual claim in a draft cites the ledger or a source the Auditor can check; an uncited one is refused and logged, and a fabricated one is an honesty incident that pauses the cell.
 - **Disclosure.**
@@ -589,7 +611,8 @@ Daniel checks and approves the people to contact, reviews the messages, and does
 ### The commercial-email law
 
 **The law named is Canada's Anti-Spam Legislation (CASL), S.C. 2010, c. 23, with the Electronic Commerce Protection Regulations (CRTC), SOR/2012-36.**
-This is Daniel's answer to S1, taken as a planning default, because it is the stricter of the two laws likely to apply to them.
+This is Daniel's answer to S1, taken as a planning default.
+It is taken as the stricter of the two laws likely to apply to them, which is unverified, so it rests on Daniel's choice and not on a comparison.
 It is a planning default and not legal advice, nothing is sent in this task, and Daniel can change it before the first revenue bet.
 The other likely law is not named here, because no primary source could be found for what it requires.
 
@@ -784,7 +807,8 @@ Read 2026-11-04 unless noted.
 The research's own sources, read 2026-11-02, are listed in `report.md` and `critique.md`.
 
 - Anthropic, "Use the Claude Agent SDK with your Claude plan", https://support.claude.com/articles/15036540
-- Claude Code docs: [legal and compliance](https://code.claude.com/docs/en/legal-and-compliance), [headless](https://code.claude.com/docs/en/headless), [CLI reference](https://code.claude.com/docs/en/cli-reference), [sandboxing](https://code.claude.com/docs/en/sandboxing), [permissions](https://code.claude.com/docs/en/permissions), [status line](https://code.claude.com/docs/en/statusline)
+- Claude Code docs: [legal and compliance](https://code.claude.com/docs/en/legal-and-compliance), [headless](https://code.claude.com/docs/en/headless), [CLI reference](https://code.claude.com/docs/en/cli-reference), [sandboxing](https://code.claude.com/docs/en/sandboxing), [permissions](https://code.claude.com/docs/en/permissions), [status line](https://code.claude.com/docs/en/statusline), [environment variables](https://code.claude.com/docs/en/env-vars)
+- Anthropic, Consumer Terms of Service, effective 2025-10-08, https://www.anthropic.com/legal/consumer-terms
 - Anthropic, Usage Policy, https://www.anthropic.com/legal/aup (read 2026-11-02, through the critique)
 - Canada, An Act to promote the efficiency and adaptability of the Canadian economy (Canada's Anti-Spam Legislation), S.C. 2010, c. 23, https://laws-lois.justice.gc.ca/eng/acts/E-1.6/
 - Canada, Electronic Commerce Protection Regulations (CRTC), SOR/2012-36, https://laws-lois.justice.gc.ca/eng/regulations/SOR-2012-36/FullText.html
