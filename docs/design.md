@@ -52,6 +52,7 @@ These are Daniel's to settle when they arise, and no default in this document or
 | The agent team's floor in the governor | Open; 60% is recommended, and with no value set every launch is refused |
 | Any later change to the 25% share | Open; only Daniel's settings command changes it |
 | Any real trading capital, and its amount | Open; none is in view, and this document carries no figure |
+| Who checks an outside citation | Way (a), recommended, Daniel's word pending at the merge ask: code checks the URL is present, the batch shows it, and Daniel checks it; way (b) is a web read for the Auditor, which would put outside text into the session that audits the cells |
 | The complaint threshold that pauses the company | Open to Daniel's change; the value under "Numbers set here" stands until they do |
 
 Which subscription tier Daniel holds, and its price, are not recorded here: `monthly_price` and `plan_name` are Daniel's settings (S4).
@@ -161,7 +162,7 @@ Rules every session starts under:
 | `probe` | The cheapest model | A fixed guardrail script | File tools, shell, one note tool |
 | `cell` | `cell_model` | Its goal text and its own bet's filtered ledger, with no findings | File tools, shell, web read, its company tools |
 | `strategy` | `cell_model` | Goal text, whole ledger with findings and session notes removed, rejected list | File tools, web read, memo tool |
-| `auditor` | `auditor_model`, which must differ from the audited cell's | Rubric, whole ledger, audited transcripts | Read-only file tools, finding tool |
+| `auditor` | `auditor_model`, which must differ from the audited cell's | Rubric, whole ledger, audited transcripts | Read-only file tools, finding tool, and no web read (recommended, Daniel's word pending at the merge ask) |
 | `retro` | `cell_model` | Ledger since the last retro, with findings | Read-only file tools, post-mortem and proposal tools |
 
 The defaults are `claude-opus-5-5` for `cell_model`, `claude-sonnet-5-5` for `auditor_model`, and `claude-haiku-5-5` for the probe.
@@ -254,7 +255,7 @@ A kind that a later ticket finds it needs joins this table and the contract in t
 | `experiment-verdict` | Venture | `treasurer` | `experiment_seq`, `outcome`, `metric_value`, `positive_signal` | `veto_seq` |
 | `promise-recorded` | Honesty | `cell:<bet>`, `runner` | `promise`, `due_date` | `bet`, `counterparty` |
 | `promise-checked` | Honesty | `treasurer` | `promise_seq`, `result` | `evidence_seqs` |
-| `finding` | Honesty | `auditor`, `treasurer` | `rubric`, `summary`, `evidence` | `bet`, `session` |
+| `finding` | Honesty | `auditor`, `treasurer`, `board` | `rubric`, `summary`, `evidence` | `bet`, `session` |
 | `finding-confirmed` | Honesty | `board`, `treasurer` | `finding_seq` | `message` |
 | `cell-paused` | Honesty | `treasurer` | `scope`, `reason`, `cause_seq` | `bet` |
 | `cell-resumed` | Honesty | `board` | `scope` | `bet`, `message` |
@@ -295,10 +296,11 @@ Notes on single kinds:
 - `cell-paused`'s and `cell-resumed`'s `scope` is `cell`, or `outside-actions` for the company-wide pause.
 - `retro-proposal`'s `daniel_only` is set by code from a fixed list of what the proposal changes, never by the session.
 - `promise-recorded` allows `runner` so that a paper period can record the promise of its own end date, and a runner's promise always sets `bet`.
-  That promise is the code's and not the cell's, and it is kept when `paper-closed` cites the period by the due date.
-  If no tick closed the period by then, the Treasurer logs `promise-checked` with the result `not-run` and tells Daniel in the digest, with no `finding` and no `cell-paused`, the honesty metrics leave it out of the cell's promises, and from ticket 19 on it logs one `incident`.
+  That promise is the code's and not the cell's, so the honesty metrics leave every runner's promise out of the cell's promises, and it is kept when `paper-closed` cites the period by the due date.
+  If no tick closed the period by then, whenever a later tick closes it, the Treasurer logs `promise-checked` with the result `not-run` and tells Daniel in the digest, with no `finding` and no `cell-paused`, and from ticket 19 on it logs one `incident`.
 - `promise-checked`'s `result` is `kept`, `broken` or `not-run`.
 - `finding` allows `treasurer` so that a check the Treasurer makes itself, such as an overdue promise, can record its finding.
+  It allows `board` so that Daniel can record a fabricated claim they find in the batch, with `company finding record`, which also writes `finding-confirmed`.
 
 ## The three resources and their budgets
 
@@ -471,7 +473,7 @@ Pre-registration and the replay gate bind what crosses the company's boundary (m
 - **Ground truth:** `experiment-verdict` events and the Treasurer's margins, which themselves rest on the outside records above.
 - **Decision rule:** the strategy session writes up to three memos a week, each with a hypothesis, the cheapest possible test, its budgets in all three resources and a pre-registered threshold; the Treasurer's check refuses an uncited memo or a re-proposal with no new evidence; the portfolio rule ranks the rest; Daniel admits each new bet in the batch.
 - **Cadence:** weekly.
-- **Guardrail:** a citation is a ledger `seq` that exists or an outside URL, which the Auditor checks since the code cannot read it; the memo's author session never runs its bet's first experiment; the rejected list stops re-proposal.
+- **Guardrail:** a citation is a ledger `seq` that exists or an outside URL; code checks that a URL is present, since it cannot read one, the batch shows it, and Daniel checks it when they decide the memo (recommended, Daniel's word pending at the merge ask); the memo's author session never runs its bet's first experiment; the rejected list stops re-proposal.
 
 ### Portfolio loop
 
@@ -595,7 +597,9 @@ Daniel checks and approves the people to contact, reviews the messages, and does
   The source must show the address published by the person or their organization, with no statement refusing unsolicited messages, since implied consent rests on that (see below).
   Code checks only that a source and a reason are present, since it cannot read the page, and Daniel checks what the source shows in the batch, when they approve the person.
 - **Cited claims.**
-  Every factual claim in a draft cites the ledger or a source the Auditor can check; an uncited one is refused and logged, and a fabricated one is an honesty incident that pauses the cell.
+  Every factual claim in a draft cites the ledger or an outside source, and an uncited one is refused and logged.
+  Code checks that an outside source is present, since it cannot read one, the batch shows it, and Daniel checks it when they review the message (recommended, Daniel's word pending at the merge ask).
+  A fabricated claim is an honesty incident that pauses the cell, whether the Auditor finds it from the ledger or Daniel records it with `company finding record`.
 - **Disclosure.**
   Every draft says the work is done by AI agents under Daniel's supervision, as Anthropic's usage policy requires of agents that face people.
 - **Daniel sends.**
@@ -650,6 +654,7 @@ The gap is known and accepted, and it is revisited at each retro.
 
 - Its rubric is false statements, broken promises, a result the records do not show, and a rule broken.
 - It has read-only file tools and only its finding tool, and sees the rubric, the whole ledger and the audited transcripts.
+- It has no web read, so it checks a citation to the ledger and not an outside URL, which Daniel checks in the batch (recommended, Daniel's word pending at the merge ask).
 - Its findings go only to Daniel's digest and the ledger; no cell has them in its ledger view.
 - A confirmed finding pauses the cell, and only Daniel's `company cell resume` resumes it.
 - Its daily sample and weekly full pass are schedule jobs, so they run only once gate C opens; until then they run by Daniel's command.
