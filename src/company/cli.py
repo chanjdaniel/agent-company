@@ -93,8 +93,8 @@ def _report_time(text: str | None) -> datetime | None:
     return times.parse_stamp(text) if text is not None else times.now().replace(microsecond=0)
 
 
-def _bad_now(outcome: str = "Nothing was computed") -> int:
-    print(f"company: --now must be a time like 2026-11-05T09:30:00Z. {outcome}.", file=sys.stderr)
+def _bad_now() -> int:
+    print("company: --now must be a time like 2026-11-05T09:30:00Z. Nothing was computed.", file=sys.stderr)
     return EXIT_USAGE
 
 
@@ -136,9 +136,7 @@ def _treasurer_share(args) -> int:
 
 
 def _treasurer_charge(args) -> int:
-    now = _report_time(args.now)
-    if now is None:
-        return _bad_now("Nothing was charged")
+    now = times.now().replace(microsecond=0)
     ledger = Ledger()
     if _is_broken(ledger):
         return EXIT_REFUSED
@@ -276,7 +274,6 @@ def _parser() -> argparse.ArgumentParser:
     charge = actions.add_parser(
         "charge", help="Charge what is owed: each decision's Daniel-minutes, and the open window's share, line by line."
     )
-    charge.add_argument("--now", help="Charge as if it were this UTC time, to check the arithmetic.")
     charge.set_defaults(run=_treasurer_charge)
 
     minutes = commands.add_parser("minutes", help="Daniel's own word on the minutes charged.")

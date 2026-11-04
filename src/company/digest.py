@@ -86,9 +86,10 @@ def _bar(ladder: treasurer.Ladder) -> list[str]:
     return [*lines, f"{name}: {_dollars(ladder.margin)} (its line is {_dollars(ladder.bar_lines[bar])})"]
 
 
-def _bet_line(name: str, figures: treasurer.Figures) -> str:
+def _bet_line(name: str, figures: treasurer.Figures, at_most: bool) -> str:
+    margin = f"at most {_dollars(figures.margin)}" if at_most else _dollars(figures.margin)
     return (
-        f"{name}: margin {_dollars(figures.margin)} (net revenue {_dollars(figures.net)}, "
+        f"{name}: margin {margin} (net revenue {_dollars(figures.net)}, "
         f"share cost {_dollars(figures.cost)}, dollars spent {_dollars(figures.spent)})"
     )
 
@@ -96,12 +97,14 @@ def _bet_line(name: str, figures: treasurer.Figures) -> str:
 def _bets(events: list[dict], ladder: treasurer.Ladder) -> list[str]:
     if ladder.foreign:
         return _cannot_compute(ladder.foreign)
+    # A window's unknown cost could belong to any line, and can only lower a margin.
+    at_most = bool(ladder.uncharged)
     lines = [
-        _bet_line(f"{bet} (closed)" if closed else bet, ladder.lines.get(bet, treasurer.Figures()))
+        _bet_line(f"{bet} (closed)" if closed else bet, ladder.lines.get(bet, treasurer.Figures()), at_most)
         for bet, closed in treasurer.bets(events, ladder.lines).items()
     ]
     overhead = ladder.lines.get(treasurer.OVERHEAD, treasurer.Figures())
-    return lines if overhead.is_zero else [*lines, _bet_line(treasurer.OVERHEAD, overhead)]
+    return lines if overhead.is_zero else [*lines, _bet_line(treasurer.OVERHEAD, overhead, at_most)]
 
 
 def _token_line(name: str, found, terms: treasurer.Terms) -> str:

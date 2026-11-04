@@ -14,7 +14,8 @@ _CELL_WRITER = "cell:<bet>"
 _CELL_PREFIX = "cell:"
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _DISCORD_ID = re.compile(r"[0-9]{1,32}")
-_DECIMAL = re.compile(r"-?[0-9]+(\.[0-9]+)?")
+# From zero up: a refund written as -5.00 would add to net revenue, since refunds are subtracted.
+_DECIMAL = re.compile(r"[0-9]+(\.[0-9]+)?")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 

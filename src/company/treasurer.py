@@ -11,13 +11,14 @@ OVERHEAD = "overhead"
 CURRENCY = "USD"
 BARS = {0: "Running", 1: "Own share", 2: "Self-funding", 3: "Whole subscription"}
 TOP_BAR = 3
-SEND_ACTION = "message-review"
+SEND_ACTION = "message-send"
 WEEK = timedelta(days=7)
 _MONTH_WEEKS = 4
 _WEEKS_PER_YEAR = 52
 _MONTHS_PER_YEAR = 12
 CELL_PREFIX = "cell:"
 _MONEY_FIELDS = {"revenue": "revenue", "refund": "refunds", "fee": "fees", "spend": "spent"}
+_SESSION_ENDS = ("session-ended", "session-stopped")
 
 
 @dataclass(frozen=True)
@@ -142,8 +143,8 @@ class Terms:
     def from_settings(cls, loaded: dict) -> "Terms":
         return cls(
             _exact(settings.positive_number(loaded, "monthly_price")),
-            _exact(settings.positive_number(loaded, "company_share")),
-            _exact(settings.portfolio_number(loaded, "new_bet_token_share")),
+            _exact(settings.fraction(loaded, "company_share")),
+            _exact(settings.portfolio_fraction(loaded, "new_bet_token_share")),
             _exact(settings.portfolio_number(loaded, "new_bet_dollars")),
             _exact(settings.positive_number(loaded, "daily_minutes")),
         )
@@ -296,19 +297,43 @@ def _sum(lines) -> Figures:
     return Figures(*(sum((getattr(line, name) for line in lines), Fraction(0)) for name in fields))
 
 
-def _uncharged_windows(events: list[dict], month: Span) -> tuple[datetime, ...]:
-    """Each window of the month with a session started or ended after its newest charge, or with no charge at all.
+@dataclass(frozen=True)
+class _SessionRun:
+    """A session as its events tell it: `end` is None until one says it has gone, since it may still be replying."""
 
-    A charge is the window so far, so that session's use is in no charge, and the window's cost is unknown.
+    start: datetime
+    end: datetime | None
+    last_seq: int
+
+    def ran_in(self, window: Span) -> bool:
+        return self.start < window.end and (self.end is None or self.end >= window.start)
+
+
+def _session_runs(events: list[dict]) -> list[_SessionRun]:
+    by_session: dict[str, list[dict]] = defaultdict(list)
+    for event in _of_kind(events, "session-started", *_SESSION_ENDS):
+        by_session[event["session"]].append(event)
+    runs = []
+    for found in by_session.values():
+        times_seen = [_when(event) for event in found]
+        gone = any(event["kind"] in _SESSION_ENDS for event in found)
+        runs.append(_SessionRun(min(times_seen), max(times_seen) if gone else None, max(event["seq"] for event in found)))
+    return runs
+
+
+def _uncharged_windows(events: list[dict], month: Span) -> tuple[datetime, ...]:
+    """Each window of the month that a session ran in without having ended before its newest charge.
+
+    A charge is the window so far, so what that session did after it is in no charge, and the window's cost is unknown.
     """
     newest: dict[int, int] = {}
     for (index, _), charge in _charges_by_window(events, month).items():
         newest[index] = max(newest.get(index, 0), charge["seq"])
+    runs = _session_runs(events)
     uncharged = []
     for index in range(_MONTH_WEEKS):
         window = Span(month.start + index * WEEK, month.start + (index + 1) * WEEK)
-        sessions = _of_kind(events, "session-started", "session-ended", "session-stopped")
-        if any(window.holds(session) and session["seq"] > newest.get(index, 0) for session in sessions):
+        if any(run.ran_in(window) and (run.end is None or run.last_seq > newest.get(index, 0)) for run in runs):
             uncharged.append(window.start)
     return tuple(uncharged)
 
@@ -401,22 +426,26 @@ def minutes_total(events: list[dict], span: Span) -> Fraction:
 
 
 def week_charges_due(result: Share, events: list[dict]) -> list[dict]:
-    """A `resource-charged` event for each line of the open window whose charge has changed; each is the window so far."""
+    """A `resource-charged` event for each line of the open window whose charge has changed; each is the window so far.
+
+    A session started or ended since the newest charge writes every line, changed or not: with no reply of its own it
+    moves no number, and only a charge after it can show that it was counted.
+    """
     week = result.seven_day
     if not isinstance(week, WindowShare) or result.cost_lines is None or result.line_weights is None:
         return []
     week_start = times.stamp(week.reading.window_start)
-    newest = {
-        event["line"]: (event["weight"], event["cost"])
-        for event in _of_kind(events, "resource-charged")
-        if event["week_start"] == week_start
-    }
+    charges = [event for event in _of_kind(events, "resource-charged") if event["week_start"] == week_start]
+    newest = {event["line"]: (event["weight"], event["cost"]) for event in charges}
+    newest_seq = max((event["seq"] for event in charges), default=0)
+    window = Span(week.reading.window_start, week.reading.resets_at)
+    recount = any(run.ran_in(window) and run.last_seq > newest_seq for run in _session_runs(events))
     due = []
     for line in sorted(result.line_weights):
         weight = result.line_weights[line]
         share_of_all = weight / week.all_weight if week.all_weight else Fraction(0)
         cost = f"{float(result.cost_lines[line]):.6f}"
-        if newest.get(line) != (float(weight), cost):
+        if recount or newest.get(line) != (float(weight), cost):
             due.append(
                 {
                     "week_start": week_start,

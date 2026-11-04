@@ -1,5 +1,8 @@
 """Builders for a ledger with a past: events whose `ts` is the fixture's time, and not the clock's."""
 
+import subprocess
+import sys
+
 from usage_records import at
 
 from company.ledger import Ledger
@@ -22,9 +25,20 @@ DIGEST_SETTINGS = {
     "monthly_price": 130,
     "company_share": 0.25,
     "daily_minutes": 15,
-    "minutes_table": {"templated-approval": 0.5, "message-review": 2, "new-public-artifact": 5},
+    "minutes_table": {"templated-approval": 0.5, "message-review": 2, "message-send": 0.5, "new-public-artifact": 5},
     "portfolio": {"new_bet_token_share": 0.1, "new_bet_dollars": 0},
 }
+
+
+def charge_at(when: str) -> subprocess.CompletedProcess:
+    """`company treasurer charge` with the report's clock at `when`: the command has no flag for it, since it writes for good."""
+    code = (
+        "import sys\n"
+        "from company import cli, times\n"
+        f"times.now = lambda: times.parse_stamp({when!r})\n"
+        "sys.exit(cli.main(['treasurer', 'charge']))\n"
+    )
+    return subprocess.run([sys.executable, "-c", code], check=False, capture_output=True, text=True)
 
 
 def ledger_at(when: str) -> Ledger:

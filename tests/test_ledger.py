@@ -1,11 +1,15 @@
 """The ledger, through the `company` command as a person runs it."""
 
+import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from company.ledger import Ledger
 
 SESSION = "11111111-2222-4333-8444-555555555555"
 NOTE = {"session": SESSION, "text": "hello"}
@@ -464,3 +468,91 @@ def test_a_value_json_cannot_hold_is_refused(company_home):
     with pytest.raises(AppendRefused):
         ledger.append("session-note", {**NOTE, "text": object()}, "probe")
     assert ledger.verify().ok
+
+
+@pytest.mark.parametrize("kind", ["revenue", "refund", "fee", "spend"])
+def test_money_below_zero_is_refused(append, ledger_file, kind):
+    # Finding 26: a refund written as -5.00, as many payment exports do, would add to net revenue.
+    fields = {"amount": "-5.00", "currency": "USD", "source": "fixture", "record": "record-1"}
+
+    result = append(kind, "treasurer", fields)
+
+    assert result.returncode == 1
+    assert events(ledger_file)[-1]["reason"] == "bad-field:amount"
+
+
+def test_a_cost_below_zero_is_refused(append, notes, ledger_file):
+    notes(1)
+    fields = {"week_start": "2026-10-04T00:00:00Z", "line": "overhead", "weight": 1.0, "fraction": 0.1, "company_used": 1.0, "cost": "-1.00", "reading_seq": 1}
+
+    result = append("resource-charged", "treasurer", fields)
+
+    assert result.returncode == 1
+    assert events(ledger_file)[-1]["reason"] == "bad-field:cost"
+
+
+def test_money_of_zero_is_taken(append):
+    fields = {"amount": "0.00", "currency": "USD", "source": "fixture", "record": "record-1"}
+
+    assert append("fee", "treasurer", fields).returncode == 0
+
+
+def _head_writes_during(action, monkeypatch):
+    calls = []
+    real_fsync, real_replace = os.fsync, Path.replace
+
+    def fsync(fd):
+        calls.append(("fsync", os.path.basename(os.readlink(f"/proc/self/fd/{fd}"))))
+        real_fsync(fd)
+
+    def replace(self, target):
+        calls.append(("rename", Path(target).name))
+        return real_replace(self, target)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(Path, "replace", replace)
+    action()
+    return calls
+
+
+def test_the_head_record_reaches_the_disk_around_its_rename(company_home, monkeypatch):
+    # Finding 29: after a power cut, a head left empty or far behind would refuse every append, and no command repairs that.
+    ledger = Ledger()
+    ledger.append("session-note", NOTE, "probe")
+
+    calls = _head_writes_during(lambda: ledger.append("session-note", NOTE, "probe"), monkeypatch)
+
+    assert calls == [
+        ("fsync", "ledger.jsonl"),
+        ("fsync", "ledger.head.tmp"),
+        ("rename", "ledger.head"),
+        ("fsync", company_home.name),
+    ]
+
+
+def _with_a_line_added_by_hand(ledger_file):
+    lines = ledger_file.read_bytes().splitlines()
+    last = json.loads(lines[-1])
+    added = {**last, "seq": last["seq"] + 1, "prev": hashlib.sha256(lines[-1]).hexdigest(), "text": "added by hand"}
+    with ledger_file.open("ab") as file:
+        file.write(json.dumps(added, separators=(",", ":")).encode() + b"\n")
+
+
+def test_one_line_added_by_hand_passes_as_a_crashs_lag(company, notes, ledger_file):
+    # Finding 30: a known limit, which the design says: the head may lag by one, so this reads as a crash.
+    notes(3)
+    _with_a_line_added_by_hand(ledger_file)
+
+    assert company("ledger", "verify").returncode == 0
+
+
+def test_an_edit_of_the_last_line_during_a_lag_passes(company, notes, ledger_file, company_home):
+    # Finding 30: the same limit, since the head does not yet cover that line.
+    notes(3)
+    head = company_home / "ledger.head"
+    before = head.read_text()
+    notes(1)
+    head.write_text(before)
+    rewrite(ledger_file, edit_field(-1))
+
+    assert company("ledger", "verify").returncode == 0

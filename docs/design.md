@@ -189,7 +189,9 @@ Each line holds `seq`, `ts`, `kind`, `writer`, the kind's fields, and `prev`, th
 - Other refusals with no kind of their own (a second verdict, a repeated proposal with no new evidence) also log `append-refused`, with a short reason code.
 - A chain alone cannot see lines removed from its end, so a head record beside the ledger holds the last line's `seq` and hash.
   It may lag by one line after a crash between the two writes; any other difference is a broken ledger, and an append to a ledger whose end is broken is refused with nothing written.
-- The chain and the head record find an edit by hand; someone rewriting the whole ledger and the head record together would pass, which is why the session rules keep agents from writing the company home.
+- The chain and the head record find an edit by hand, with limits that the session rules cover by keeping agents from writing the company home.
+  Someone rewriting the whole ledger and the head record together would pass.
+  So would one line added at the end with a good `seq` and `prev`, or an edit of the last line while the head lags, since each reads as a crash's lag, and the next append heals it.
 
 ### Writers
 
@@ -214,7 +216,7 @@ An `append-refused` event's writer is the code writer making the append, or `tre
 - A field ending in `_at` is a UTC timestamp like `2026-11-05T09:30:00Z`, and one ending in `_date` is a date like `2026-11-05`.
 - `bet` is a bet's id (lower-case letters, digits and hyphens), and `session` a session's UUID.
 - `message` is the Discord id of Daniel's word, as a string of digits.
-- `amount` is a decimal string, always with `currency`, and `cost` is a decimal string in US dollars.
+- `amount` is a decimal string from zero up, always with `currency`, and `cost` is a decimal string from zero up in US dollars, so a refund is a positive `amount` of kind `refund`.
 - `minutes` is a number from zero up.
 - `week_start` is the UTC time a seven-day window opens.
 - `weight` is a list-price weight, which is an apportioning key and never a cost.
@@ -319,14 +321,16 @@ Notes on single kinds:
 | Dollars | None in this slice; up to $100 for the first real experiment after it, under Q1 | The Treasurer, before any action that costs money | `spend`, from an outside record |
 | Daniel-minutes | 105 a week, under 15 a day | The Treasurer, before an approval is queued | `minutes-charged`, from a fixed table, with Daniel's corrections replacing the estimate |
 
-The minutes table is a setting, `minutes_table`: `templated-approval` 0.5, `message-review` 2, `new-public-artifact` 5.
-A decided approval charges the action its ask named, whichever way it was decided, and a confirmed outreach send charges `message-review`.
+The minutes table is a setting, `minutes_table`: `templated-approval` 0.5, `message-review` 2, `message-send` 0.5, `new-public-artifact` 5, each Daniel's to change.
+A decided approval charges the action its ask named, whichever way it was decided, and a confirmed outreach send charges `message-send`.
+So a draft's ask names `message-review`, and one message reviewed and sent costs 2.5 minutes, while a draft refused at review costs 2.
 Minutes count in the week of the decision or send, however late the charge is written.
 A correction (`minutes-corrected`, from `company minutes correct`) replaces the estimate in every total, and the newest correction stands.
 
-`company treasurer charge` writes what is owed, and is safe to run twice: `minutes-charged` for each decision and send with no charge, and `resource-charged` for each line of the open window whose charge has changed.
-It charges only the open window, so to count a window whole it must run after that window's last session and before its reset; a session started or ended after a window's newest charge leaves the window's cost unknown.
-It runs by Daniel's command until gate C opens the schedule.
+`company treasurer charge` writes what is owed, and is safe to run twice: `minutes-charged` for each decision and send with no charge, and `resource-charged` for each line of the open window whose charge has changed, or for every line of it when a session has started or ended since its newest charge.
+It charges only the open window, so to count a window whole it must run after that window's last session has ended and before its reset; a session that ran in a window and has no end before that window's newest charge leaves the window's cost unknown.
+It has no flag to set the time it charges at, since what it writes stands for good.
+It runs by Daniel's command until gate C opens the schedule, and then at each session's end and shortly before the newest reading's reset, since a plain daily timer would often miss a window's last session.
 Real-money spending, when Daniel allows any, goes through a card or account with its own hard limit, never Daniel's main card.
 
 ## Cost and the ladder
@@ -384,7 +388,8 @@ The digest reports the bar reached and the margin against the next bar, which is
 Three rules keep a bar from being claimed on too little:
 
 - Net revenue equal to a line covers it, but a month with no net revenue clears no bar, even with nothing to cover.
-- A window of the month with a session started or ended after its newest `resource-charged`, or with none, has an unknown cost, so no bar is claimed, and the margin against the next bar is shown as "at most".
+- A window of the month that a session ran in, without that session having ended before the window's newest `resource-charged`, has an unknown cost, so no bar is claimed, and the margin against the next bar and each bet's margin are shown as "at most".
+  A session with no end event counts as still running, in every window from its start on.
 - The sums are in US dollars, and `monthly_price` is read as US dollars.
   Money in another currency has no rate to add it with, so the bar and the bets' margins say which events stopped them, and print no sum; the digest's dollars line does the same for spending in another currency alone.
 
@@ -441,7 +446,7 @@ The governor is code.
 8. For each window with a reading, `company_used < company_share × 100`.
 9. The bet's token budget for the week has room (from ticket 18 on).
 
-`company_share` is 25% by Daniel's decision.
+`company_share` is 25% by Daniel's decision, and the settings file holds it as the fraction 0.25.
 `team_floor` is the percent of a window above which the company stops, to protect the agent team's own work even when the company's share has room; its value is open and Daniel's to set.
 No value of either is compiled in, and missing settings refuse every launch.
 
@@ -745,7 +750,7 @@ Each of these is **Daniel's to change,** with `company settings set`.
 
 **The complaint threshold** (`complaint_threshold`): complaints and spam flags together reaching two in a trailing 30 days, or 2% of outside actions in that time if that is higher, pause new outside actions company-wide until Daniel reviews.
 
-**The portfolio rule's numbers** (`portfolio`):
+**The portfolio rule's numbers** (`portfolio`), where the file holds each percent as a fraction, such as 0.1 for 10%, and a share above 1 is refused:
 
 | Setting | Value | Meaning |
 | - | - | - |

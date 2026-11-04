@@ -4,6 +4,7 @@ import re
 
 import pytest
 from ledger_history import (
+    DIGEST_SETTINGS,
     LAST_FEW_DAYS,
     MONTH_DAY,
     NOW,
@@ -18,7 +19,7 @@ from ledger_history import (
     seven_day_reading,
     week_charge,
 )
-from usage_records import ALPHA, OPUS, TEAM, start_session, transcript_line
+from usage_records import ALPHA, OPUS, TEAM, end_session, start_session, transcript_line
 
 from company.ledger import Ledger
 
@@ -108,6 +109,7 @@ def test_an_admitted_bet_with_nothing_yet_is_listed_at_zero(company):
 def test_a_closed_bet_with_nothing_in_the_month_drops_off_and_one_with_money_says_closed(company):
     reading = seven_day_reading()
     start_session(ALPHA, "cell", reading, bet="quiet", ledger=ledger_at("2026-08-01T00:00:00Z"))
+    end_session(ALPHA, ledger_at("2026-08-01T00:00:00Z"))
     event("bet-closed", {"bet": "quiet", "reason": "r"}, "treasurer")
     money("spend", "2.00", bet="spent")
     event("bet-closed", {"bet": "spent", "reason": "r"}, "treasurer")
@@ -341,3 +343,39 @@ def test_a_digest_over_a_broken_chain_says_so_at_the_top_and_prints_no_numbers(c
     assert not re.search(r"\d", result.stdout)
     assert "$" not in result.stdout
     assert "## " not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("changed", "named"),
+    [
+        ({"company_share": 25}, "company_share"),
+        ({"company_share": 1.5}, "company_share"),
+        ({"company_share": 0}, "company_share"),
+        ({"company_share": True}, "company_share"),
+        ({"portfolio": {"new_bet_token_share": 10, "new_bet_dollars": 0}}, "portfolio.new_bet_token_share"),
+        ({"portfolio": {"new_bet_token_share": -0.1, "new_bet_dollars": 0}}, "portfolio.new_bet_token_share"),
+    ],
+)
+def test_a_share_that_is_not_a_fraction_refuses_the_page_and_names_it(company, settings, changed, named):
+    # Finding 27: 25 for 25% would make bar 2's trial line 10 x 25 x 30 x 4 = $30,000, and a share of 2500%.
+    settings(**{**DIGEST_SETTINGS, **changed})
+    seven_day_reading()
+
+    result = company("digest", "--now", NOW)
+
+    assert result.returncode == 1
+    assert named in result.stderr
+    assert "fraction" in result.stderr
+    assert "Nothing was computed" in result.stderr
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [{"company_share": 1}, {"portfolio": {"new_bet_token_share": 0, "new_bet_dollars": 0}}, {"portfolio": {"new_bet_token_share": 1, "new_bet_dollars": 0}}],
+)
+def test_a_share_at_the_ends_of_its_range_is_taken(company, settings, changed):
+    settings(**{**DIGEST_SETTINGS, **changed})
+    seven_day_reading()
+
+    assert company("digest", "--now", NOW).returncode == 0

@@ -32,13 +32,33 @@ def positive_number(settings: dict, key: str) -> int | float:
     return value
 
 
+def fraction(settings: dict, key: str) -> int | float:
+    """A share of a budget, as a fraction, so that 25 written for 25% is refused and not taken a hundred times too large."""
+    value = settings.get(key)
+    if value is None or not _is_amount(value) or not 0 < value <= 1:
+        raise SettingsRefused(f"the setting {key} is missing or is not a fraction above 0 and up to 1, like 0.25 for 25%")
+    return value
+
+
 def portfolio_number(settings: dict, key: str) -> int | float:
     """One of the `portfolio` setting's numbers, which may be zero, as a new bet's dollars are."""
-    portfolio = settings.get("portfolio")
-    value = portfolio.get(key) if isinstance(portfolio, dict) else None
-    if value is None or not _is_amount(value):
+    value = _portfolio_value(settings, key)
+    if not _is_amount(value):
         raise SettingsRefused(f"the setting portfolio.{key} is missing or is not a number from zero up")
     return value
+
+
+def portfolio_fraction(settings: dict, key: str) -> int | float:
+    """One of the `portfolio` setting's shares, as a fraction, which may be zero."""
+    value = _portfolio_value(settings, key)
+    if not _is_amount(value) or value > 1:
+        raise SettingsRefused(f"the setting portfolio.{key} is missing or is not a fraction from 0 to 1, like 0.1 for 10%")
+    return value
+
+
+def _portfolio_value(settings: dict, key: str):
+    portfolio = settings.get("portfolio")
+    return portfolio.get(key) if isinstance(portfolio, dict) else None
 
 
 def minutes_table(settings: dict) -> dict[str, int | float]:

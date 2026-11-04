@@ -28,6 +28,7 @@ uv run company digest                  # the one page to read each week
 The share, the charge and a digest of a ledger with events read `settings.json` in Daniel's config directory, and refuse without it, since no value is compiled in.
 No command writes that file yet, so for now it is written by hand.
 The share reads `monthly_price` and `reading_max_age_minutes`, the charge also `minutes_table`, and the digest also `company_share`, `daily_minutes` and the `portfolio` setting's `new_bet_token_share` and `new_bet_dollars`.
+The two shares are fractions, such as 0.25 for 25%, and a number above 1 is refused.
 
 Runtime state lives outside the repository.
 The company home, `~/.local/state/agent-company/` or `COMPANY_HOME`, holds the ledger, and will hold session workspaces and the replay set.

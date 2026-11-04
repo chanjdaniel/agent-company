@@ -17,7 +17,7 @@ from ledger_history import (
     seven_day_reading,
     week_charge,
 )
-from usage_records import ALPHA, start_session
+from usage_records import ALPHA, end_session, start_session
 
 # The worked month, on a $130 monthly price, so a weekly price of 130 x 12 / 52 = $30.
 #
@@ -280,3 +280,98 @@ def test_a_digest_writes_nothing_to_the_ledger(company, month):
     assert company("digest", "--now", NOW).returncode == 0
 
     assert ledger_at(MONTH_DAY).path.read_bytes() == before
+
+
+def test_a_session_running_on_past_its_windows_last_charge_and_reset_claims_no_bar(company):
+    # Finding 23: its replies after the charge are in no charge, though no event of it falls after the charge in that window.
+    reading = seven_day_reading()
+    start_session(ALPHA, "cell", reading, bet="alpha", ledger=ledger_at(WEEK_4))
+    week_charge(WEEK_4, "1.00", reading)
+    money("revenue", "40.00")
+    end_session(ALPHA, ledger_at(LAST_FEW_DAYS))
+
+    text = bar_section(company)
+
+    assert "Bar reached: 0" in text
+    assert f"the window opening {WEEK_4}" in text
+
+
+def test_a_session_with_no_end_claims_no_bar(company):
+    # Finding 23: a launcher that died writes no end, so the session may still be replying.
+    reading = seven_day_reading()
+    start_session(ALPHA, "cell", reading, bet="alpha", ledger=ledger_at(WEEK_4))
+    week_charge(WEEK_4, "1.00", reading)
+    money("revenue", "40.00")
+
+    text = bar_section(company)
+
+    assert "Bar reached: 0" in text
+    assert f"the window opening {WEEK_4}" in text
+
+
+def test_a_session_running_right_through_a_window_claims_no_bar_for_it(company):
+    # Finding 23: no event of the session falls in the window opening WEEK_3 at all.
+    reading = seven_day_reading()
+    start_session(ALPHA, "cell", reading, bet="alpha", ledger=ledger_at(WEEK_2))
+    week_charge(WEEK_3, "1.00", reading)
+    money("revenue", "40.00")
+    end_session(ALPHA, ledger_at(WEEK_4))
+
+    text = bar_section(company)
+
+    assert "Bar reached: 0" in text
+    assert f"the window opening {WEEK_3}" in text
+
+
+def test_a_session_that_ended_before_a_later_windows_charge_leaves_that_window_counted(company):
+    # It began in the window before, whose charge came first, so only that window is unknown.
+    reading = seven_day_reading()
+    week_charge(WEEK_3, "1.00", reading)
+    start_session(ALPHA, "cell", reading, bet="alpha", ledger=ledger_at(WEEK_3))
+    end_session(ALPHA, ledger_at(WEEK_4))
+    week_charge(WEEK_4, "1.00", reading)
+    money("revenue", "40.00")
+
+    text = bar_section(company)
+
+    assert f"the window opening {WEEK_3}" in text
+    assert f"the window opening {WEEK_4}" not in text
+
+
+def test_a_session_gone_before_the_month_does_not_touch_it(company):
+    reading = seven_day_reading()
+    before = ledger_at("2026-08-01T00:00:00Z")
+    start_session(ALPHA, "cell", reading, bet="alpha", ledger=before)
+    end_session(ALPHA, before)
+    money("revenue", "40.00")
+
+    assert "Bar reached: 2 (Self-funding)" in bar_section(company)
+
+
+def test_a_bets_margin_reads_at_most_when_a_session_is_uncounted(company):
+    # Finding 25: the session after the charge has a cost the $1 leaves out, so $39 can only be too high.
+    reading = seven_day_reading()
+    week_charge(WEEK_4, "1.00", reading, line="alpha")
+    money("revenue", "40.00", bet="alpha")
+    start_session(ALPHA, "cell", reading, bet="alpha", ledger=ledger_at(WEEK_4))
+
+    result = company("digest", "--now", NOW)
+
+    assert result.returncode == 0, result.stderr
+    assert section(result.stdout, "Bets").splitlines() == [
+        "alpha: margin at most $39.00 (net revenue $40.00, share cost $1.00, dollars spent $0.00)"
+    ]
+
+
+def test_a_bets_margin_is_plain_when_every_session_is_counted(company):
+    reading = seven_day_reading()
+    start_session(ALPHA, "cell", reading, bet="alpha", ledger=ledger_at(WEEK_4))
+    end_session(ALPHA, ledger_at(WEEK_4))
+    week_charge(WEEK_4, "1.00", reading, line="alpha")
+    money("revenue", "40.00", bet="alpha")
+
+    result = company("digest", "--now", NOW)
+
+    assert section(result.stdout, "Bets").splitlines() == [
+        "alpha: margin $39.00 (net revenue $40.00, share cost $1.00, dollars spent $0.00)"
+    ]

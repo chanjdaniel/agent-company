@@ -116,3 +116,9 @@ def start_session(session, role, reading_seq, bet=None, ledger=None):
     if bet:
         fields["bet"] = bet
     (ledger or Ledger()).append("session-started", fields, "launcher")
+
+
+def end_session(session, ledger=None):
+    """A `session-ended` event; the launcher writes one when a session's process has gone."""
+    fields = {"session": session, "exit": 0, "transcript_path": "p", "transcript_hash": "h", "weight": 1.0}
+    (ledger or Ledger()).append("session-ended", fields, "launcher")

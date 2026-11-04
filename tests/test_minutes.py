@@ -8,6 +8,7 @@ from ledger_history import (
     RESETS,
     TAKEN,
     ask,
+    charge_at,
     decide,
     event,
     ledger_at,
@@ -15,12 +16,24 @@ from ledger_history import (
     section,
     seven_day_reading,
 )
-from usage_records import ALPHA, OPUS, PROBE, TEAM, start_session, transcript_line
+from usage_records import (
+    ALPHA,
+    BETA,
+    OPUS,
+    PROBE,
+    TEAM,
+    end_session,
+    start_session,
+    transcript_line,
+)
 
 from company import cli
 from company.ledger import Ledger, LedgerBroken
 
 pytestmark = pytest.mark.usefixtures("digest_settings")
+
+SESSIONS_END = "2026-10-13T12:00:00Z"
+AFTER_THE_RESET = "2026-10-19T12:00:00Z"
 
 
 def events_of(kind):
@@ -28,7 +41,7 @@ def events_of(kind):
 
 
 def charge(company, now=NOW):
-    return company("treasurer", "charge", "--now", now)
+    return charge_at(now)
 
 
 def minutes_line(company, now=NOW):
@@ -37,15 +50,19 @@ def minutes_line(company, now=NOW):
     return next(line for line in section(result.stdout, "Resources").splitlines() if line.startswith("Daniel-minutes"))
 
 
-def sent_draft():
-    """A send Daniel confirmed, of a draft that the cell of bet `alpha` wrote; returns its seq."""
+def drafted():
+    """A draft that the cell of bet `alpha` wrote; returns its seq."""
     target = event(
         "target-proposed", {"contact": "someone@example.com", "organization": "Example", "reason": "r", "source": "s"}, "cell:alpha"
     )
-    draft = event(
+    return event(
         "draft-proposed", {"target_seq": target, "body": "b", "claims": [], "disclosure": "d", "unsubscribe": "u"}, "cell:alpha"
     )
-    return event("send-confirmed", {"draft_seq": draft, "sent_at": LAST_FEW_DAYS}, "board")
+
+
+def sent_draft():
+    """A send Daniel confirmed, of a draft that the cell of bet `alpha` wrote; returns its seq."""
+    return event("send-confirmed", {"draft_seq": drafted(), "sent_at": LAST_FEW_DAYS}, "board")
 
 
 def test_a_decided_approval_charges_its_action_from_the_table(company):
@@ -81,7 +98,7 @@ def test_an_undecided_approval_charges_nothing(company):
     assert events_of("minutes-charged") == []
 
 
-def test_an_outreach_send_charges_a_message_review_to_the_cell_that_wrote_it(company):
+def test_an_outreach_send_charges_its_own_small_action_to_the_cell_that_wrote_it(company):
     seven_day_reading()
     sent = sent_draft()
 
@@ -89,7 +106,29 @@ def test_an_outreach_send_charges_a_message_review_to_the_cell_that_wrote_it(com
 
     assert result.returncode == 0, result.stderr
     [charged] = events_of("minutes-charged")
-    assert (charged["action"], charged["minutes"], charged["subject_seq"], charged["bet"]) == ("message-review", 2, sent, "alpha")
+    assert (charged["action"], charged["minutes"], charged["subject_seq"], charged["bet"]) == ("message-send", 0.5, sent, "alpha")
+
+
+def test_one_message_reviewed_and_sent_costs_its_review_and_its_send_once_each(company):
+    # Finding 34: 2 for the review at its decision, and 0.5 for the send, so 2.5 and not 2 + 2.
+    seven_day_reading()
+    draft = drafted()
+    decide(ask(draft, action="message-review", minutes=2, bet="alpha"))
+    event("send-confirmed", {"draft_seq": draft, "sent_at": LAST_FEW_DAYS}, "board")
+
+    charge(company)
+
+    assert [e["action"] for e in events_of("minutes-charged")] == ["message-review", "message-send"]
+    assert minutes_line(company) == "Daniel-minutes: 2.5 of 105 in the last seven days"
+
+
+def test_a_refused_draft_still_costs_its_review(company):
+    seven_day_reading()
+    decide(ask(drafted(), action="message-review", minutes=2, bet="alpha"), decision="refused")
+
+    charge(company)
+
+    assert minutes_line(company) == "Daniel-minutes: 2 of 105 in the last seven days"
 
 
 def test_charging_twice_charges_once(company):
@@ -104,13 +143,13 @@ def test_charging_twice_charges_once(company):
 
 
 def test_the_digest_totals_the_charges_against_the_weeks_budget(company):
-    # 0.5 for the templated approval, 2 for the send, and 15 x 7 = 105 for the week's budget.
+    # 0.5 for the templated approval, 0.5 for the send, and 15 x 7 = 105 for the week's budget.
     seven_day_reading()
     decide(ask(1))
     sent_draft()
     charge(company)
 
-    assert minutes_line(company) == "Daniel-minutes: 2.5 of 105 in the last seven days"
+    assert minutes_line(company) == "Daniel-minutes: 1 of 105 in the last seven days"
 
 
 def test_a_correction_replaces_the_estimate_in_the_total(company):
@@ -285,15 +324,22 @@ def test_a_bad_minutes_table_refuses_and_charges_nothing(company, settings, tabl
 #   alpha:    fraction 100 / 500 = 0.2, company_used 12%, cost 7.20 / 2 = $3.60
 #   overhead: the same.
 @pytest.fixture
-def worked_week(transcripts):
+def running_week(transcripts):
     reading = seven_day_reading()
-    start_session(ALPHA, "cell", reading, bet="alpha")
-    start_session(PROBE, "probe", reading)
+    start_session(ALPHA, "cell", reading, bet="alpha", ledger=ledger_at(LAST_FEW_DAYS))
+    start_session(PROBE, "probe", reading, ledger=ledger_at(LAST_FEW_DAYS))
     day = "2026-10-13T10:00:00Z"
     transcripts.session(TEAM, transcript_line(TEAM, "r1", day, model=OPUS, output=15_000_000))
     transcripts.session(ALPHA, transcript_line(ALPHA, "r2", day, model=OPUS, output=5_000_000))
     transcripts.session(PROBE, transcript_line(PROBE, "r3", day, model=OPUS, output=5_000_000))
     return reading
+
+
+@pytest.fixture
+def worked_week(running_week):
+    end_session(ALPHA, ledger_at(SESSIONS_END))
+    end_session(PROBE, ledger_at(SESSIONS_END))
+    return running_week
 
 
 def test_the_week_is_charged_line_by_line_from_the_share(company, worked_week):
@@ -348,6 +394,71 @@ def test_a_charged_week_reaches_the_ladder_once_its_window_is_complete(company, 
     assert "Net revenue: $10.00" in text
 
 
+def test_a_charge_counts_a_session_that_ended_with_no_number_changed(company, running_week):
+    # Finding 24: the end changes no weight or cost, yet it needs a charge after it for the window to be counted.
+    money("revenue", "10.00", when="2026-10-14T09:00:00Z")
+    charge(company)
+    end_session(ALPHA, ledger_at("2026-10-14T10:00:00Z"))
+    end_session(PROBE, ledger_at("2026-10-14T10:00:00Z"))
+
+    result = charge(company)
+
+    assert result.returncode == 0, result.stderr
+    assert len(events_of("resource-charged")) == 4
+    digest = company("digest", "--now", AFTER_THE_RESET)
+    assert "Bar reached: 1 (Own share)" in section(digest.stdout, "Bar")
+    assert "No bar is claimed" not in digest.stdout
+
+
+def test_a_charge_counts_a_session_that_never_replied(company, worked_week):
+    money("revenue", "10.00", when="2026-10-14T09:00:00Z")
+    charge(company)
+    start_session(BETA, "cell", worked_week, bet="alpha", ledger=ledger_at("2026-10-14T10:00:00Z"))
+    end_session(BETA, ledger_at("2026-10-14T10:00:00Z"))
+
+    charge(company)
+
+    digest = company("digest", "--now", AFTER_THE_RESET)
+    assert "Bar reached: 1 (Own share)" in section(digest.stdout, "Bar")
+
+
+def test_charging_again_while_a_session_runs_writes_once_and_claims_nothing(company, running_week):
+    money("revenue", "10.00", when="2026-10-14T09:00:00Z")
+    charge(company)
+    charge(company)
+
+    assert len(events_of("resource-charged")) == 2
+    assert "No bar is claimed" in company("digest", "--now", AFTER_THE_RESET).stdout
+
+
+def test_a_session_outside_the_open_window_does_not_make_a_charge_write(company, worked_week):
+    before = ledger_at("2026-10-01T00:00:00Z")
+    charge(company)
+    start_session(BETA, "cell", worked_week, ledger=before)
+    end_session(BETA, before)
+
+    charge(company)
+
+    assert len(events_of("resource-charged")) == 2
+
+
+def test_the_charge_takes_no_time_since_an_old_one_would_lower_a_window_for_good(company, transcripts, worked_week):
+    # Finding 28.
+    transcripts.session(
+        ALPHA,
+        transcript_line(ALPHA, "r2", "2026-10-13T10:00:00Z", model=OPUS, output=5_000_000),
+        transcript_line(ALPHA, "r4", "2026-10-15T11:30:00Z", model=OPUS, output=2_500_000),
+    )
+    charge(company, "2026-10-15T12:00:00Z")
+    written = len(events_of("resource-charged"))
+
+    result = company("treasurer", "charge", "--now", "2026-10-15T11:10:00Z")
+
+    assert result.returncode == 2
+    assert "--now" in result.stderr
+    assert len(events_of("resource-charged")) == written
+
+
 def test_a_week_that_cannot_be_read_is_said_and_the_minutes_are_still_charged(company):
     decided = ledger_at(LAST_FEW_DAYS).append(
         "usage-reading",
@@ -365,17 +476,6 @@ def test_a_week_that_cannot_be_read_is_said_and_the_minutes_are_still_charged(co
     assert events_of("resource-charged") == []
 
 
-def test_a_charge_at_a_time_that_is_no_time_charges_nothing_and_says_so(company):
-    seven_day_reading()
-    decide(ask(1))
-
-    result = company("treasurer", "charge", "--now", "yesterday")
-
-    assert result.returncode == 2
-    assert "Nothing was charged" in result.stderr
-    assert events_of("minutes-charged") == []
-
-
 def _refuse_appends(*_args, **_kwargs):
     raise LedgerBroken("the ledger's end does not match its head record")
 
@@ -385,7 +485,7 @@ def test_a_charge_stopped_part_way_says_so_and_that_running_it_again_is_safe(mon
     decide(ask(1))
     monkeypatch.setattr(Ledger, "append", _refuse_appends)
 
-    assert cli.main(["treasurer", "charge", "--now", NOW]) == 1
+    assert cli.main(["treasurer", "charge"]) == 1
 
     message = capsys.readouterr().err
     assert "The charge stopped there" in message

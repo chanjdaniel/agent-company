@@ -3,8 +3,9 @@
 Each line holds `seq`, `ts`, `kind`, `writer`, the kind's fields and `prev`, the hash of the line before.
 A hash chain alone cannot see lines removed from its end, so a head record beside the ledger holds the
 last line's `seq` and hash; it may lag the ledger by one line, after a crash between the two writes.
-The chain and the head find an edit made by hand; they cannot find someone rewriting the whole ledger and
-the head together, which the session rules keep agents from doing.
+The chain and the head find an edit made by hand, with limits the session rules cover by keeping agents out of
+the company home: they cannot find someone rewriting the whole ledger and the head together, and since the head
+may lag, one line added with a good `seq` and `prev`, or an edit of the last line during a lag, reads as that crash.
 """
 
 import contextlib
@@ -215,21 +216,31 @@ class Ledger:
         line = json.dumps(event, separators=(",", ":"), allow_nan=False).encode()
         if not self._head_path.exists():
             self._write_head(_Tail(0, None))
-        fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        try:
-            remaining = memoryview(line + b"\n")
-            while remaining:
-                remaining = remaining[os.write(fd, remaining) :]
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        _write_and_flush(self.path, os.O_APPEND, line + b"\n")
         self._write_head(_Tail(event["seq"], _hash(line)))
         return event
 
     def _write_head(self, head: _Tail) -> None:
+        """Replace the head record so that a power cut leaves the old one or the new one, each on the disk."""
         temporary = self._head_path.with_suffix(".head.tmp")
-        temporary.write_text(json.dumps({"seq": head.seq, "hash": head.hash}))
+        _write_and_flush(temporary, os.O_TRUNC, json.dumps({"seq": head.seq, "hash": head.hash}).encode())
         temporary.replace(self._head_path)
+        directory = os.open(self.home, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+
+def _write_and_flush(path: Path, mode: int, data: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | mode, 0o600)
+    try:
+        remaining = memoryview(data)
+        while remaining:
+            remaining = remaining[os.write(fd, remaining) :]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _parse(line: bytes) -> dict | None:
