@@ -115,7 +115,7 @@ def _note(tools, text):
 
 
 def _try(how, target):
-    """Do what one line of the probe's script says, which a sandbox would have stopped; what it read, for the output."""
+    """Do what one line of the probe's script says, which a sandbox would have stopped; what it answered, for the output."""
     if how == "the Write tool, write the word probe to":
         Path(target).write_text("probe\n")
         return ""
@@ -124,19 +124,40 @@ def _try(how, target):
     return subprocess.run(["/bin/sh", "-c", target], capture_output=True, text=True, check=False).stdout
 
 
+def _call(session, identifier, tool, inputs, answer):
+    """One tool call and its answer, as a session's saved output holds them."""
+    block = {"type": "tool_use", "id": identifier, "name": tool, "input": inputs}
+    _reply(session, {"request": identifier, "output": 1, "content": [block]})
+    print(json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": identifier, "content": answer}]}}), flush=True)
+
+
+_TOOLS = {"Bash, run exactly": ("Bash", "command"), "the Write tool, write the word probe to": ("Write", "file_path"), "the Read tool, read": ("Read", "file_path")}
+
+
 def _probe_actions(step, session, tools):
-    """Play the probe's script as a session would: `succeed` is done and said, `lie` is done and denied, `claim` is said and not done, `skip` is neither."""
-    succeed, lie, claim, skip = (set(step.get(name, ())) for name in ("succeed", "lie", "claim", "skip"))
+    """Play the probe's script as a session would, and first what should work, unless `controls` says it does not.
+
+    `succeed` is done and said, `lie` is done and denied, `claim` is said and not done, `skip` is called and not said, `untried` is said refused with no call.
+    """
+    succeed, lie, claim, skip, untried = (set(step.get(name, ())) for name in ("succeed", "lie", "claim", "skip", "untried"))
+    dead = not step.get("controls", True)
     for number, found in enumerate(_ACTION.finditer(_prompt)):
-        name = found["name"]
-        if name in skip:
+        name, how, target = found["name"], found["how"], found["target"]
+        tool, key = _TOOLS[how]
+        if name.startswith("allowed-"):
+            _call(session, f"probe-{number}", tool, {key: target}, "denied" if dead else _try(how, target))
             continue
-        # Nothing here may reach a network, so what a session would have reached is only said.
-        if name in succeed | lie and "network" not in name:
-            _reply(session, {"request": f"probe-{number}", "output": 1, "text": _try(found["how"], found["target"]) or "done"})
-        _note(tools, f"PROBE {name} {'succeeded' if name in succeed | claim else 'refused'}")
+        if name not in untried:
+            done = name in succeed | lie
+            # Nothing here may reach a network, so what a session would have reached is only printed.
+            answer = "denied" if not done else "reached" if "network" in name else _try(how, target)
+            _call(session, f"probe-{number}", tool, {key: target}, answer)
+        if name not in skip:
+            _note(tools, f"PROBE {name} {'succeeded' if name in succeed | claim else 'refused'}")
     if step.get("instructions", True):
-        _note(tools, f"PROBE instructions {step.get('copied', 'none')}")
+        copied = step.get("copied", "none")
+        Path("instructions-seen.txt").write_text(copied + "\n")
+        _call(session, "probe-copied", "Write", {"file_path": "instructions-seen.txt", "content": copied}, "")
 
 
 def _play(step, session, tools):
@@ -153,6 +174,10 @@ def _play(step, session, tools):
             for pattern in step["patterns"]:
                 for path in sorted(Path(os.path.expandvars(pattern)).parent.glob(Path(pattern).name)):
                     _reply(session, {"request": f"echo-{path.name}", "output": 1, "text": path.read_text()})
+        case "shell-of-action":
+            # A call of the wrong tool, naming what one line of the script names.
+            target = next(found["target"] for found in _ACTION.finditer(_prompt) if found["name"] == step["action"])
+            _call(session, "wrong-tool", "Bash", {"command": f"echo {target}"}, "denied")
         case "reply-file":
             _reply(session, {"request": f"file-{step['path']}", "output": 1, "text": Path(step["path"]).read_text(), "where": step["where"]})
         case "wait-as-told":

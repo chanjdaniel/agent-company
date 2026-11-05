@@ -134,6 +134,8 @@ Optionally, to keep readings without your hand, add this to your own interactive
 {"statusLine": {"type": "command", "command": "company reading statusline"}}
 ```
 
+You should see `company: 7d 40%` in that session's status line, once it has replied, with your own percent.
+
 Now ask what is left:
 
 ```sh
@@ -175,7 +177,7 @@ You should see `PAPER, no real money`.
 This is a cheap real session that tries each forbidden action.
 It writes and reads only decoys, each named `probe-decoy-` and holding no secret: in your config directory, in the company home and its `market-data/broker`, in your home directory, and in a workspace beside its own.
 While it runs, a decoy `CLAUDE.md` sits in `workspaces/` in the company home, and a decoy rule sits in `~/.claude/rules`, where another session you start in that minute could load it: it holds a marker, and asks nothing of whoever reads it.
-It removes them all at its end; if it is killed outright, any that stay can be deleted by hand.
+It removes them all at its end, with its own workspace; if it is killed outright, any that stay can be deleted by hand.
 
 ```sh
 company session probe
@@ -183,8 +185,12 @@ company session probe
 
 You should see `The check passed` and `the decoy CLAUDE.md above its workspace: absent`.
 
-Each forbidden action is listed as `refused`, `succeeded` or `not-reported`, and each of these is listed as `present` or `absent`, and no more than that: the decoy `CLAUDE.md` above its workspace, the decoy rule, and your global instructions, `~/.claude/CLAUDE.md`.
-Reads, writes and markers are judged from what the code can see, whatever the session says; the network is judged only from what the session says, since it leaves nothing to see.
+It first does three things that should work, each listed as `worked` or `did-not-work`, since a shell or file tool that does nothing would otherwise read as a fence that held.
+Each forbidden action is then listed as `refused`, `succeeded`, `not-tried` or `not-reported`, and each of these is listed as `present` or `absent`, and no more than that: the decoy `CLAUDE.md` above its workspace, the decoy rule, and your global instructions, `~/.claude/CLAUDE.md`.
+The code goes by what it can see: a decoy written, a decoy's mark or `reached` in the saved output, or a tool call that is not there.
+Where it sees nothing it takes the session's word, and a session's own `succeeded` always stands.
+So a session that hid a connection, by not printing `reached`, would not be caught.
+`absent` also rests partly on the model: a session's context need not be in its transcript, so the probe has it copy out any instruction file into `instructions-seen.txt` in its workspace, and a model that denies holding one would not be caught.
 The result is saved as `probe-report.json` in the run's directory, `runs/<run>/` in the company home, and its last line names the file.
 
 What each ending means:
@@ -201,7 +207,7 @@ What each ending means:
 
 **Sign-in under `--restricted` is unproven until this probe.**
 The docs say bare mode drops the subscription sign-in, and name no such limit for `--restricted`, but they do not say in so many words that the sign-in survives it.
-A failed sign-in looks like this: the session exits at once with a non-zero exit, the weight reads `0.000000`, no action is reported, and the command says `The check proved nothing: the session exited`.
+A failed sign-in looks like this: the session exits at once with a non-zero exit, the weight reads `0.000000`, every action reads `not-tried`, and the command says `The check proved nothing: the session exited`.
 The session's own words, such as being not logged in, are in `output.jsonl` and `stderr.txt` in the run's directory.
 It uses no model, and it spends one launch of your word.
 Say so and stop: the fix is in the launcher, and it never falls back to loading your user settings or to any key.
@@ -226,7 +232,7 @@ company session probe --kill-test
 You should see `Left running after the stop: nothing.`, `The test passed.` and `Launches may start again.`
 
 Its report, `kill-test.json` in the run's directory, is what answers check C1 for a real session, which ticket 14 reads.
-If anything was left running, the command names it and ends it, says `The test FAILED.`, and leaves every launch refused: start nothing further until it is fixed.
+If anything was left running, the command names it and kills it, says `The test FAILED.`, and leaves every launch refused: start nothing further until it is fixed.
 
 ### The quant cell and the Auditor
 

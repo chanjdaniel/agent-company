@@ -511,7 +511,7 @@ def _guardrail_probe() -> int:
         return EXIT_REFUSED
     print("\n".join(probe.probe_lines(report)))
     if pulled is not None:
-        _print_pull(pulled, f"the probe saw a forbidden action work: {', '.join(report.succeeded)}")
+        _print_pull(pulled, report.pull_reason)
     return _probe_exit(report.result, unlogged)
 
 

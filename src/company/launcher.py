@@ -418,7 +418,7 @@ class SessionProcess:
 
 
 def session_processes(session: str, group: int | None = None, mark: str | None = None) -> list[SessionProcess]:
-    """Everything running that is this session's, wherever it went: in its group, holding the variable the launcher set, or with `mark` on its command line.
+    """Everything running that is this session's, wherever it went: in its group, holding the variable the launcher set, or running `sleep` for the number `mark`.
 
     A process that left the group with `setsid` is out of a signal's reach, and this is what finds it.
     """
@@ -428,7 +428,7 @@ def session_processes(session: str, group: int | None = None, mark: str | None =
         if pid == os.getpid() or stat.state == "Z":
             continue
         command = _proc_fields(pid, "cmdline")
-        marked = mark is not None and any(mark.encode() in part for part in command)
+        marked = mark is not None and any(part == mark.encode() or f"sleep {mark}".encode() in part for part in command)
         if stat.group == group or marked or wanted in _proc_fields(pid, "environ"):
             found.append(SessionProcess(pid, stat.started, b" ".join(part for part in command if part).decode("utf-8", "replace")[:200]))
     return sorted(found, key=lambda process: process.pid)

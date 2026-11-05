@@ -109,6 +109,14 @@ def test_a_link_for_a_key_leaves_s3_open(ready, preflight, tmp_path):
     is_open(preflight(), "S3", "is not a file", "plain file")
 
 
+def test_a_key_of_someone_elses_leaves_s3_open_and_chmod_is_not_the_fix(ready, preflight, tmp_path, monkeypatch):
+    patch_every_company(tmp_path, monkeypatch, "import os", "_real = os.getuid()", "os.getuid = lambda: _real + 1")
+    done = preflight()
+    assert "belongs to someone else" in done.stdout
+    assert "plain file of your own" in section(done.stdout, "S3")
+    assert "chmod" not in section(done.stdout, "S3")
+
+
 def test_a_directory_for_a_key_leaves_s3_open(ready, preflight):
     paths.paper_key().unlink()
     paths.paper_key().mkdir()

@@ -43,8 +43,8 @@ def _key_fix() -> str:
     quoted = shlex.quote(str(path))
     if not os.path.lexists(path):
         return f"install -m 600 /dev/null {quoted}, then save the key id and the secret on its two lines in your editor"
-    if path.is_symlink() or not path.is_file():
-        return f"put a plain file at {quoted} in its place, holding the key id and the secret on two lines"
+    if path.is_symlink() or not path.is_file() or path.lstat().st_uid != os.getuid():
+        return f"put a plain file of your own at {quoted} in its place, holding the key id and the secret on two lines"
     if path.lstat().st_size == 0:
         return f"save the key id and the secret on the two lines of {quoted} in your editor"
     return f"chmod 600 {quoted}"

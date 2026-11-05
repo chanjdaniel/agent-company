@@ -19,7 +19,7 @@ from usage_records import TEAM, transcript_line
 from company import cli, paper, paths, times
 
 REPO = Path(__file__).resolve().parents[1]
-BLOCK = re.compile(r"^```sh\n(.*?)\n```$", re.MULTILINE | re.DOTALL)
+BLOCK = re.compile(r"^```(sh|json)\n(.*?)\n```$", re.MULTILINE | re.DOTALL)
 
 
 def runbook() -> str:
@@ -30,10 +30,12 @@ def blocks() -> list[tuple[str, list[str]]]:
     """Each command in order, with the quoted fragments its next line says to expect."""
     text = runbook()
     found = []
-    for command in BLOCK.finditer(text):
-        after = text[command.end() :].lstrip("\n").split("\n", 1)[0]
-        assert after.startswith("You should see"), f"{command[1]} says nothing of what to see"
-        found.append((command[1], re.findall(r"`([^`]+)`", after)))
+    for block in BLOCK.finditer(text):
+        # The JSON is the status line's setting, whose command is what Claude Code would run.
+        command = block[2] if block[1] == "sh" else json.loads(block[2])["statusLine"]["command"]
+        after = text[block.end() :].lstrip("\n").split("\n", 1)[0]
+        assert after.startswith("You should see"), f"{command} says nothing of what to see"
+        found.append((command, re.findall(r"`([^`]+)`", after)))
     return found
 
 
@@ -57,7 +59,7 @@ def test_every_line_is_one_sentence():
             continue
         prose = re.sub(r"`[^`]*`|\[[^\]]*\]\([^)]*\)", "x", line)
         assert not re.search(r"[.!?][*\"]* +[A-Z]", prose), line
-    assert "—" not in runbook()
+    assert chr(0x2014) not in runbook()
 
 
 def test_it_names_the_three_dependencies_to_check_in_s5():
@@ -163,6 +165,12 @@ class Walk:
         if command.startswith("company audit"):
             self.stub.play(*auditor_steps(self._last("cell", "session")))
 
+    def stdin(self, command):
+        """What Claude Code gives a status line, in the documented fields."""
+        if command != "company reading statusline":
+            return ""
+        return json.dumps({"rate_limits": {"seven_day": {"used_percentage": 40, "resets_at": int((times.now() + timedelta(hours=72)).timestamp())}}})
+
     def exit_expected(self, command):
         if command == "company preflight":
             self.preflights += 1
@@ -200,7 +208,7 @@ def test_each_command_runs_in_order_on_the_stub(stub, systemctl, tmp_path, monke
             output = captured.out + captured.err
         else:
             cwd = REPO if written.startswith("uv tool") else tmp_path
-            done = subprocess.run(["/bin/bash", "-c", command], env=environment, cwd=cwd, capture_output=True, text=True, timeout=180, check=False)
+            done = subprocess.run(["/bin/bash", "-c", command], env=environment, cwd=cwd, input=walk.stdin(written), capture_output=True, text=True, timeout=180, check=False)
             code, output = done.returncode, done.stdout + done.stderr
         assert code == walk.exit_expected(written), f"{command}\n{output}"
         for fragment in see:
