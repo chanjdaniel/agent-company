@@ -21,6 +21,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import IO
 
 from company import paths
 from company.ledger import Ledger
@@ -39,6 +40,8 @@ _OPTIONAL = ("paper_days",)
 _ACCEPTANCE = ("min_deflated_sharpe", "min_holdout_return", "max_drawdown")
 _MIN_BARS = 2
 _BASIS_POINT = 0.0001
+# A model past this would charge more than all a unit of turnover trades.
+_MAX_BPS = 10_000
 # A position line past this is rubbish, whether or not it ever ends.
 _MAX_LINE_BYTES = 1_000_000
 _TOLERANCE = 1e-9
@@ -83,30 +86,49 @@ class _Market:
     """A data source's bars, oldest first, and the hash of what they were read from."""
 
     bars: list[dict]
-    digest: str
+    data_hash: str
+
+
+@dataclass(frozen=True)
+class _Configuration:
+    """One thing a cell may try: its code and parameters, and the hash that is its identity."""
+
+    code: str
+    parameters: dict
+    identity: str
 
 
 def _is_number(value) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _is_whole(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 1
 
 
-def _period(value) -> tuple[date, date] | None:
-    """A registered period's first and last days, or None if it is no period."""
+def _days(period: dict) -> tuple[date, date]:
+    return date.fromisoformat(period["start"]), date.fromisoformat(period["end"])
+
+
+def _is_period(value) -> bool:
     if not isinstance(value, dict) or set(value) != {"start", "end"}:
-        return None
+        return False
     try:
-        start, end = date.fromisoformat(value["start"]), date.fromisoformat(value["end"])
+        start, end = _days(value)
     except (TypeError, ValueError):
-        return None
-    return (start, end) if start <= end else None
+        return False
+    return start <= end
 
 
 def _is_model(value) -> bool:
-    return isinstance(value, dict) and set(value) == {"bps_per_turnover"} and _is_number(value["bps_per_turnover"]) and value["bps_per_turnover"] >= 0
+    if not isinstance(value, dict) or set(value) != {"bps_per_turnover"} or not _is_number(value["bps_per_turnover"]):
+        return False
+    return 0 <= value["bps_per_turnover"] <= _MAX_BPS
 
 
 def _is_universe(value) -> bool:
@@ -126,8 +148,8 @@ _FIELD_CHECKS = {
     "strategy": lambda value: isinstance(value, str) and _NAME.fullmatch(value) is not None,
     "universe": _is_universe,
     "data_source": lambda value: isinstance(value, str),
-    "in_sample": lambda value: _period(value) is not None,
-    "holdout": lambda value: _period(value) is not None,
+    "in_sample": _is_period,
+    "holdout": _is_period,
     "cost_model": _is_model,
     "slippage_model": _is_model,
     "max_configurations": _is_whole,
@@ -145,15 +167,15 @@ def _checked_registration(arguments: dict) -> dict:
     for name, value in arguments.items():
         if not _FIELD_CHECKS[name](value):
             raise Refused(f"bad-field:{name}")
-    if _period(arguments["holdout"])[0] <= _period(arguments["in_sample"])[1]:  # type: ignore[index]
+    if _days(arguments["holdout"])[0] <= _days(arguments["in_sample"])[1]:
         raise Refused("holdout-not-after-in-sample")
     return {"paper_days": DEFAULT_PAPER_DAYS, **arguments}
 
 
-def _is_bar(item) -> bool:
-    if not isinstance(item, dict) or not isinstance(item.get("bars"), dict) or not isinstance(item.get("date"), str):
+def _is_bar(bar) -> bool:
+    if not isinstance(bar, dict) or not isinstance(bar.get("symbols"), dict) or not isinstance(bar.get("date"), str):
         return False
-    return all(isinstance(fields, dict) and _is_number(fields.get("close")) and fields["close"] > 0 for fields in item["bars"].values())
+    return all(isinstance(fields, dict) and _is_number(fields.get("close")) and fields["close"] > 0 for fields in bar["symbols"].values())
 
 
 def _market_data(source: str) -> _Market:
@@ -169,26 +191,26 @@ def _market_data(source: str) -> _Market:
         raise Refused("data-unavailable:unreadable") from None
     try:
         bars = [json.loads(line) for line in content.splitlines()]
-        days = [date.fromisoformat(item["date"]) for item in bars]
+        days = [date.fromisoformat(bar["date"]) for bar in bars]
     except (ValueError, KeyError, TypeError, RecursionError):
         raise Refused("data-unavailable:unreadable") from None
-    if not bars or not all(_is_bar(item) for item in bars) or any(later <= earlier for earlier, later in itertools.pairwise(days)):
+    if not bars or not all(_is_bar(bar) for bar in bars) or any(later <= earlier for earlier, later in itertools.pairwise(days)):
         raise Refused("data-unavailable:unreadable")
     return _Market(bars, hashlib.sha256(content).hexdigest())
 
 
 def _in_period(market: _Market, period: dict, universe: list[str]) -> list[dict] | None:
-    """The bars of a period, holding the universe alone; None if a day lacks a symbol or the period has too few to give a return."""
-    start, end = _period(period)  # type: ignore[misc]
-    chosen = [item for item in market.bars if start <= date.fromisoformat(item["date"]) <= end]
-    if len(chosen) < _MIN_BARS or any(symbol not in item["bars"] for item in chosen for symbol in universe):
+    """The bars of a period, holding the universe alone; None if a bar lacks a symbol or the period has too few to give a return."""
+    start, end = _days(period)
+    chosen = [bar for bar in market.bars if start <= date.fromisoformat(bar["date"]) <= end]
+    if len(chosen) < _MIN_BARS or any(symbol not in bar["symbols"] for bar in chosen for symbol in universe):
         return None
-    return [{"date": item["date"], "bars": {symbol: item["bars"][symbol] for symbol in universe}} for item in chosen]
+    return [{**bar, "symbols": {symbol: bar["symbols"][symbol] for symbol in universe}} for bar in chosen]
 
 
 def _overlap(one: dict, other: dict) -> bool:
-    first, second = _period(one), _period(other)
-    return first is not None and second is not None and first[0] <= second[1] and second[0] <= first[1]
+    first, second = _days(one), _days(other)
+    return first[0] <= second[1] and second[0] <= first[1]
 
 
 def _registrations(events: list[dict]) -> list[dict]:
@@ -204,7 +226,7 @@ def _same_strategy(event: dict, writer: str, strategy: str) -> bool:
 
 
 def _check_periods_unspent(events: list[dict], fields: dict, writer: str) -> None:
-    """Keep a holdout unseen: no later in-sample period may read an earlier holdout, nor any holdout be what a strategy could read.
+    """Keep each holdout unseen and one registration's: else a new name would reset a budget on it, or read it as in-sample.
 
     A registration that was replaced ran nothing, so only the newest of each strategy holds its periods, and this one replaces its own.
     """
@@ -212,7 +234,7 @@ def _check_periods_unspent(events: list[dict], fields: dict, writer: str) -> Non
     for earlier in standing.values():
         if earlier["data_source"] != fields["data_source"] or _same_strategy(earlier, writer, fields["strategy"]):
             continue
-        if _overlap(fields["in_sample"], earlier["holdout"]):
+        if _overlap(fields["in_sample"], earlier["holdout"]) or _overlap(fields["holdout"], earlier["holdout"]):
             raise Refused("holdout-already-held")
         if _overlap(fields["holdout"], earlier["in_sample"]):
             raise Refused("holdout-already-seen")
@@ -249,7 +271,7 @@ def register(arguments: dict, writer: str) -> dict:
         if _in_period(market, fields["in_sample"], fields["universe"]) is None or _in_period(market, fields["holdout"], fields["universe"]) is None:
             raise Refused("data-unavailable:not-covered")
         _check_periods_unspent(events, fields, writer)
-        return ledger.append("strategy-registered", {**fields, "data_hash": market.digest}, writer)
+        return ledger.append("strategy-registered", {**fields, "data_hash": market.data_hash}, writer)
 
 
 def config_hash(code: str, parameters: dict) -> str:
@@ -258,23 +280,22 @@ def config_hash(code: str, parameters: dict) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def _checked_configuration(arguments: dict) -> tuple[str, str, dict, str]:
-    strategy, code, parameters = arguments.get("strategy"), arguments.get("code"), arguments.get("parameters", {})
-    if not isinstance(strategy, str) or not isinstance(code, str) or not code or len(code) > MAX_CODE_CHARACTERS or not isinstance(parameters, dict):
+def _checked_configuration(code, parameters) -> _Configuration:
+    if not isinstance(code, str) or not code or len(code) > MAX_CODE_CHARACTERS or not isinstance(parameters, dict):
         raise Refused("bad-arguments")
     try:
-        return strategy, code, parameters, config_hash(code, parameters)
+        return _Configuration(code, parameters, config_hash(code, parameters))
     except (ValueError, RecursionError):
         raise Refused("bad-arguments") from None
 
 
-def _keep_configuration(registration_seq: int, digest: str, code: str, parameters: dict) -> None:
+def _keep_configuration(registration_seq: int, configuration: _Configuration) -> None:
     """Keep what the verdict will run on the holdout, where no session can reach it, before any record cites it."""
     folder = paths.configurations() / str(registration_seq)
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(folder / f"{digest}.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(folder / f"{configuration.identity}.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as file:
-        json.dump({"code": code, "parameters": parameters}, file)
+        json.dump({"code": configuration.code, "parameters": configuration.parameters}, file)
 
 
 def _sandbox(bwrap: str) -> list[str]:
@@ -297,19 +318,17 @@ def _sandbox(bwrap: str) -> list[str]:
         "--ro-bind", standard_library, standard_library,
         "--ro-bind", python, python,
         "--ro-bind", child, _CHILD_PATH,
+        # A standalone Python, as uv's and so CI's is, reads this to start at all; a write to it changes no file.
+        "--dev-bind", "/dev/urandom", "/dev/urandom",
         "--chdir", "/",
         "--remount-ro", "/",
         python, "-I", "-S", "-B", _CHILD_PATH,
     ]  # fmt: skip
 
 
-def _no_constant(name: str):
-    raise ValueError(name)
-
-
-def _read_message(process: subprocess.Popen) -> dict | None:
+def _read_message(output: IO[bytes]) -> dict | None:
     """The strategy's next line as an object, or None if it ended first; anything else is rubbish."""
-    line = process.stdout.readline(_MAX_LINE_BYTES)  # type: ignore[union-attr]
+    line = output.readline(_MAX_LINE_BYTES)
     if not line:
         return None
     if not line.endswith(b"\n"):
@@ -317,7 +336,7 @@ def _read_message(process: subprocess.Popen) -> dict | None:
             return None
         raise _StrategyFailed(f"{_BAD_OUTPUT}: a line too long")
     try:
-        message = json.loads(line, parse_constant=_no_constant)
+        message = json.loads(line)
     except (ValueError, RecursionError):
         raise _StrategyFailed(f"{_BAD_OUTPUT}: not JSON") from None
     if not isinstance(message, dict):
@@ -325,9 +344,9 @@ def _read_message(process: subprocess.Popen) -> dict | None:
     return message
 
 
-def _send(process: subprocess.Popen, message: dict) -> None:
-    process.stdin.write((json.dumps(message) + "\n").encode())  # type: ignore[union-attr]
-    process.stdin.flush()  # type: ignore[union-attr]
+def _send(given: IO[bytes], message: dict) -> None:
+    given.write((json.dumps(message) + "\n").encode())
+    given.flush()
 
 
 def _positions(message: dict | None, universe: list[str]) -> dict[str, float]:
@@ -340,6 +359,7 @@ def _positions(message: dict | None, universe: list[str]) -> dict[str, float]:
     if not isinstance(positions, dict) or not all(symbol in universe for symbol in positions):
         raise _StrategyFailed(f"{_BAD_OUTPUT}: not positions in the universe")
     for value in positions.values():
+        # NaN and the infinities read as JSON numbers, and fail this too.
         if not isinstance(value, int | float) or isinstance(value, bool) or not abs(value) <= 1:
             raise _StrategyFailed(f"{_BAD_OUTPUT}: a position that is not a weight from -1 to 1")
     if sum(abs(value) for value in positions.values()) > 1 + _TOLERANCE:
@@ -347,7 +367,7 @@ def _positions(message: dict | None, universe: list[str]) -> dict[str, float]:
     return {symbol: float(value) for symbol, value in positions.items()}
 
 
-def _play(code: str, parameters: dict, bars: list[dict], universe: list[str], seconds: float) -> list[dict[str, float]]:
+def _play(configuration: _Configuration, bars: list[dict], universe: list[str], seconds: float) -> list[dict[str, float]]:
     """The strategy's positions, one per bar, each sent only once it has answered the last.
 
     Raise `_NoConfinement` if no sandbox started, and `_StrategyFailed` if the strategy failed in one.
@@ -368,8 +388,9 @@ def _play(code: str, parameters: dict, bars: list[dict], universe: list[str], se
 
     timer = threading.Timer(seconds, expire)
     timer.start()
+    assert process.stdin is not None and process.stdout is not None
     try:
-        return _exchange(process, {"code": code, "parameters": parameters}, bars, universe)
+        return _exchange(process.stdin, process.stdout, configuration, bars, universe)
     except BrokenPipeError:
         raise _StrategyFailed(_TIMED_OUT if expired.is_set() else _ENDED) from None
     except _StrategyFailed as failed:
@@ -381,21 +402,21 @@ def _play(code: str, parameters: dict, bars: list[dict], universe: list[str], se
         process.wait()
         for pipe in (process.stdin, process.stdout):
             with contextlib.suppress(OSError):
-                pipe.close()  # type: ignore[union-attr]
+                pipe.close()
 
 
-def _exchange(process: subprocess.Popen, configuration: dict, bars: list[dict], universe: list[str]) -> list[dict[str, float]]:
+def _exchange(given: IO[bytes], output: IO[bytes], configuration: _Configuration, bars: list[dict], universe: list[str]) -> list[dict[str, float]]:
     try:
-        ready = _read_message(process)
+        ready = _read_message(output)
     except _StrategyFailed:
         ready = None
     if ready != {"ready": True}:
         raise _NoConfinement("confinement-failed")
-    _send(process, configuration)
+    _send(given, {"code": configuration.code, "parameters": configuration.parameters})
     positions = []
-    for item in bars:
-        _send(process, item)
-        positions.append(_positions(_read_message(process), universe))
+    for bar in bars:
+        _send(given, bar)
+        positions.append(_positions(_read_message(output), universe))
     return positions
 
 
@@ -403,9 +424,9 @@ def _returns(bars: list[dict], positions: list[dict[str, float]], cost_per_turno
     """Each bar's position earns the move to the next bar, less the registered costs of the change it took to reach it."""
     returns = []
     held: dict[str, float] = {}
-    for item, following, target in zip(bars, bars[1:], positions, strict=False):
-        turnover = sum(abs(target.get(symbol, 0.0) - held.get(symbol, 0.0)) for symbol in item["bars"])
-        moved = sum(weight * (following["bars"][symbol]["close"] / item["bars"][symbol]["close"] - 1) for symbol, weight in target.items())
+    for bar, following, target in zip(bars, bars[1:], positions, strict=False):
+        turnover = sum(abs(target.get(symbol, 0.0) - held.get(symbol, 0.0)) for symbol in bar["symbols"])
+        moved = sum(weight * (following["symbols"][symbol]["close"] / bar["symbols"][symbol]["close"] - 1) for symbol, weight in target.items())
         returns.append(moved - turnover * cost_per_turnover)
         held = target
     return returns
@@ -419,7 +440,8 @@ def _measures(returns: list[float]) -> dict | None:
         second, third, fourth = (math.fsum((value - mean) ** power for value in returns) / count for power in (2, 3, 4))
         equity, peak, drawdown = 1.0, 1.0, 0.0
         for value in returns:
-            equity *= 1 + value
+            # An account that has lost everything stays lost: two losses past the whole must not multiply back to a gain.
+            equity *= max(0.0, 1 + value)
             peak = max(peak, equity)
             drawdown = max(drawdown, (peak - equity) / peak)
         # With no variance, or with one return, there is no spread to measure against, so these read as a normal's.
@@ -432,11 +454,10 @@ def _measures(returns: list[float]) -> dict | None:
     return {"n_returns": count, **numbers, "returns_hash": hashlib.sha256(json.dumps(returns).encode()).hexdigest()}
 
 
-def _result(code: str, parameters: dict, registration: dict, bars: list[dict], seconds: float) -> dict:
-    """The record of one run, whichever way it went."""
-    fed = bars[:-1]
+def _run_once(configuration: _Configuration, registration: dict, bars: list[dict], seconds: float) -> dict:
+    """The record of one run, whichever way it went. No position is taken on the last bar, since no return follows it."""
     try:
-        positions = _play(code, parameters, fed, registration["universe"], seconds)
+        positions = _play(configuration, bars[:-1], registration["universe"], seconds)
     except _StrategyFailed as failed:
         return {"status": _FAILED, "failure": str(failed)[:MAX_FAILURE_CHARACTERS]}
     cost = (registration["cost_model"]["bps_per_turnover"] + registration["slippage_model"]["bps_per_turnover"]) * _BASIS_POINT
@@ -462,7 +483,10 @@ def run(arguments: dict, writer: str, seconds: float) -> dict:
 
     Raise `Refused` if there is no registration to cite, and `Logged` once a `config-refused` has cited it.
     """
-    strategy, code, parameters, digest = _checked_configuration(arguments)
+    strategy = arguments.get("strategy")
+    if not isinstance(strategy, str):
+        raise Refused("bad-arguments")
+    configuration = _checked_configuration(arguments.get("code"), arguments.get("parameters", {}))
     with _locked():
         ledger = Ledger()
         events = ledger.read()
@@ -473,11 +497,11 @@ def run(arguments: dict, writer: str, seconds: float) -> dict:
         seq = registration["seq"]
 
         def refuse(reason: str) -> Logged:
-            fields = {"registration_seq": seq, "config_hash": digest, "reason": reason}
+            fields = {"registration_seq": seq, "config_hash": configuration.identity, "reason": reason}
             return Logged(reason, ledger.append("config-refused", fields, "runner")["seq"])
 
         runs = _runs_of(events, seq)
-        stored = next((event for event in runs if event["config_hash"] == digest), None)
+        stored = next((event for event in runs if event["config_hash"] == configuration.identity), None)
         if stored is not None:
             return _answer(stored, registration, repeat=True)
         if len(runs) >= registration["max_configurations"]:
@@ -487,12 +511,12 @@ def run(arguments: dict, writer: str, seconds: float) -> dict:
         except Refused:
             raise refuse("data-changed") from None
         bars = _in_period(market, registration["in_sample"], registration["universe"])
-        if market.digest != registration["data_hash"] or bars is None:
+        if market.data_hash != registration["data_hash"] or bars is None:
             raise refuse("data-changed")
-        _keep_configuration(seq, digest, code, parameters)
+        _keep_configuration(seq, configuration)
         try:
-            result = _result(code, parameters, registration, bars, seconds)
+            result = _run_once(configuration, registration, bars, seconds)
         except _NoConfinement as absent:
             raise refuse(absent.reason) from None
-        fields = {"registration_seq": seq, "config_hash": digest, "budget_used": len(runs) + 1, **result}
+        fields = {"registration_seq": seq, "config_hash": configuration.identity, "budget_used": len(runs) + 1, **result}
         return _answer(ledger.append("config-run", fields, "runner"), registration, repeat=False)

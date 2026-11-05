@@ -9,7 +9,7 @@ So far the code holds the `company` command, the ledger and its contract, the ac
 
 ## Working in the code
 
-- The test command is `uv run --locked pytest`; `pytest` is the one development dependency, and the runtime is Python 3.13's standard library alone.
+- The test command is `uv run --locked pytest`; `pytest` is the one development dependency, and the runtime is Python 3.13's standard library alone, with the machine's `bwrap` for running a strategy, which the suite needs too and CI installs.
 - Runtime state lives outside the repository: the company home is `~/.local/state/agent-company/` or `COMPANY_HOME`, and Daniel's config directory is `~/.config/agent-company/` or `COMPANY_CONFIG`.
 - The suite moves all of that into a scratch directory and fails on any network attempt, any unchosen `claude` or `systemctl`, any touch of the real paths, or any of its processes left running at its end (`tests/harness/`).
 - `src/company/launcher.py` is the only code that may name `claude`, and only it, `schedule.py` (for `systemctl`), `killswitch.py` (for its self-test) and `quant.py` (for the `bwrap` a strategy runs in) may start a process, which a test scans for; a session test chooses `tests/harness/stub_session.py`'s stub, which plays a script through the real company tools, and a test of the schedule chooses its `Systemctl`.

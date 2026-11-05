@@ -3,7 +3,7 @@
 This is the design the first slice builds, written 2026-11-04.
 It turns the research in [`docs/research/2026-11-02-org-and-profit-loops/`](research/2026-11-02-org-and-profit-loops/report.md) and Daniel's decisions into one document that later work is checked against.
 Where this document and the report or critique differ, this document holds; where this document and Daniel's word differ, Daniel's word holds, and this document is wrong.
-So far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the session launcher, the company tools' server with its note tool, the goal texts, the kill switch, the schedule with its first two jobs, the quant cell's registration and backtest runner, the test suite with its guards and scan, and CI; nothing else here exists as code yet.
+So far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the session launcher, the company tools' server with its note, registration and backtest tools, the goal texts, the kill switch, the schedule with its first two jobs, the quant cell's registration and backtest runner, the test suite with its guards and scan, and CI; nothing else here exists as code yet.
 
 Words used throughout:
 
@@ -701,13 +701,15 @@ Crypto and prediction markets count as trading under the same rule.
 - **Pre-registration before any backtest.**
   The ledger's `strategy-registered` holds the `universe`, the `data_source`, the `in_sample` and `holdout` periods, the `cost_model`, the `slippage_model`, `max_configurations`, the `acceptance` test (`min_deflated_sharpe`, `min_holdout_return`, `max_drawdown`) and `paper_days` (default 90).
   A cell registers through its `register_strategy` tool, which reads the data, fills in `data_hash`, and refuses a missing or malformed field, or a source it cannot read or whose data does not hold every universe symbol on each bar of both periods, with at least two bars in each.
-  A `period` is `{start, end}` in days, a `cost_model` or `slippage_model` is `{bps_per_turnover}`, and a `data_source` is `fixture:<name>`, read from `market-data/<name>.jsonl` in the company home.
+  A `period` is `{start, end}` in days, a `cost_model` or `slippage_model` is `{bps_per_turnover}` from 0 to 10,000, and a `data_source` is `fixture:<name>`, read from `market-data/<name>.jsonl` in the company home, one `{date, symbols}` bar on each line, whose `symbols` hold each symbol's fields, `close` among them.
   The holdout must begin after the in-sample period ends.
   Each strategy name is the cell's own, and a cell may replace a registration until its first run, when the newest stands.
   A registration cannot change once a `config-run` cites it.
-- **A holdout stays unseen across registrations.**
-  On one data source, a new in-sample period may not touch an earlier registration's holdout, and a new holdout may not touch an earlier registration's in-sample period, whichever cell wrote it.
+- **A holdout stays unseen, and is one registration's.**
+  On one data source, a new in-sample period or holdout may not touch an earlier registration's holdout, and a new holdout may not touch an earlier registration's in-sample period, whichever cell wrote it.
+  So a new name for a strategy needs a holdout of its own, and cannot reset a budget on the old one; it may share an in-sample period, so the verdict must count a cell's trials on that period across its registrations.
   A registration that was replaced holds no period, since it ran nothing.
+  The refusal tells a cell only which dates another registration holds, never its bars.
 - **Trial counting.**
   A configuration's identity is the hash of its code and parameters, and each new hash counts against the budget, a failed one too, so a cell cannot search its way to a result.
   A repeat returns its stored result at no cost and writes nothing, and a run past the budget logs `config-refused` with `budget-spent`.
@@ -719,10 +721,10 @@ Crypto and prediction markets count as trading under the same rule.
   It feeds a strategy's bars one at a time from the in-sample period, sending each only once the last has been answered, and leaves out the last bar, since no return follows it.
   A strategy is Python defining `decide(bar, parameters)`, which returns target weights by symbol, each from -1 to 1 and together holding at most the account's whole value; a position at one bar earns the move to the next bar's close.
   The runner applies the registered costs itself: the two models' basis points times the change in target weights, on the return that follows.
-  It records per-bar, not annualized, figures: `sharpe` (mean over sample standard deviation), `skew`, `kurtosis` (not excess, so a normal's is 3), and `total_return`, `max_drawdown` as a positive fraction, and `returns_hash`.
+  It records per-bar, not annualized, figures: `sharpe` (mean over sample standard deviation), `skew`, `kurtosis` (not excess, so a normal's is 3), and `total_return`, `max_drawdown` as a positive fraction, and `returns_hash`; an account that has lost everything stays at zero.
   With no spread to measure against, a run reads as `sharpe` 0, `skew` 0 and `kurtosis` 3, and numbers past what a float holds make it a failed configuration, `not-finite`.
 - **Strategy code runs in its own `bwrap`, and has no other way to run.**
-  Every namespace is unshared, the root is read-only, the environment is empty, and it sees only the system's files, Python and its own small driver, so neither the ledger, the bars, Daniel's settings nor any directory it could write are there; memory is limited to 4 GiB.
+  Every namespace is unshared, the root is read-only, the environment is empty, and it sees only the system's files, Python, its own small driver and `/dev/urandom`, so neither the ledger, the bars, Daniel's settings nor any directory it could write are there; it has at most 4 GiB of memory, and can start no second process or thread.
   The time limit, `backtest_max_seconds`, is Daniel's setting, 60 by default, covers a whole run, and reaches the tools' server on its command line, so that the server holds no path to Daniel's settings.
   The sandbox stays in the session's process group and dies with its parent, so a session's stop ends it.
   A strategy that hangs, crashes, ends early or prints anything but its positions is a failed configuration, `status` `failed`, with a `failure` of `timed-out`, `crashed: <its error>`, `ended-early` or `bad-output: <what>`, and it counts against the budget.

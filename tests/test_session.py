@@ -1021,7 +1021,7 @@ SPAWNING = {
     "asyncio": {"create_subprocess_exec", "create_subprocess_shell"},
     "pty": {"spawn"},
 }  # fmt: skip
-# Each of these starts a process of its own for a reason: `schedule.py` runs `systemctl`, and `killswitch.py` its self-test.
+# Each of these starts a process of its own for a reason: `schedule.py` runs `systemctl`, `killswitch.py` its self-test, and `quant.py` the `bwrap` a strategy runs in.
 SPAWNING_MODULES = frozenset({"launcher.py", "killswitch.py", "schedule.py", "quant.py"})
 CLAUDE_MODULES = frozenset({"launcher.py"})
 

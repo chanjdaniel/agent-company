@@ -19,6 +19,8 @@ def _say(message: dict) -> None:
 def main() -> int:
     resource.setrlimit(resource.RLIMIT_AS, (_MEMORY_BYTES, _MEMORY_BYTES))
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    # No second process or thread, so that the memory limit is the whole strategy's.
+    resource.setrlimit(resource.RLIMIT_NPROC, (1, 1))
     _say({"ready": True})
     configuration = json.loads(sys.stdin.readline())
     try:

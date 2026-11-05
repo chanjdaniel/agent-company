@@ -136,7 +136,7 @@ def session_settings(workspace: Path) -> dict:
     ticket 13's probe tries. A deeper one gets past the shell, and the next launch in that workspace refuses it.
     """
     protected = (paths.config(), paths.claude_directory())
-    rules = [f"{_absolute(root)}/**" for root in (*protected, paths.runs())]
+    rules = [f"{_absolute(root)}/**" for root in (*protected, paths.runs(), paths.market_data(), paths.configurations())]
     rules += [_absolute(paths.home() / name) for name in ("ledger*", "*.lock", "*.state", "kill.state/**")]
     in_workspace = [f"{_absolute(workspace)}/**/{name}" for name in CONFIG_NAMES]
     deny = [f"{tool}({rule})" for tool in ("Read", "Edit") for rule in rules]

@@ -71,7 +71,7 @@ def strategy_doing(action):
 
 def bar(day, close, note=None):
     fields = {"open": close, "high": close, "low": close, "close": close, "volume": 1000}
-    return {"date": day, "bars": {"SPY": fields | ({"note": note} if note else {}), "QQQ": fields}}
+    return {"date": day, "symbols": {"SPY": fields | ({"note": note} if note else {}), "QQQ": fields}}
 
 
 IN_SAMPLE_BARS = [
@@ -158,9 +158,9 @@ def market():
 
 @pytest.fixture
 def tools(market):
-    opened = [CellTools()]
-    yield opened[0]
-    opened[0].close()
+    opened = CellTools()
+    yield opened
+    opened.close()
 
 
 @pytest.fixture
@@ -240,6 +240,10 @@ def test_a_registration_missing_a_required_field_is_refused_and_logged(tools, fi
         ("cost_model", {"bps_per_turnover": -1}),
         ("slippage_model", {"bps_per_turnover": "low"}),
         ("slippage_model", {"bps_per_turnover": True}),
+        ("cost_model", {"bps_per_turnover": 10_001}),
+        ("cost_model", {"bps_per_turnover": 10**400}),
+        ("slippage_model", {"bps_per_turnover": 17 * 10**307}),
+        ("acceptance", {"min_deflated_sharpe": 10**400, "min_holdout_return": 0, "max_drawdown": 0.2}),
         ("max_configurations", 0),
         ("max_configurations", 1.5),
         ("max_configurations", True),
@@ -296,12 +300,13 @@ def test_a_data_source_that_is_not_available_is_refused(tools, source, reason):
     [
         "not json\n",
         '{"date": "2026-01-05"}\n',
-        '{"date": "soon", "bars": {}}\n',
+        '{"date": "soon", "symbols": {}}\n',
         json.dumps(bar("2026-01-06", 100)) + "\n" + json.dumps(bar("2026-01-05", 100)) + "\n",
         json.dumps(bar("2026-01-05", 100)) + "\n" + json.dumps(bar("2026-01-05", 100)) + "\n",
         json.dumps(bar("2026-01-05", -1)) + "\n",
         json.dumps(bar("2026-01-05", 0)) + "\n",
-        json.dumps({"date": "2026-01-05", "bars": {"SPY": {"open": 1}}}) + "\n",
+        '{"date": "2026-01-05", "symbols": {"SPY": {"close": ' + str(10**400) + "}}}\n",
+        json.dumps({"date": "2026-01-05", "symbols": {"SPY": {"open": 1}}}) + "\n",
     ],
 )
 def test_data_that_cannot_be_read_as_bars_is_not_available(tools, content):
@@ -332,7 +337,7 @@ def test_data_that_does_not_cover_what_is_registered_is_not_available(tools, cha
 
 def test_a_universe_symbol_missing_on_one_day_of_a_period_is_not_covered(tools):
     gap = json.loads(json.dumps(IN_SAMPLE_BARS))
-    del gap[2]["bars"]["SPY"]
+    del gap[2]["symbols"]["SPY"]
     write_market("gap", [*gap, *HOLDOUT_BARS])
 
     answer = tools.register(data_source="fixture:gap")
@@ -435,8 +440,28 @@ def test_a_new_holdout_may_not_be_a_period_an_earlier_registration_could_read(ma
     assert refusals("strategy-registered")[-1]["reason"] == "holdout-already-seen"
 
 
-def test_a_new_registration_may_share_the_in_sample_and_the_holdout(registered):
-    assert not registered.register(strategy="second")["isError"]
+def test_a_new_name_cannot_reset_a_budget_on_the_same_holdout(market):
+    """Without this, three names with a budget of one each would run three configurations and ask three verdicts of one holdout."""
+    tools = CellTools()
+    try:
+        assert not tools.register(strategy="a1", max_configurations=1)["isError"]
+        tools.backtest(HOLD, strategy="a1")
+
+        for holdout in ({"start": "2026-02-02", "end": "2026-02-04"}, {"start": "2026-02-03", "end": "2026-02-04"}):
+            answer = tools.register(strategy="a2", max_configurations=1, holdout=holdout)
+            assert answer["isError"]
+            assert refusals("strategy-registered")[-1]["reason"] == "holdout-already-held"
+    finally:
+        tools.close()
+
+    assert [event["strategy"] for event in events("strategy-registered")] == ["a1"]
+    assert len(events("config-run")) == 1
+
+
+def test_a_new_registration_may_share_the_in_sample_with_a_holdout_of_its_own(registered):
+    write_market("daily", [*IN_SAMPLE_BARS, *HOLDOUT_BARS, bar("2026-03-02", 100), bar("2026-03-03", 100)])
+
+    assert not registered.register(strategy="second", holdout={"start": "2026-03-02", "end": "2026-03-03"})["isError"]
     assert registered.backtest(HOLD, strategy="second")["status"] == "ok"
 
 
@@ -548,7 +573,18 @@ def test_data_gone_since_the_registration_is_refused_at_no_cost(registered, mark
     assert events("config-refused")[-1]["reason"] == "data-changed"
 
 
-def test_each_configuration_is_kept_where_the_verdict_can_run_it_and_no_cell_can_reach(registered):
+def test_a_sessions_rules_deny_the_bars_and_the_kept_configurations(cell_session, stub):
+    """The bars hold every holdout: the sandbox denies the shell the whole home, and these deny the file tools."""
+    cell_session()
+
+    deny = stub.settings()["permissions"]["deny"]
+    for root in (paths.home() / "market-data", paths.home() / "configurations"):
+        for tool in ("Read", "Edit"):
+            assert f"{tool}(//{str(root).lstrip('/')}/**)" in deny
+    assert str(paths.home()) in stub.settings()["sandbox"]["filesystem"]["denyRead"]
+
+
+def test_each_configuration_is_kept_for_the_verdict_to_run(registered):
     result = registered.backtest(SCALED, {"weight": 0.5})
 
     kept = json.loads((paths.home() / "configurations" / str(result["registration_seq"]) / f"{result['config_hash']}.json").read_text())
@@ -581,19 +617,44 @@ def test_a_position_earns_the_move_after_its_bar_and_pays_to_enter_and_to_leave(
     assert result["total_return"] == pytest.approx(0.09685225)
 
 
-def test_the_strategy_cannot_set_its_own_costs(market):
-    """The same positions under a dearer registration return less, whatever the code says of costs."""
+@pytest.mark.parametrize(
+    ("bps", "worked"),
+    [(0, 1.1 * 1.0 - 1), (100, (1 + 0.1 - 0.02) * (1 - 0.02) - 1)],
+)
+def test_the_runner_applies_the_registered_costs_whatever_the_code_says(market, bps, worked):
+    """The same positions under a dearer registration return less: each model charges its basis points per unit of turnover."""
     tools = CellTools()
     try:
-        tools.register(strategy="cheap", cost_model={"bps_per_turnover": 0}, slippage_model={"bps_per_turnover": 0})
-        tools.register(strategy="dear", cost_model={"bps_per_turnover": 100}, slippage_model={"bps_per_turnover": 100})
-        cheap = tools.backtest(HOLD_FIRST, strategy="cheap")
-        dear = tools.backtest(HOLD_FIRST, strategy="dear")
+        tools.register(cost_model={"bps_per_turnover": bps}, slippage_model={"bps_per_turnover": bps})
+        result = tools.backtest("COST = 0\n" + HOLD_FIRST)
     finally:
         tools.close()
 
-    assert cheap["total_return"] == pytest.approx(0.1)
-    assert dear["total_return"] == pytest.approx((1 + 0.1 - 0.02) * (1 - 0.02) - 1)
+    assert result["total_return"] == pytest.approx(worked)
+
+
+def test_an_account_that_has_lost_everything_stays_lost(market):
+    """At the largest costs, entering costs 2 and each flip 4, so the first two returns are about -2.1 and -4.1.
+
+    Multiplied through, those two losses past the whole would turn back into a gain of about 3.4.
+    """
+    flip = """
+weight = 1.0
+def decide(bar, parameters):
+    global weight
+    weight = -weight
+    return {"SPY": weight}
+"""
+    tools = CellTools()
+    try:
+        tools.register(cost_model={"bps_per_turnover": 10_000}, slippage_model={"bps_per_turnover": 10_000})
+        result = tools.backtest(flip)
+    finally:
+        tools.close()
+
+    assert result["status"] == "ok"
+    assert result["total_return"] == -1
+    assert result["max_drawdown"] == 1
 
 
 def test_a_flat_strategy_has_no_variance_and_reads_as_nothing_earned(registered):
@@ -650,12 +711,16 @@ dates = []
 def decide(bar, parameters):
     dates.append(bar["date"])
     if len(dates) == 4:
-        raise RuntimeError(f"{dates} {sorted(bar['bars'])}")
+        raise RuntimeError(f"{dates} {sorted(bar['symbols'])}")
     return {}
 """
     result = registered.backtest(seen)
 
     assert result["failure"] == "crashed: RuntimeError: ['2026-01-05', '2026-01-06', '2026-01-07', '2026-01-08'] ['SPY']"
+
+
+def test_no_position_is_asked_for_on_the_last_bar_since_no_return_follows_it(registered):
+    assert registered.backtest(strategy_doing("assert bar['date'] != '2026-01-09'"))["status"] == "ok"
 
 
 def test_no_later_bar_is_waiting_on_the_strategys_input_when_it_decides(registered):
@@ -685,12 +750,18 @@ def test_a_strategy_cannot_find_the_later_bars_on_the_disk(registered, market):
 # Confinement
 
 
-@pytest.mark.parametrize("path", ["/tmp/x", "/x", "/usr/x", "/runner/x", "/runner/child.py", "/dev/shm/x"])
+@pytest.mark.parametrize("path", ["/tmp/x", "/x", "/usr/x", "/runner/x", "/runner/child.py", "/dev/x", "/dev/shm/x"])
 def test_a_strategy_cannot_write_anywhere_it_can_name(registered, path):
     result = registered.backtest(strategy_doing(f"open({path!r}, 'a')"))
 
     assert result["status"] == "failed"
     assert result["failure"].startswith(("crashed: OSError", "crashed: FileNotFoundError", "crashed: PermissionError"))
+
+
+def test_a_strategy_can_use_the_standard_librarys_randomness(registered):
+    result = registered.backtest(strategy_doing("import os, random; os.urandom(4); random.random()"))
+
+    assert result["status"] == "ok", result
 
 
 def test_a_strategy_cannot_write_a_path_of_the_real_machine(registered, tmp_path):
@@ -869,8 +940,7 @@ def test_the_runner_starts_under_bwrap_with_every_namespace_unshared_and_nothing
         ("import time\ndef decide(bar, parameters):\n    time.sleep(600)\n", "timed-out"),
         ("def decide(bar, parameters):\n    while True:\n        pass\n", "timed-out"),
         ("import time\ntime.sleep(600)\n", "timed-out"),
-        (strategy_doing("import os, time; os.fork(); time.sleep(600)"), "timed-out"),
-        (strategy_doing("import os, signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); os.fork(); import time; time.sleep(600)"), "timed-out"),
+        (strategy_doing("import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(600)"), "timed-out"),
         (strategy_doing("import sys; sys.stdout.write('half a line'); sys.stdout.flush(); import time; time.sleep(600)"), "timed-out"),
     ],
 )
@@ -898,7 +968,9 @@ def test_a_strategy_that_hangs_is_a_failed_configuration_that_counts(quick, code
         (strategy_doing("import os; os._exit(0)"), "ended-early"),
         (strategy_doing("import os; os._exit(1)"), "ended-early"),
         (strategy_doing("import os, signal; os.kill(os.getpid(), signal.SIGKILL)"), "ended-early"),
-        (strategy_doing("bytearray(10**12)"), "crashed: MemoryError"),
+        (strategy_doing("bytearray(5 * 1024**3)"), "crashed: MemoryError"),
+        (strategy_doing("import os; os.fork()"), "crashed: BlockingIOError"),
+        (strategy_doing("import threading; threading.Thread(target=print).start()"), "crashed: RuntimeError"),
     ],
 )
 def test_a_strategy_that_crashes_is_a_failed_configuration_that_counts(quick, code, failure):
@@ -1030,7 +1102,7 @@ def decide(bar, parameters):
 
 
 def test_changing_only_the_holdout_changes_no_result(market):
-    other = [bar(item["date"], item["bars"]["SPY"]["close"] * 3) for item in HOLDOUT_BARS]
+    other = [bar(item["date"], item["symbols"]["SPY"]["close"] * 3) for item in HOLDOUT_BARS]
     write_market("other", [*IN_SAMPLE_BARS, *other])
     tools = CellTools()
     try:
@@ -1108,7 +1180,8 @@ def test_daniels_setting_is_the_time_limit_a_cells_strategy_runs_under(cell_sess
     assert done.returncode == 0, done.stdout + done.stderr
     assert time.monotonic() - began < 30
     assert json.loads(_tool_text(stub.tool_results()[-1]))["failure"] == "timed-out"
-    assert "--backtest-seconds" in stub.mcp_config()["mcpServers"]["company"]["args"]
+    arguments = stub.mcp_config()["mcpServers"]["company"]["args"]
+    assert float(arguments[arguments.index("--backtest-seconds") + 1]) == 1
 
 
 def test_only_a_cell_has_the_quant_tools(company, stub, board, market):
@@ -1124,6 +1197,14 @@ def test_only_a_cell_has_the_quant_tools(company, stub, board, market):
     assert all(result["result"]["isError"] for result in stub.tool_results())
     assert events("strategy-registered") == []
     assert events("config-run") == []
+
+
+def test_a_line_nested_past_what_json_can_read_does_not_end_the_server(tools):
+    tools.process.stdin.write("[" * 1_000_000 + "\n")
+    tools.process.stdin.flush()
+    assert json.loads(tools.process.stdout.readline())["error"]["message"] == "not JSON"
+
+    assert not tools.register()["isError"]
 
 
 def test_a_cells_server_will_not_start_with_no_time_limit():

@@ -29,16 +29,15 @@ class Tool:
     description: str
     schema: dict
     kind: str
-    # A tool either makes one event from its arguments, or acts through its own module.
-    fields: Callable[[dict, str], dict] | None = None
-    act: Callable[["Server", dict], dict] | None = None
+    act: Callable[["Server", dict], dict]
 
 
-def _note_fields(arguments: dict, session: str) -> dict:
+def _note(server: "Server", arguments: dict) -> dict:
     text = arguments.get("text")
     if not isinstance(text, str) or not text:
         raise _BadArguments
-    return {"session": session, "text": text}
+    event = server.ledger.append("session-note", {"session": server.session, "text": text}, server.writer, {"session": server.session, "tool": "note"})
+    return _result(f"Recorded as event {event['seq']}.")
 
 
 def _register_strategy(server: "Server", arguments: dict) -> dict:
@@ -55,7 +54,7 @@ _NOTE = Tool(
     "Write a note in the company's ledger, under this session.",
     {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
     "session-note",
-    _note_fields,
+    _note,
 )
 _PERIOD = {
     "type": "object",
@@ -72,7 +71,7 @@ _COST = {
 _REGISTER = Tool(
     "register_strategy",
     "Pre-register a strategy before any backtest. It may be replaced until its first run, and never after. "
-    "Its holdout must come after its in-sample period, and you are never shown it.",
+    "Its holdout must come after its in-sample period, and no other registration on the data may hold it. You are never shown it.",
     {
         "type": "object",
         "properties": {
@@ -98,13 +97,14 @@ _REGISTER = Tool(
         "required": ["strategy", "universe", "data_source", "in_sample", "holdout", "cost_model", "slippage_model", "max_configurations", "acceptance"],
     },
     "strategy-registered",
-    act=_register_strategy,
+    _register_strategy,
 )
 _BACKTEST = Tool(
     "run_backtest",
     "Backtest one configuration on the registered in-sample bars, outside this session, and record what ran. "
-    "`code` is Python defining `decide(bar, parameters)`, given one bar at a time, returning target weights by symbol that "
-    "together hold at most the account's whole value. It prints nothing, and runs with no network, no writes and a time limit. "
+    "`code` is Python defining `decide(bar, parameters)`, given one bar at a time as `{date, symbols: {<symbol>: {close, ...}}}`, "
+    "and returning target weights by symbol that together hold at most the account's whole value. "
+    "It prints nothing, and runs alone, with no network, no writes and a time limit. "
     "Each new code and parameters counts against the budget, even if it fails; a repeat returns its stored result at no cost.",
     {
         "type": "object",
@@ -112,7 +112,7 @@ _BACKTEST = Tool(
         "required": ["strategy", "code"],
     },
     "config-run",
-    act=_run_backtest,
+    _run_backtest,
 )
 TOOLS = {tool.name: tool for tool in (_NOTE, _REGISTER, _BACKTEST)}
 ROLE_TOOLS = {"probe": ("note",), "cell": ("note", "register_strategy", "run_backtest"), "strategy": (), "auditor": (), "retro": ()}
@@ -146,32 +146,18 @@ class Server:
             return self._refused(_UNKNOWN_KIND, name, "unknown-tool")
         if name not in ROLE_TOOLS[self.role]:
             return self._refused(tool.kind, name, "tool-not-in-role")
-        given = arguments if isinstance(arguments, dict) else {}
-        if tool.act is not None:
-            return self._act(tool, given)
-        assert tool.fields is not None
         try:
-            fields = tool.fields(given, self.session)
+            return tool.act(self, arguments if isinstance(arguments, dict) else {})
         except _BadArguments:
             return self._refused(tool.kind, name, "bad-arguments")
-        try:
-            event = self.ledger.append(tool.kind, fields, self.writer, {"session": self.session, "tool": name})
+        except quant.Refused as refused:
+            return self._refused(tool.kind, name, refused.reason)
+        except quant.Logged as logged:
+            return _result(f"Refused: {logged.reason}. The backtest did not run; event {logged.seq} in the ledger records why.", failed=True)
         except AppendRefused as refused:
             return _result(f"Refused: {refused}", failed=True)
         except (LedgerBroken, OSError) as error:
-            return _result(f"The ledger could not take this: {error}. Nothing was written.", failed=True)
-        return _result(f"Recorded as event {event['seq']}.")
-
-    def _act(self, tool: Tool, arguments: dict) -> dict:
-        assert tool.act is not None
-        try:
-            return tool.act(self, arguments)
-        except quant.Refused as refused:
-            return self._refused(tool.kind, tool.name, refused.reason)
-        except quant.Logged as logged:
-            return _result(f"Refused: {logged.reason}. The backtest did not run; event {logged.seq} in the ledger records why.", failed=True)
-        except (AppendRefused, LedgerBroken, OSError) as error:
-            return _result(f"The company's records could not take this: {error}. It does not count.", failed=True)
+            return _result(f"The company's records could not take this: {error}. It does not count, and nothing it asked for was recorded.", failed=True)
 
     def listing(self) -> list[dict]:
         tools = (TOOLS[name] for name in ROLE_TOOLS[self.role])
@@ -212,7 +198,7 @@ def serve(server: Server, lines, out) -> None:
         reply: dict | None
         try:
             message = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             reply = {"jsonrpc": "2.0", "id": None, "error": {"code": _PARSE_ERROR, "message": "not JSON"}}
         else:
             reply = server.answer(message) if isinstance(message, dict) else None
