@@ -556,9 +556,9 @@ def test_a_value_the_quote_does_not_hold_waits_for_daniel(company, stub, cell_ru
     assert_waits(company)
 
 
-def test_a_quote_from_the_cells_reasoning_is_no_report_and_waits_for_daniel(company, stub, board):
-    thinking = {"type": "thinking", "thinking": REPORTED}
-    stub.play({"do": "reply", "request": "r1", "output": 10, "content": [thinking]})
+@pytest.mark.parametrize("block", [{"type": "thinking", "thinking": REPORTED}, {"type": "thinking", "text": REPORTED}])
+def test_a_quote_from_the_cells_reasoning_is_no_report_and_waits_for_daniel(company, stub, board, block):
+    stub.play({"do": "reply", "request": "r1", "output": 10, "content": [block]})
     assert company("session", "start", "cell", "--bet", "alpha").returncode == 0
     cell = events("session-started")[-1]
     stub.play(claim_step(cell["session"]))
@@ -594,10 +594,11 @@ def test_a_finding_an_audit_left_is_confirmed_by_the_next_check_with_nothing_twi
     Ledger().append("finding", fields, "auditor")
 
     first = company("treasurer", "check")
-    company("treasurer", "check")
+    second = company("treasurer", "check")
 
     assert first.returncode == 0, first.stderr
     assert "confirmed by code" in first.stdout
+    assert "confirmed by code" not in second.stdout
     assert len(events("finding-confirmed")) == 1
     assert len(events("cell-paused")) == 1
 
@@ -612,6 +613,26 @@ def test_a_check_stopped_between_the_confirmation_and_the_pause_is_finished(comp
 
     assert len(events("finding-confirmed")) == 1
     assert events("cell-paused")[-1]["cause_seq"] == seq
+
+
+def test_a_daniels_word_stopped_before_its_pause_is_finished_by_the_check_though_code_would_not_confirm(company, stub, cell_run):
+    cell = cell_run()
+    fields = {"rubric": audit.UNSHOWN_RESULT, "summary": "s", "evidence": "e", "bet": "alpha", "session": cell["session"], "claim": {"quote": "Words it never said, 9.9.", "value": 9.9}}
+    seq = Ledger().append("finding", fields, "auditor")["seq"]
+    Ledger().append("finding-confirmed", {"finding_seq": seq}, "board")
+
+    assert company("treasurer", "check").returncode == 0
+
+    assert len(events("finding-confirmed")) == 1
+    assert events("cell-paused")[-1]["cause_seq"] == seq
+
+
+def test_a_claim_on_any_other_rubric_is_not_confirmed_by_code(company, stub, cell_run):
+    cell = cell_run()
+    fields = {"rubric": "false-statement", "summary": "s", "evidence": "e", "bet": "alpha", "session": cell["session"], "claim": {"quote": REPORTED, "value": 2.4}}
+    Ledger().append("finding", fields, "auditor")
+
+    assert_waits(company)
 
 
 def test_a_resumed_cell_is_not_paused_again_for_the_same_finding(company, stub, cell_run):
