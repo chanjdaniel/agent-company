@@ -43,7 +43,8 @@ _LAUNCH_WAIT_SECONDS = 60
 _LEDGER_WAIT_SECONDS = 30
 # Longer than a pull's write-up may hold `kill.lock`, so that only something frozen is refused for it.
 _RESUME_LOCK_WAIT_SECONDS = _LEDGER_WAIT_SECONDS + 5
-_RECORD_FAILURES = (AppendRefused, LedgerBroken, OSError, ValueError, KeyError, TypeError)
+_LEDGER_FAILURES = (LedgerBroken, OSError)
+_RECORD_FAILURES = (AppendRefused, ValueError, KeyError, TypeError)
 
 
 @dataclass(frozen=True)
@@ -224,8 +225,10 @@ def _record_all(records: list[dict]) -> str | None:
         for record in {record["id"]: record for record in records}.values():
             named = f"the pull in `kill.state/{record['id']}`"
             _record(ledger, record)
-    except _RECORD_FAILURES as error:
+    except _LEDGER_FAILURES as error:
         return f"the ledger could not take {named}: {error}"
+    except _RECORD_FAILURES as error:
+        return f"the ledger could not take {named}: {str(error).rstrip('.')}; that file is damaged, so mend it or remove it, and resume again"
     return None
 
 
@@ -285,7 +288,9 @@ def pull(by: str, reason: str, loop: str | None = None) -> Pulled:
     unlogged = _within(_LEDGER_WAIT_SECONDS, lambda: _write_up(record, steps))
     del record["process"]
     unkept = _keep(record)
-    return Pulled(tuple(steps), record.get("seq"), unlogged, unkept and f"{unkept}; its file still names this process, so a resume is refused until this process ends")
+    if unkept and any(found["id"] == record["id"] for found in kill_state.read() or []):
+        unkept += "; its file still names this process, so a resume is refused until this process ends"
+    return Pulled(tuple(steps), record.get("seq"), unlogged, unkept)
 
 
 def _say_what_is_missing(records: list[dict]) -> list[str]:
@@ -326,7 +331,7 @@ def resume(message: str | None = None) -> Resumed:
         words = _say_what_is_missing(records)
         unlogged = _record_all(records)
         if unlogged:
-            raise ResumeRefused(f"{unlogged.rstrip('.')}; the hold stands. If `company ledger verify` says the ledger is whole, that file is damaged: mend it or remove it, and resume again")
+            raise ResumeRefused(f"{unlogged.rstrip('.')}; the hold stands")
         pulls = kill_state.open_pulls(ledger.read())
         if not pulls and not kill_state.present():
             raise ResumeRefused("the kill switch is not pulled")
@@ -341,7 +346,8 @@ def resume(message: str | None = None) -> Resumed:
         except (AppendRefused, LedgerBroken, OSError) as error:
             raise PartlyResumed(resumed, f"the hold could not be cleared: {str(error).rstrip('.')}", words) from error
     if kill_state.present():
-        raise PartlyResumed(resumed, "another pull landed during this resume, so its hold stands", words)
+        landed = {found["id"] for found in kill_state.read() or []} - {record["id"] for record in records}
+        raise PartlyResumed(resumed, "another pull landed during this resume, and its hold stands" if landed else "the hold could not be cleared: `kill.state` is still there", words)
     return Resumed(resumed, words)
 
 

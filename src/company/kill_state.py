@@ -33,6 +33,11 @@ def present() -> bool:
     return True
 
 
+def _is_step(value) -> bool:
+    """Whether this has the shape of a step; one that is well formed and false no code can tell."""
+    return isinstance(value, dict) and all(isinstance(value.get(key), str) for key in ("step", "target", "result")) and isinstance(value.get("detail", ""), str)
+
+
 def _read_one(name: str) -> dict:
     """One pull's record, whose `id` is its file's name; a file that is no record reads as an empty one, and `steps_lost` says what could not be read."""
     try:
@@ -41,9 +46,9 @@ def _read_one(name: str) -> dict:
         record = {}
     record = record if isinstance(record, dict) else {}
     steps = record.get("steps")
-    if isinstance(steps, list) and all(isinstance(step, dict) for step in steps):
+    if isinstance(steps, list) and all(map(_is_step, steps)):
         return {**record, "id": name}
-    kept = [step for step in steps if isinstance(step, dict)] if isinstance(steps, list) else []
+    kept = list(filter(_is_step, steps)) if isinstance(steps, list) else []
     return {**record, "steps": kept, "steps_lost": True, "id": name}
 
 

@@ -944,7 +944,7 @@ def test_a_pull_that_lands_during_a_resume_keeps_its_hold(company, board, monkey
     second = []
     monkeypatch.setattr(Ledger, "append", a_pull_lands)
 
-    with pytest.raises(killswitch.ResumeRefused, match="another pull"):
+    with pytest.raises(killswitch.ResumeRefused, match="another pull landed during this resume, and its hold stands, so every launch"):
         killswitch.resume()
     monkeypatch.setattr(Ledger, "append", real)
     assert second[0].wait(timeout=60) == 0
@@ -1238,6 +1238,30 @@ def test_a_pull_whose_last_write_fails_says_that_its_process_holds_a_resume(comp
     assert str(os.getpid()) in done.stderr
 
 
+def test_a_pull_whose_every_write_fails_acts_reports_and_names_no_file(company, board, monkeypatch):
+    set_accounts(company, "paper")
+    key_of("paper").write_text("k")
+    tries = []
+
+    def fails(record):
+        tries.append(record["id"])
+        raise OSError("the disk is full")
+
+    monkeypatch.setattr(kill_state, "write", fails)
+
+    pulled = killswitch.pull("treasurer", "a red line was crossed")
+
+    assert not key_of("paper").exists()
+    # The first act, after each of the four actions, and the last.
+    assert len(tries) == 6
+    assert [found.result for found in pulled.steps if found.step == killswitch.HOLD and found.target == "kill-file"] == ["failed"]
+    assert step("kill-file")["result"] == "failed"
+    assert "the disk is full" in pulled.unkept
+    assert "names this process" not in pulled.unkept
+    assert not kill_state.present()
+    assert company("resume").returncode == 0
+
+
 @pytest.mark.parametrize("lock", ["kill.lock", "ledger.lock"])
 def test_a_resume_that_finds_a_lock_held_refuses_and_names_it(company, board, lock):
     company("kill")
@@ -1325,6 +1349,22 @@ def test_the_command_says_which_pulls_closed_when_another_lands_during_its_resum
     assert "company resume" in said.err
 
 
+def test_a_directory_that_cannot_be_listed_is_not_called_another_pull(company, board, monkeypatch):
+    company("kill", "--reason", "first")
+
+    def not_allowed(path):
+        raise PermissionError(f"{path} cannot be listed")
+
+    monkeypatch.setattr(kill_state.os, "listdir", not_allowed)
+
+    with pytest.raises(killswitch.PartlyResumed) as refused:
+        killswitch.resume()
+
+    assert "could not be cleared" in str(refused.value)
+    assert "another pull" not in str(refused.value)
+    assert kill_state.present()
+
+
 def test_a_resume_that_cannot_clear_the_hold_says_which_pulls_it_closed(company, board):
     company("kill", "--reason", "first")
     (paths.home() / "kill.state" / "sub").mkdir()
@@ -1385,7 +1425,11 @@ def test_a_write_up_that_fails_says_so_and_does_not_blame_the_lock(board, monkey
     assert kill_state.present()
 
 
-@pytest.mark.parametrize("steps", ["x", 5, [1], {"a": 1}])
+NOT_STEPS = ["x", 5, [1], {"a": 1}, [{"target": "t"}], [{"step": ["x"], "target": "t", "result": "r"}], [{"step": "s", "target": "t", "result": "r", "detail": 1}]]
+REFUSED_STEP = {"step": "s", "target": "t", "result": "r", "extra": 1}
+
+
+@pytest.mark.parametrize("steps", NOT_STEPS)
 def test_a_pulls_file_with_steps_that_are_not_steps_closes_and_says_so_where_daniel_reads(company, board, steps):
     kill_state.write({"id": "1-edited", "by": "daniel", "reason": "edited", "steps": steps})
 
@@ -1396,6 +1440,7 @@ def test_a_pulls_file_with_steps_that_are_not_steps_closes_and_says_so_where_dan
     assert "could not be read" in done.stdout
     assert "could not be read" in step("kill-file")["detail"]
     assert step("kill-file")["pull"] == "1-edited"
+    assert [event["target"] for event in events("kill-step")] == ["kill-file"]
     assert not kill_state.present()
 
 
@@ -1411,7 +1456,7 @@ def test_a_pulls_file_with_one_step_that_is_no_step_keeps_the_others(company, bo
 
 
 def test_a_pulls_file_the_contract_refuses_names_the_file_and_the_way_out(company, board):
-    kill_state.write({"id": "1-edited", "by": "daniel", "reason": "edited", "steps": [{"target": "t"}]})
+    kill_state.write({"id": "1-edited", "by": "daniel", "reason": "edited", "steps": [REFUSED_STEP]})
 
     done = company("resume")
 
@@ -1424,9 +1469,32 @@ def test_a_pulls_file_the_contract_refuses_names_the_file_and_the_way_out(compan
     assert events("resumed") == []
 
 
+def test_a_full_disk_at_a_resume_does_not_call_a_sound_file_damaged(board, monkeypatch):
+    moved = {"step": "rotation", "target": "paper", "result": "moved-aside"}
+    kill_state.write({"id": "1-sound", "by": "daniel", "reason": "r", "steps": [moved]})
+    real = Ledger.append
+
+    def no_space(self, kind, fields, writer, refusal_context=None):
+        if kind == "kill-step":
+            raise OSError("no space left")
+        return real(self, kind, fields, writer, refusal_context)
+
+    monkeypatch.setattr(Ledger, "append", no_space)
+
+    with pytest.raises(killswitch.ResumeRefused) as refused:
+        killswitch.resume()
+
+    said = str(refused.value)
+    assert "no space left" in said
+    assert "the hold stands" in said
+    assert "damaged" not in said
+    assert "remove" not in said
+    assert [record["id"] for record in kill_state.read()] == ["1-sound"]
+
+
 def test_the_word_on_a_damaged_file_is_written_once_when_a_resume_is_refused_and_run_again(company, board):
     kill_state.write({"id": "1-edited", "by": "daniel", "reason": "edited", "steps": "x"})
-    kill_state.write({"id": "2-edited", "by": "daniel", "reason": "edited", "steps": [{"target": "t"}]})
+    kill_state.write({"id": "2-edited", "by": "daniel", "reason": "edited", "steps": [REFUSED_STEP]})
     assert company("resume").returncode == 1
 
     (paths.home() / "kill.state" / "2-edited").unlink()

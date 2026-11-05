@@ -390,7 +390,7 @@ def lock_free_within(path: Path, seconds: float) -> bool:
     """Whether this lock comes free in this time; it is let go at once."""
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
 
-    def deciding() -> bool:
+    def held() -> bool:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -398,7 +398,7 @@ def lock_free_within(path: Path, seconds: float) -> bool:
         return False
 
     try:
-        return _ends_within(seconds, deciding)
+        return _ends_within(seconds, held)
     finally:
         os.close(fd)
 
