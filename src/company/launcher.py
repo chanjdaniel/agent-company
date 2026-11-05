@@ -169,9 +169,11 @@ def session_settings(workspace: Path) -> dict:
     }
 
 
-def _mcp_config(role: str, bet: str | None, session: str) -> dict:
+def _mcp_config(role: str, bet: str | None, session: str, backtest_seconds: float | None = None) -> dict:
     # `-P`: this starts in the workspace, and with the working directory on its path a file there could run as this code.
     arguments = ["-P", "-m", "company.tools", "--role", role, "--session", session, *(("--bet", bet) if bet else ())]
+    # On the command line, as the role and bet are, so that the server needs no path to Daniel's settings.
+    arguments += ["--backtest-seconds", str(backtest_seconds)] if backtest_seconds is not None else []
     server = {"type": "stdio", "command": sys.executable, "args": arguments, "env": {"COMPANY_HOME": str(paths.home()), SESSION_VARIABLE: session}}
     return {"mcpServers": {"company": server}}
 
@@ -553,6 +555,7 @@ def _prepare(admitted: governor.Admitted, prompt: str, chosen: str | None) -> _L
         model = _model(loaded, role)
         max_minutes = Fraction(str(settings.positive_number(loaded, "session_max_minutes")))
         max_weight = Fraction(str(settings.positive_number(loaded, "session_max_weight")))
+        backtest_seconds = settings.positive_number(loaded, "backtest_max_seconds") if role == "cell" else None
     except settings.SettingsRefused as refused:
         raise _Refuse("settings", f"{refused.code}: {refused}", refused.fix) from None
     claude = binary()
@@ -566,7 +569,7 @@ def _prepare(admitted: governor.Admitted, prompt: str, chosen: str | None) -> _L
     run_dir = paths.runs() / run
     run_dir.mkdir(parents=True, mode=0o700)
     mcp, session_file = run_dir / "mcp.json", run_dir / "settings.json"
-    _write_json(mcp, _mcp_config(role, bet, session))
+    _write_json(mcp, _mcp_config(role, bet, session, backtest_seconds))
     _write_json(session_file, session_settings(workspace))
     (run_dir / "prompt.txt").write_text(goal.text + (f"\n{prompt}\n" if prompt else ""))
     command = _command(claude, role, session, model, mcp, session_file)

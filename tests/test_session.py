@@ -1022,7 +1022,7 @@ SPAWNING = {
     "pty": {"spawn"},
 }  # fmt: skip
 # Each of these starts a process of its own for a reason: `schedule.py` runs `systemctl`, and `killswitch.py` its self-test.
-SPAWNING_MODULES = frozenset({"launcher.py", "killswitch.py", "schedule.py"})
+SPAWNING_MODULES = frozenset({"launcher.py", "killswitch.py", "schedule.py", "quant.py"})
 CLAUDE_MODULES = frozenset({"launcher.py"})
 
 

@@ -345,6 +345,7 @@ KEYS: dict[str, Callable[[dict, str], object]] = {
     "reading_max_age_minutes": positive_number,
     "session_max_minutes": positive_number,
     "session_max_weight": positive_number,
+    "backtest_max_seconds": positive_number,
     "daily_minutes": positive_number,
     "weekly_send_cap": _whole_number,
     "minutes_table": lambda settings, key: minutes_table(settings),
@@ -360,6 +361,7 @@ _OPTIONAL = {"weekly_send_cap"}
 _DESIGN_VALUES = {
     "cell_model": "claude-opus-5-5",
     "auditor_model": "claude-sonnet-5-5",
+    "backtest_max_seconds": 60,
     "daily_minutes": 15,
     "minutes_table": {"templated-approval": 0.5, "message-review": 2, "message-send": 0.5, "new-public-artifact": 5},
     "complaint_threshold": {"count": 2, "days": 30, "outside_action_fraction": 0.02},

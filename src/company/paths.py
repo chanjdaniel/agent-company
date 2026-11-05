@@ -34,6 +34,16 @@ def runs() -> Path:
     return home() / "runs"
 
 
+def market_data() -> Path:
+    """Each data source's bars, which no session can reach, since a registration's holdout is among them."""
+    return home() / "market-data"
+
+
+def configurations() -> Path:
+    """The code and parameters of each configuration run, which the verdict runs on the holdout."""
+    return home() / "configurations"
+
+
 def systemd_user() -> Path:
     """Where systemd keeps the user's own units."""
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "systemd/user"

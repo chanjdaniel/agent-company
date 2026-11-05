@@ -7,7 +7,7 @@ The research behind it, with its critique, Daniel's decisions and draft tickets,
 
 ## The code
 
-The first slice is being built, and so far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the session launcher and company tools, the kill switch and the schedule, the test suite and CI.
+The first slice is being built, and so far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the session launcher and company tools, the kill switch and the schedule, the quant cell's registration and backtest runner, the test suite and CI.
 It is Python 3.13 with no runtime dependency outside the standard library, and needs `uv` to run.
 
 ```sh

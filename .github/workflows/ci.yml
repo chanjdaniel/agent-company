@@ -20,4 +20,9 @@ jobs:
         with:
           version: 0.10.12
           enable-cache: false
+      # The strategy runner's sandbox: Ubuntu keeps unprivileged user namespaces from it unless this says otherwise.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: uv run --locked pytest

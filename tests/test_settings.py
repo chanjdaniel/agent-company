@@ -44,6 +44,7 @@ def test_init_writes_what_daniel_gave_and_what_the_design_sets(company, settings
     # The numbers the design records, each Daniel's to change.
     assert written["cell_model"] == "claude-opus-5-5"
     assert written["auditor_model"] == "claude-sonnet-5-5"
+    assert written["backtest_max_seconds"] == 60
     assert written["daily_minutes"] == 15
     assert written["minutes_table"] == {"templated-approval": 0.5, "message-review": 2, "message-send": 0.5, "new-public-artifact": 5}
     assert written["complaint_threshold"] == {"count": 2, "days": 30, "outside_action_fraction": 0.02}
@@ -357,7 +358,7 @@ def test_a_load_during_a_set_never_reads_as_tamper(company, started):
 def test_every_setting_the_file_may_hold_has_its_check():
     assert set(settings_module.KEYS) == {
         "company_share", "team_floor", "monthly_price", "plan_name", "cell_model", "auditor_model",
-        "reading_max_age_minutes", "session_max_minutes", "session_max_weight", "daily_minutes", "weekly_send_cap",
+        "reading_max_age_minutes", "session_max_minutes", "session_max_weight", "backtest_max_seconds", "daily_minutes", "weekly_send_cap",
         "minutes_table", "complaint_threshold", "portfolio", "outside_accounts", "usage_day_dirs",
     }  # fmt: skip
 
