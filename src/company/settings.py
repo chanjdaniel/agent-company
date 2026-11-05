@@ -20,6 +20,7 @@ from company.ledger import AppendRefused, Ledger, LedgerBroken
 INIT = "company settings init"
 SET = "company settings set"
 MOVE_KEY = "move-key"
+_OWN_FILES = ("settings.json", "settings.lock")
 _NO_FILE = "none"
 
 
@@ -302,6 +303,9 @@ def account_problem(account) -> str | None:
     key_file = account["key_file"]
     if not isinstance(key_file, str) or not key_file or Path(key_file).is_absolute() or ".." in Path(key_file).parts:
         return "an outside account's key_file is a path inside the config directory"
+    # `Path` drops each `.`, so that "." has no parts at all, and is the directory itself.
+    if not Path(key_file).parts or Path(key_file).parts[0] in _OWN_FILES:
+        return "an outside account's key_file names a key, and not the config directory or the settings' own files"
     return None
 
 

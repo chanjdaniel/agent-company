@@ -110,6 +110,8 @@ def _move_key(account: dict) -> Step:
     source = settings.key_path(account)
     aside = source.with_name(f"{source.name}.revoked-{times.now().strftime('%Y%m%dT%H%M%SZ')}")
     try:
+        if stat.S_ISDIR(source.lstat().st_mode):
+            return Step(ROTATION, account["name"], FAILED, f"{source} is a directory, so it was left where it is")
         source.rename(aside)
     except FileNotFoundError:
         return Step(ROTATION, account["name"], NO_KEY, f"{source} is not there, so nothing can use it")
