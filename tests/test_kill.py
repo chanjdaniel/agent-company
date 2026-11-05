@@ -1557,6 +1557,8 @@ def test_a_damaged_ledger_at_a_pull_does_not_call_its_sound_file_damaged(company
 
     assert done.returncode == 1
     assert "could not take" in done.stderr
+    assert "KeyError" in done.stderr
+    assert "see `company ledger verify`" in done.stderr
     assert "damaged" not in done.stderr
     assert "remove" not in done.stderr
     assert len(kill_state.read()) == 1
@@ -1573,7 +1575,7 @@ def test_a_pull_beside_a_refused_file_names_that_file_with_no_word_of_a_resume(c
     assert "resume again" not in done.stderr
 
 
-def test_a_pull_that_neither_the_file_nor_the_ledger_took_says_nothing_holds(board, monkeypatch, capsys):
+def test_a_pull_that_neither_the_file_nor_the_ledger_took_says_it_cannot_see_a_hold(board, monkeypatch, capsys):
     def no_space(*args, **kwargs):
         raise OSError("no space left")
 
@@ -1586,7 +1588,7 @@ def test_a_pull_that_neither_the_file_nor_the_ledger_took_says_nothing_holds(boa
     assert code == 1
     assert kill_state.refusal(events()) is None
     assert "Every launch is refused" not in said.out
-    assert "holds no launch" in said.out
+    assert "could not see that it holds any launch" in said.out
 
 
 def test_a_pull_that_could_write_no_record_still_holds_if_a_directory_fits(monkeypatch):
@@ -1704,3 +1706,106 @@ def test_a_process_whose_own_name_is_not_text_can_still_pull(board):
     assert done.returncode == 0, done.stdout + done.stderr
     assert kill_state.present()
     assert [event["by"] for event in events("kill-pulled")] == ["a-loop"]
+
+
+# What a pull says holds: review findings 78 to 80
+
+EVERY_LAUNCH = "Every launch is refused until `company resume`."
+BY_THE_LEDGER = "the kill switch was pulled by event"
+BY_THE_FILE = "the kill switch was pulled, and the ledger has not recorded it"
+
+
+def disk_is_full(*args, **kwargs):
+    raise OSError("no space left")
+
+
+def no_room_for_a_pulls_file(monkeypatch, tries=None):
+    """Writing a pull's temporary file fails, for its first `tries` writes or all of them, where a directory still fits."""
+    real = Path.write_text
+    failed = []
+
+    def fails(self, *args, **kwargs):
+        if self.name.startswith("kill.state.") and (tries is None or len(failed) < tries):
+            failed.append(self.name)
+            raise OSError("no space left")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fails)
+
+
+def test_a_pull_both_records_took_says_every_launch_is_refused(systemctl, board, capsys):
+    code = cli.main(["kill"])
+
+    said = capsys.readouterr()
+    assert code == 0, said.out + said.err
+    assert kill_state.present()
+    assert BY_THE_LEDGER in kill_state.refusal(events())
+    assert EVERY_LAUNCH in said.out
+
+
+def test_a_pull_only_the_file_took_says_every_launch_is_refused(board, monkeypatch, capsys):
+    monkeypatch.setattr(Ledger, "append", disk_is_full)
+
+    code = cli.main(["kill"])
+
+    said = capsys.readouterr()
+    assert code == 1
+    assert events("kill-pulled") == []
+    assert kill_state.refusal(events()) == BY_THE_FILE
+    assert EVERY_LAUNCH in said.out
+
+
+def test_a_pull_only_the_ledger_took_says_every_launch_is_refused(board, monkeypatch, capsys):
+    monkeypatch.setattr(kill_state, "write", disk_is_full)
+
+    code = cli.main(["kill"])
+
+    said = capsys.readouterr()
+    assert code == 1
+    assert not kill_state.present()
+    assert BY_THE_LEDGER in kill_state.refusal(events())
+    assert EVERY_LAUNCH in said.out
+
+
+def test_a_directory_with_no_record_does_not_call_the_hold_failed(board, monkeypatch, capsys):
+    no_room_for_a_pulls_file(monkeypatch)
+
+    code = cli.main(["kill"])
+
+    said = capsys.readouterr()
+    assert code == 1
+    assert kill_state.present()
+    assert kill_state.refusal(events())
+    assert "hold kill-file: failed" not in said.out
+    assert "hold kill-file: held-no-record (the pull's record could not be kept: no space left)" in said.out
+    assert EVERY_LAUNCH in said.out
+    assert step("kill-file")["result"] == "held-no-record"
+    assert "could not be kept" in step("kill-file")["detail"]
+
+
+def test_a_directory_with_no_record_at_first_is_still_not_a_clean_pull(systemctl, board, monkeypatch):
+    no_room_for_a_pulls_file(monkeypatch, tries=1)
+
+    pulled = killswitch.pull("treasurer", "a red line was crossed")
+
+    assert pulled.unlogged is None
+    assert pulled.unkept is None
+    assert [found.result for found in pulled.steps if found.target == "kill-file"] == ["held-no-record"]
+    assert not pulled.clean
+
+
+def test_a_line_the_ledger_wrote_and_could_not_confirm_is_not_called_no_hold(board, monkeypatch, capsys):
+    monkeypatch.setattr(kill_state, "write", disk_is_full)
+    monkeypatch.setattr(Ledger, "_write_head", disk_is_full)
+
+    code = cli.main(["kill"])
+
+    said = capsys.readouterr()
+    assert code == 1
+    assert not kill_state.present()
+    assert len(events("kill-pulled")) == 1
+    assert BY_THE_LEDGER in kill_state.refusal(events())
+    assert "holds no launch" not in said.out
+    assert EVERY_LAUNCH not in said.out
+    assert "could not see" in said.out
+    assert "company ledger verify" in said.out

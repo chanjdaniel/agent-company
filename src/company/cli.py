@@ -377,7 +377,7 @@ def _kill(args) -> int:
     if pulled.held:
         print("Every launch is refused until `company resume`.")
     else:
-        print("This pull holds no launch, since neither `kill.state` nor the ledger took it: pull it again once that is mended.")
+        print("This pull could not see that it holds any launch: `kill.state` is not there, and the ledger did not say it took the pull. See `company ledger verify`, and pull again once that is mended.")
     return EXIT_OK if pulled.clean else EXIT_REFUSED
 
 

@@ -341,7 +341,7 @@ Notes on single kinds:
 - `launch-refused`'s `check` is the governor's step that refused (`ledger`, `kill`, `settings`, `go`, `pause`, `reading`, `floor` or `share`, and a scheduled session with the schedule off is refused at `go`) or, written by the launcher, its own (`goal`, `settings`, `binary`, `load-form`, `workspace`, `kill` or `ledger`); its `reason` starts with a code, such as `stale`, followed by a sentence, and `fix` is what to do about it.
 - `pull` on `kill-pulled` and `kill-step` is the pull's own id, the name of its file in `kill.state`.
 - `kill-pulled`'s `pulled_at` is when the pull began, and its `ts` when the ledger took it, which comes after the pull's actions and may be at the resume.
-- `kill-step`'s `step` is `hold`, `stop-session`, `schedule` or `rotation`; its `target` names what the step acted on, such as the session, `timers` or the account; and its `result` is `stopped`, `turned-off`, `moved-aside`, `no-key` or `failed`.
+- `kill-step`'s `step` is `hold`, `stop-session`, `schedule` or `rotation`; its `target` names what the step acted on, such as the session, `timers` or the account; and its `result` is `stopped`, `turned-off`, `moved-aside`, `no-key`, `held-no-record` or `failed`.
 - `resource-charged`'s `line` is a bet's id or `overhead`, and each event is that line's whole window so far, so the newest of a window and line replaces the rest.
   A charge writes its lines one at a time, so each holds the charge's `charge_id` and its count of lines, `charge_lines`, and only a whole charge, one with all its lines in the ledger, is read: a charge stopped part way counts for nothing.
 - `minutes-charged`'s `subject_seq` is the `approval-decided` or `send-confirmed` it charges, and its `action` is a key of `minutes_table`.
@@ -557,7 +557,8 @@ A launcher that has logged its session's end clears its processes from that reco
 Either `kill.state` or an open `kill-pulled` refuses a launch, so a pull the ledger could not take still holds, and a record lost later does not lift it.
 The ledger gets the pull once its actions are done, and the command reports after 30 seconds if the ledger's lock is held for that long.
 A pull keeps its steps in its file after each of its four actions, so one ended part way leaves what it had done.
-If neither `kill.state` nor the ledger takes a pull, the command says that it holds no launch.
+If `kill.state` stands but the pull's first write of its file failed, its `hold` step on `kill-file` says `held-no-record`, since the directory holds every launch, and the command still exits as a failure.
+If `kill.state` is not there and the ledger did not say it took a pull, the command says that it could not see that the pull holds any launch, and points to `company ledger verify`, since a line can reach the ledger when its head record cannot.
 What the ledger has not taken stays in the pull's file, and `company resume` writes it when the ledger verifies again, before it lifts the hold.
 Each pull writes only its own file, and the ledger's events for its `pull` id say how far it got, so pulls that overlap and a resume refused part way write nothing twice; a lock of its own, which no action waits on, keeps two writers or two resumes from reading that at once.
 A pull's file names its process until the pull has done, and a resume refuses while that process runs, since the pull is still stopping sessions and moving keys and launches may not start under it; a pull that died part way does not stop a resume.

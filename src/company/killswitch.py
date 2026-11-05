@@ -36,6 +36,7 @@ FAILED = "failed"
 TURNED_OFF = "turned-off"
 MOVED_ASIDE = "moved-aside"
 NO_KEY = "no-key"
+HELD_NO_RECORD = "held-no-record"
 _KILL_FILE = "kill-file"
 _UNNAMED = "<unnamed>"
 _UNKNOWN = "unknown"
@@ -61,7 +62,7 @@ class Step:
 
 @dataclass(frozen=True)
 class Pulled:
-    """What a pull did. `seq` is its `kill-pulled`; `unlogged` is what the ledger has not taken, `unkept` why the file could not hold it, and `held` whether either holds the launches."""
+    """What a pull did. `seq` is its `kill-pulled`; `unlogged` is what the ledger has not taken, `unkept` why the file could not hold it, and `held` whether this pull can see that either holds the launches."""
 
     steps: tuple[Step, ...]
     seq: int | None
@@ -71,7 +72,7 @@ class Pulled:
 
     @property
     def clean(self) -> bool:
-        return self.unlogged is None and self.unkept is None and all(step.result != FAILED for step in self.steps)
+        return self.unlogged is None and self.unkept is None and all(step.result not in (FAILED, HELD_NO_RECORD) for step in self.steps)
 
 
 class PullRefused(Exception):
@@ -277,8 +278,9 @@ def pull(by: str, reason: str, loop: str | None = None) -> Pulled:
     # Its time first, so that the file names sort in the order the pulls began.
     # Its process, until it has done, so that a resume can tell a pull still going from one that died.
     record: dict = {"id": f"{time.time_ns():020d}-{uuid.uuid4()}", "by": by, "reason": reason, "pulled_at": times.stamp(times.now()), **({"loop": loop} if loop else {}), "steps": [], "process": launcher.this_process()}
-    held = _keep(record)
-    steps = [Step(HOLD, _KILL_FILE, FAILED, held)] if held else []
+    problem = _keep(record)
+    # The directory holds every launch by being there, whether or not this pull's file got into it.
+    steps = [Step(HOLD, _KILL_FILE, HELD_NO_RECORD if kill_state.present() else FAILED, problem)] if problem else []
     # The last sweep comes last, since it may wait for a launch that is still deciding, and nothing else should wait with it.
     for name, target, action in ((STOP_SESSION, "sessions", _stop_sweep), (SCHEDULE, "timers", _schedule_off), (ROTATION, "settings", _rotate_accounts), (STOP_SESSION, "sessions", _last_sweep)):
         steps += _attempt(name, target, action)
@@ -290,7 +292,7 @@ def pull(by: str, reason: str, loop: str | None = None) -> Pulled:
     unkept = _keep(record)
     if unkept and any(found["id"] == record["id"] for found in kill_state.read() or []):
         unkept += "; its file still names this process, so a resume is refused until this process ends"
-    # No read of the ledger, whose lock may be held for good.
+    # No read of the ledger, whose lock may be held for good, so a line whose head could not be written counts as not seen.
     return Pulled(tuple(steps), record.get("seq"), unlogged, unkept, kill_state.present() or record.get("seq") is not None)
 
 
