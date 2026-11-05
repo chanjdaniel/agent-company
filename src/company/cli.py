@@ -962,7 +962,7 @@ def _parser() -> argparse.ArgumentParser:
     scans.add_argument("saved_run", metavar="run", help="The run, as `session-started` names it.")
     scans.set_defaults(run=_scan_reading)
 
-    ready = commands.add_parser("preflight", help="List each of Daniel's steps from S3 to S7 as passed or open, with what closes it. It writes nothing, and never reads the key.")
+    ready = commands.add_parser("preflight", help="List each of Daniel's steps from S3 to S7 as passed or open, with what closes it. It adds nothing to the ledger, and never reads the key.")
     ready.set_defaults(run=_preflight)
 
     the_account = commands.add_parser("account", help="Daniel's word on what no code can see of the account.")

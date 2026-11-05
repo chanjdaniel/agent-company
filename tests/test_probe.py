@@ -207,6 +207,15 @@ def test_the_network_rests_on_the_sessions_own_word(probe_run):
     assert kill_state.present()
 
 
+@pytest.mark.parametrize("order", ["before", "after"])
+def test_a_claim_of_success_stands_over_any_other_word_on_that_action(probe_run, order):
+    claim = {"do": "tool", "name": "note", "arguments": {"text": "PROBE shell-network-socket succeeded"}}
+    steps = [claim, {"do": "probe-actions"}] if order == "before" else [{"do": "probe-actions"}, claim]
+    done = probe_run(*steps)
+    assert "shell-network-socket: succeeded" in done.stdout
+    assert kill_state.present()
+
+
 def test_a_session_that_denies_a_write_the_code_can_see_is_not_believed(probe_run):
     done = probe_run({"do": "probe-actions", "lie": ["tool-write-home"]})
     assert done.returncode == 1
@@ -375,6 +384,22 @@ def test_a_failed_sign_in_proves_nothing_spends_the_launch_and_points_to_its_wor
     assert decoys_left() == []
 
 
+def test_a_session_that_reports_everything_and_then_fails_proves_nothing(probe_run):
+    done = probe_run({"do": "probe-actions"}, {"do": "exit", "code": 3})
+    assert done.returncode == 1
+    assert "The check proved nothing: the session exited 3" in done.stdout
+    assert saved_report()["result"] == probe.NOT_PROVEN
+
+
+def test_a_session_stopped_at_its_limit_before_it_reported_proves_nothing(company, stub, board, systemctl):
+    assert company("settings", "set", "session_max_minutes", "0.01").returncode == 0
+    stub.play({"do": "hang"})
+    done = company("session", "probe")
+    assert done.returncode == 1
+    assert "stopped (max-minutes)" in done.stdout
+    assert "The check proved nothing" in done.stdout
+
+
 def test_a_refused_launch_places_no_decoy_and_starts_nothing(company, stub, systemctl):
     done = company("session", "probe")
     assert done.returncode == 1
@@ -480,6 +505,23 @@ def test_a_process_that_escaped_the_group_fails_the_test_is_named_and_is_ended_a
     pids = [pid for line in stub.progress() for pid in line.get("children", [])]
     wait_for(lambda: not any(pid_is_running(pid) for pid in pids))
     assert company("session", "start", "probe").returncode == 1
+
+
+def test_an_escaped_process_with_a_clean_environment_is_found_by_the_number_on_its_command_line(kill_test, stub):
+    done = kill_test(WAITS[0], {"do": "wait-as-told", "popen": {"start_new_session": True, "env": {}}}, {"do": "hang"})
+    assert done.returncode == 1, done.stdout
+    assert "Left running after the stop, each since ended by its own process number: 1." in done.stdout
+    pids = [pid for line in stub.progress() for pid in line.get("children", [])]
+    wait_for(lambda: not any(pid_is_running(pid) for pid in pids))
+
+
+def test_an_escaped_process_with_no_number_is_found_by_the_sessions_variable(kill_test, stub):
+    done = kill_test(*WAITS[:2], {"do": "children", "count": 1, "popen": {"start_new_session": True}}, {"do": "hang"})
+    assert done.returncode == 1, done.stdout
+    assert "Left running after the stop, each since ended by its own process number: 1." in done.stdout
+    assert "/bin/sleep 600" in done.stdout
+    pids = [pid for line in stub.progress() for pid in line.get("children", [])]
+    wait_for(lambda: not any(pid_is_running(pid) for pid in pids))
 
 
 def waits_briefly(tmp_path, monkeypatch):

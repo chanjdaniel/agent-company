@@ -169,7 +169,7 @@ def _play(step, session, tools):
             _record("progress.jsonl", {"hanging": os.getpid()})
             time.sleep(step.get("seconds", 600))
         case "children":
-            pids = [subprocess.Popen(["/bin/sleep", "600"]).pid for _ in range(step["count"])]
+            pids = [subprocess.Popen(["/bin/sleep", "600"], **step.get("popen", {})).pid for _ in range(step["count"])]
             _record("progress.jsonl", {"children": pids})
         case "ignore-term":
             signal.signal(signal.SIGTERM, signal.SIG_IGN)

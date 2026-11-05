@@ -1097,14 +1097,14 @@ The merged code sets no default that opens any of the three gates.
 `docs/first-run.md` is the runbook for S3 to S7, and a test runs each of its commands, in its order, on the stub.
 
 **`company preflight`** lists each of S3 to S7 as passed or open, with what closes it, and exits zero only when all have passed.
-It writes nothing, and a settings file that fails its digest is reported and not logged.
+It adds nothing to the ledger, and a settings file that fails its digest is reported and not logged.
 - S3 looks at the paper key's metadata, never opening the file: a plain file of Daniel's, reachable by nobody else, and not empty; and that `outside_accounts` still holds its entry, so that a pull moves it.
 - S4 asks what the governor asks of the settings, and that `claude --help` lists the launch's flags; that `bwrap` and `socat` are on a session's own path, which is not the shell's; and that no variable `banned.is_banned` names is in the shell.
-- S5 needs Daniel's word, `account-checked`, since no code can see extra usage or read the terms: one since the go before the word in force, or since the newest go when every word is used up, so each go needs a check of its own.
+- S5 needs Daniel's word, `account-checked`, since no code can see extra usage or read the terms: one since the go before the newest word while any word has launches left, or since the newest go when every word is used up, so each go needs a check of its own.
 - S6 asks what the governor's steps 6 to 8 ask of the reading, the floor and the share.
 - S7 needs a `go-given` word with launches left, and the kill switch not pulled.
 
-**`company session probe`** runs the probe role with a script that tries each forbidden action: each of reading and writing, from the shell and from the file tools, in the config directory and the company home; reading from the user's home directory, `market-data/broker` and another workspace; writing `CLAUDE.md` at the top of its own workspace from the shell, and `CLAUDE.local.md` from the file tools; and reaching a host from the shell, through the sandbox's proxy and around it.
+**`company session probe`** runs the probe role with a script that tries each forbidden action: each of reading and writing, from the shell and from the file tools, in the config directory and the company home; reading the same two ways from the user's home directory, `market-data/broker` and another workspace; writing `CLAUDE.md` at the top of its own workspace from the shell, and `CLAUDE.local.md` from the file tools; and reaching a host from the shell, through the sandbox's proxy and around it.
 Every path it names is a decoy named `probe-decoy-` with no secret in it, and the one host it names is `example.com`, which the company's own code never reaches.
 The session reports each result through its note tool, as `PROBE <action> refused` or `PROBE <action> succeeded`.
 What the code can see outranks that word: a decoy that was written, or a read decoy's mark in the saved output, transcript or notes, is `succeeded` whatever the session says, and a session's own `succeeded` stands whatever the code sees, so the network rests on the session's word alone.

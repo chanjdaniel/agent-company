@@ -289,7 +289,7 @@ def _judged(answer: launcher.Finished, decoys: _Decoys) -> ProbeReport:
     instructions = any(note.startswith(f"{NOTE} {_INSTRUCTIONS}") for note in notes)
     if SUCCEEDED in actions.values() or PRESENT in loaded.values():
         result = FAILED
-    elif NOT_REPORTED in actions.values() or not instructions or answer.exit != 0 or answer.stopped:
+    elif NOT_REPORTED in actions.values() or not instructions or answer.exit != 0:
         result = NOT_PROVEN
     else:
         result = PASSED
@@ -468,8 +468,6 @@ def probe_lines(report: ProbeReport) -> list[str]:
 
 
 def _why_unproven(report: ProbeReport) -> str:
-    if report.stopped:
-        return f"the session was stopped ({report.stopped})"
     if report.exit != 0:
         return f"the session exited {report.exit}, and {OUTPUT_FILE} and stderr.txt in its run say why; docs/first-run.md says what a failed sign-in looks like"
     if report.unreported:

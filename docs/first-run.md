@@ -143,7 +143,7 @@ company preflight
 You should see `S3 passed`, `S4 passed`, `S5 passed`, `S6 passed` and `Preflight is open: S7.`
 
 Any other step that is open names the command that closes it.
-The preflight never opens the key's file, and writes nothing.
+The preflight never opens the key's file, and adds nothing to the ledger.
 
 ## S7: gate A
 
@@ -294,8 +294,8 @@ You should see `may launch again`.
 
 ## Stop everything
 
-Ctrl-C at a running session stops that session and everything it started.
-This stops every company session, turns off the schedule, moves each outside account's key aside, and refuses every launch until you say otherwise:
+Ctrl-C at a running session stops that session's process group.
+This stops every company session's process group, turns off the schedule, moves each outside account's key aside, and refuses every launch until you say otherwise:
 
 ```sh
 company kill --reason "<why>"
