@@ -3,7 +3,7 @@
 This is the design the first slice builds, written 2026-11-04.
 It turns the research in [`docs/research/2026-11-02-org-and-profit-loops/`](research/2026-11-02-org-and-profit-loops/report.md) and Daniel's decisions into one document that later work is checked against.
 Where this document and the report or critique differ, this document holds; where this document and Daniel's word differ, Daniel's word holds, and this document is wrong.
-So far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the test suite with its guards and scan, and CI; nothing else here exists as code yet.
+So far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the session launcher, the company tools' server with its note tool, the goal texts, the kill switch, the schedule with its first two jobs, the test suite with its guards and scan, and CI; nothing else here exists as code yet.
 
 Words used throughout:
 
@@ -107,7 +107,7 @@ Each of these can move, and Daniel re-checks them before each go (S5).
   If it moves, the share stops describing what sessions spend; since extra usage is off, sessions stop rather than bill, and the launcher is the one module that changes.
 - **`--bare` becoming the default.**
   Claude Code's [headless docs](https://code.claude.com/docs/en/headless) (read 2026-11-04) say `--bare` "will become the default for `-p` in a future release", and that bare mode "doesn't use your subscription login".
-  With no key in the environment, such a release would make every company session fail at sign-in, which stops the company and costs nothing, and the launcher would then need whatever flag keeps the sign-in.
+  With no key in the environment, such a release would make every company session fail at sign-in, which stops the company and uses no model, and the launcher would then need whatever flag keeps the sign-in.
 - **The terms.**
   Claude Code's [legal page](https://code.claude.com/docs/en/legal-and-compliance) (read 2026-11-04) says subscription sign-in "is designed to support ordinary use of Claude Code and other native Anthropic applications", and that advertised limits "assume ordinary, individual usage of Claude Code and the Agent SDK".
   The same page says developers building products or services, "including those using the Agent SDK, should use API key authentication", and that this does not "prevent an end user from signing in to the unmodified Claude Code binary with their own Claude subscription".
@@ -137,7 +137,7 @@ Rules every session starts under:
   They set `sandbox.enabled`, `sandbox.failIfUnavailable` and `sandbox.allowUnsandboxedCommands: false`, a read boundary (`sandbox.filesystem.denyRead` of the home directory, the company home, the config directory and Claude Code's directory, with the workspace allowed), no write beyond the working directory the sandbox already allows and its per-user temporary directory, no network hosts, and permission rules keeping the file tools inside the workspace.
   At the sandbox layer the read boundary is those directories and not the whole disk, since commands need to read the system's own files.
   At the permission layer, `permissions.blockReadsOutsideWorkingDirectories` and `permissions.blockWritesOutsideWorkingDirectories` say "outside the workspace", because no deny rule can: a deny beats an allow, and the workspace sits inside the home directory.
-  Deny rules also name the config directory, Claude Code's directory, and the ledger, locks and runs in the company home.
+  Deny rules also name the config directory, Claude Code's directory, and the ledger, locks, kill file and runs in the company home.
   They are `Read` and `Edit` rules, since the [permission docs](https://code.claude.com/docs/en/permissions) (read 2026-11-05) say a `Write(path)` rule is accepted and never matches, and that `Edit` rules cover every tool that edits.
   They set no `apiKeyHelper`, no hook and no status line, and the session loads no user-level settings, instructions, skills, subagents, plugins, auto memory or MCP servers.
 - **Both layers are needed.**
@@ -495,7 +495,7 @@ No value of either is compiled in, and missing settings refuse every launch.
 `company governor check <role> [--bet <id>]` answers admitted or refused, with the number of launches left and each window's use, or with the reason and the fix.
 An admission writes nothing and uses no launch: a launch uses one by citing the admission's `gate` in `session-started`, and the oldest word with launches left is the one cited.
 `company go real-sessions --message <Discord id> --sessions <n>` writes a word, needs both flags, and is the only command that does.
-The governor cannot tell a stub from a real `claude`, so every launch it admits needs a word.
+The governor cannot tell a stub from a real `claude`, so every launch it admits needs a word, or the open schedule.
 A floor or share refusal's `launch-refused` holds the window's `account_used`, `company_used` and `reading_seq`, and a reading refusal holds the reading's `reading_seq` when there is a reading to cite.
 A ledger that cannot take the event, one broken at its end, still refuses, and the command says it was not logged.
 Step 5 reads only a pause of scope `cell`, since the company-wide pause stops new outside actions and not sessions; a cell with no bet named is refused, since its pause cannot be read.
@@ -569,7 +569,7 @@ The runner is the `systemctl` first on `PATH`, and the suite puts one there that
 Only Daniel's `company schedule enable --message <Discord id>` turns it on, and it logs `schedule-enabled` with the jobs; `company schedule disable` and the kill switch undo it, and `company schedule list` says which it is.
 If `enable` fails, or a pull lands during it, it turns the timers back off and logs `schedule-disabled`.
 A timer's service runs `company schedule run <job>`, which asks the ledger again and refuses with the schedule off or the kill switch pulled, so a timer that could not be turned off still runs nothing.
-Until then the kill switch's self-test, `company paper tick`, `company treasurer check`, `company treasurer charge`, the daily audit sample, the weekly audit pass, the batch, the strategy session and the retro run by Daniel's command.
+Until gate C opens the schedule, the kill switch's self-test, `company paper tick`, `company treasurer check`, `company treasurer charge`, the daily audit sample, the weekly audit pass, the batch, the strategy session and the retro run by Daniel's command.
 
 ## The six loops
 
@@ -858,14 +858,14 @@ The file holds it as `count` 2, `days` 30 and `outside_action_fraction` 0.02.
 | `tests/` | The suite and its fixtures |
 | `docs/` | `design.md`, `first-run.md` and `runs/` |
 | `.github/workflows/ci.yml` | One job named `test` on each PR to `dev` and `main`, with actions pinned by commit hash, read-only permissions and no secrets |
-| The company home, outside the repository (default `~/.local/state/agent-company/`, or `COMPANY_HOME`) | The ledger, session workspaces and the replay set |
+| The company home, outside the repository (default `~/.local/state/agent-company/`, or `COMPANY_HOME`) | The ledger, session workspaces, each session's run and the replay set |
 | Daniel's config directory, outside the repository (default `~/.config/agent-company/`, or `COMPANY_CONFIG`) | Their settings and the paper key |
 
 `company` is a thin command line over deep modules: Ledger, Usage, Reading, Treasurer, Settings, Governor, Launcher, Company tools, Quant, Paper, Kill switch, Schedule, and one entry each for Batch, Outreach, Opportunity, Portfolio, Retro and Replay.
 
 The suite runs with no network and no model session, and fails on any attempt at either.
 It tests through the `company` command or the company tools over stdio, using a stub `claude` that plays a script through the same tools a real session uses.
-Its guards are in `tests/harness/`: each Python process has an audit hook on sockets and on Daniel's real paths, and a `claude` first on `PATH` fails the test.
+Its guards are in `tests/harness/`: each Python process has an audit hook on sockets and on Daniel's real paths, and a `claude` and a `systemctl` first on `PATH` fail the test.
 The launcher's allow-list strips the guard from a session's environment, as it must, so the seam is in the test's own executable and never in the company's code: the stub's wrapper notes the environment it was given, then sets the guard and the blocker again for the stub and the company tools it starts.
 Its scan, `tests/scan_rules.py`, walks every tracked file for what the runtime section bans; `docs/design.md`, `docs/first-run.md` and the research may name a banned variable, setting or flag and any URL, but no file but the scan's own may hold a real key's shape, a model vendor's host or SDK import, or the live broker host.
 
