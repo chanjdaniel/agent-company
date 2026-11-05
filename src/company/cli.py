@@ -12,8 +12,10 @@ from company import (
     contract,
     digest,
     governor,
+    killswitch,
     launcher,
     reading,
+    schedule,
     settings,
     times,
     treasurer,
@@ -315,7 +317,7 @@ def _print_refusal(answer: governor.Refused) -> None:
 
 
 def _session_start(args) -> int:
-    answer = launcher.start(args.role, args.bet, args.prompt or "", args.workspace)
+    answer = launcher.start(args.role, args.bet, args.prompt or "", args.workspace, args.scheduled)
     if isinstance(answer, governor.Refused):
         _print_refusal(answer)
         return EXIT_REFUSED
@@ -327,11 +329,14 @@ def _session_start(args) -> int:
 
 
 def _governor_check(args) -> int:
-    answer = governor.admit(args.role, args.bet)
+    answer = governor.admit(args.role, args.bet, args.scheduled)
     if isinstance(answer, governor.Refused):
         _print_refusal(answer)
         return EXIT_REFUSED
-    print(f"Admitted: {args.role}, on {answer.gate}, with {_launches(answer.launches_left)} left on that word.")
+    if answer.launches_left is None:
+        print(f"Admitted: {args.role}, on the schedule, which uses no word.")
+    else:
+        print(f"Admitted: {args.role}, on {answer.gate}, with {_launches(answer.launches_left)} left on that word.")
     shown = {window.reading.window: window for window in answer.windows}
     for name in reading.WINDOWS:
         window = shown.get(name)
@@ -343,6 +348,107 @@ def _governor_check(args) -> int:
             f"company used {float(window.company_used):.2f}%, from event {window.reading.seq}"
         )
     return EXIT_OK
+
+
+def _kill_self_test() -> int:
+    checks = killswitch.self_test()
+    for check in checks:
+        print(f"{'passed' if check.passed else 'FAILED'}: {check.name}" + (f": {check.detail}" if check.detail and not check.passed else ""))
+    return EXIT_OK if all(check.passed for check in checks) else EXIT_REFUSED
+
+
+def _kill(args) -> int:
+    if args.self_test:
+        return _kill_self_test()
+    if _refused_inside_a_session(Ledger(), "kill-pulled", "killswitch"):
+        return EXIT_REFUSED
+    pulled = killswitch.pull("daniel", args.reason)
+    print(f"The kill switch is pulled: {args.reason}.")
+    for step in pulled.steps:
+        print(f"{step.step} {step.target}: {step.result}" + (f" ({step.detail})" if step.detail else ""))
+    if pulled.unlogged:
+        print(f"company: {pulled.unlogged}. The company home's kill file holds the record until `company resume`.", file=sys.stderr)
+    print("Every launch is refused until `company resume`.")
+    return EXIT_OK if pulled.clean else EXIT_REFUSED
+
+
+def _resume(args) -> int:
+    if _refused_inside_a_session(Ledger(), "resumed", "board"):
+        return EXIT_REFUSED
+    try:
+        resumed = killswitch.resume(args.message)
+    except (killswitch.ResumeRefused, AppendRefused, LedgerBroken, OSError) as refused:
+        print(f"company: refused: {refused}. Nothing was resumed.", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"Resumed: {len(resumed)} pull closed, and launches may start again.")
+    print(f"The schedule stays off until `{schedule.ENABLE}`, and a key moved aside stays moved until you regenerate it.")
+    return EXIT_OK
+
+
+def _schedule_install(args) -> int:
+    try:
+        schedule.install()
+    except schedule.ScheduleFailed as failed:
+        print(f"company: {failed}. Nothing was turned on.", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"Installed {len(schedule.JOBS)} jobs, every one off. Only `{schedule.ENABLE}` turns them on.")
+    return EXIT_OK
+
+
+def _schedule_enable(args) -> int:
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, "schedule-enabled", "board") or _is_broken(ledger):
+        return EXIT_REFUSED
+    try:
+        event = schedule.enable(args.message)
+    except schedule.ScheduleFailed as failed:
+        print(f"company: {failed}. The ledger says the schedule is off, so no timer runs a job.", file=sys.stderr)
+        return EXIT_REFUSED
+    except (schedule.ScheduleRefused, AppendRefused, LedgerBroken) as refused:
+        print(f"company: refused: {refused}. Nothing was turned on.", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"Recorded event {event['seq']}: the schedule is on, on message {args.message}: {', '.join(event['jobs'])}.")
+    return EXIT_OK
+
+
+def _schedule_disable(args) -> int:
+    try:
+        event = schedule.disable(args.reason)
+    except schedule.ScheduleFailed as failed:
+        print(f"company: {failed}. The timers may still be on.", file=sys.stderr)
+        return EXIT_REFUSED
+    except (AppendRefused, LedgerBroken, OSError) as refused:
+        print(f"company: the timers are off, but the ledger could not take it: {refused}.", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"Recorded event {event['seq']}: the schedule is off.")
+    return EXIT_OK
+
+
+def _schedule_list(args) -> int:
+    ledger = Ledger()
+    if _is_broken(ledger):
+        return EXIT_REFUSED
+    print(f"The schedule is {'on' if schedule.enabled(ledger.read()) else 'off'}.")
+    for job in schedule.JOBS:
+        print(f"{job.name}: `company {' '.join(job.command)}`, on {job.calendar}")
+    return EXIT_OK
+
+
+def _schedule_run(args) -> int:
+    """What a timer's service runs: the ledger decides again, so a timer left on still runs nothing."""
+    ledger = Ledger()
+    if _is_broken(ledger):
+        return EXIT_REFUSED
+    events = ledger.read()
+    refusal = schedule.run_refusal(events)
+    if refusal:
+        print(f"company: refused: {refusal}. The job {args.job} did not run.", file=sys.stderr)
+        return EXIT_REFUSED
+    job = schedule.job(args.job)
+    if not job.is_due(events, times.now()):
+        print(f"The job {args.job} is not due.")
+        return EXIT_OK
+    return main(list(job.command))
 
 
 # `settings init`'s flags: every one is the setting of the same name, and those with no value in the design are required.
@@ -446,6 +552,7 @@ def _parser() -> argparse.ArgumentParser:
     check = actions.add_parser("check", help="Answer admitted or refused now; a refusal is logged, and an admission writes nothing.")
     check.add_argument("role", choices=governor.ROLES)
     check.add_argument("--bet", help="The bet's id, which a cell must name.")
+    check.add_argument("--scheduled", action="store_true", help="Check as a scheduled session, which needs the schedule on and no word.")
     check.set_defaults(run=_governor_check)
 
     sessions = commands.add_parser("session", help="Run a company session.")
@@ -456,7 +563,38 @@ def _parser() -> argparse.ArgumentParser:
     begin.add_argument("--bet", help="The bet's id, which a cell must name.")
     begin.add_argument("--prompt", help="The task, added after the role's goal text.")
     begin.add_argument("--workspace", help="A workspace under the company's; with none, a fresh one.")
+    begin.add_argument("--scheduled", action="store_true", help="Start as a scheduled session, which needs the schedule on and no word.")
     begin.set_defaults(run=_session_start)
+
+    stop = commands.add_parser("kill", help="Stop every session, turn off the schedule, rotate each outside account, and hold every launch.")
+    stop.add_argument("--reason", default="pulled by hand", help="Why, for the ledger.")
+    stop.add_argument("--self-test", action="store_true", help="Run a whole pull in a temporary home of its own, on stubs, and touch nothing here.")
+    stop.set_defaults(run=_kill)
+
+    again = commands.add_parser("resume", help="Daniel's word that launches may start again after the kill switch.")
+    again.add_argument("--message", help="The Discord id of Daniel's word, if there is one.")
+    again.set_defaults(run=_resume)
+
+    timers = commands.add_parser("schedule", help="The company's timers, which only Daniel's command turns on.")
+    actions = timers.add_subparsers(dest="action", required=True)
+
+    install = actions.add_parser("install", help="Write each job's timer, with every one off.")
+    install.set_defaults(run=_schedule_install)
+
+    enable = actions.add_parser("enable", help="Turn the timers on, on Daniel's word. Nothing else does.")
+    enable.add_argument("--message", required=True, help="The Discord id of Daniel's word.")
+    enable.set_defaults(run=_schedule_enable)
+
+    disable = actions.add_parser("disable", help="Turn the timers off.")
+    disable.add_argument("--reason", default="by hand", help="Why, for the ledger.")
+    disable.set_defaults(run=_schedule_disable)
+
+    listed = actions.add_parser("list", help="Say whether the schedule is on, and list its jobs.")
+    listed.set_defaults(run=_schedule_list)
+
+    firing = actions.add_parser("run", help="What a timer runs: one job, if the schedule is on and it is due.")
+    firing.add_argument("job", choices=[job.name for job in schedule.JOBS])
+    firing.set_defaults(run=_schedule_run)
 
     return parser
 

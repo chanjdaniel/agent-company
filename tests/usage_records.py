@@ -5,7 +5,7 @@ The weights below use two list prices from the package's table, per million toke
 """
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from company.ledger import Ledger
@@ -111,6 +111,12 @@ def record_reading(window, used_percent, resets_at, taken_at, source="hand", wri
     """Put a reading in the ledger as it stands, even a malformed one; returns its seq."""
     fields = {"window": window, "used_percent": used_percent, "resets_at": resets_at, "taken_at": taken_at, "source": source}
     return Ledger().append("usage-reading", fields, writer)["seq"]
+
+
+def week_reading(used_percent=40, resets_in=timedelta(hours=72)):
+    """A fresh seven-day reading, taken now on the real clock."""
+    now = datetime.now(UTC)
+    return record_reading("seven_day", used_percent, (now + resets_in).strftime("%Y-%m-%dT%H:%M:%SZ"), now.strftime("%Y-%m-%dT%H:%M:%SZ"))
 
 
 def start_session(session, role, reading_seq, bet=None, ledger=None):

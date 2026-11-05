@@ -17,14 +17,24 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import timedelta
 from fractions import Fraction
 from pathlib import Path
 from typing import NamedTuple
 
-from company import banned, goals, governor, paths, settings, times, tools, usage
+from company import (
+    banned,
+    goals,
+    governor,
+    kill_state,
+    paths,
+    settings,
+    times,
+    tools,
+    usage,
+)
 from company.ledger import AppendRefused, Ledger, LedgerBroken
 
 BINARY_VARIABLE = "COMPANY_CLAUDE_BIN"
@@ -57,6 +67,8 @@ ROLE_BUILT_INS = {
 }
 
 GRACE_SECONDS = 5
+_KILLED_GONE_SECONDS = 2
+_LAUNCHER_GRACE_SECONDS = 5
 _TICK_SECONDS = 0.05
 _WEIGHT_EVERY_SECONDS = 0.5
 _HELP_TIMEOUT_SECONDS = 30
@@ -68,6 +80,7 @@ _MAX_MINUTES = "max-minutes"
 _MAX_WEIGHT = "max-weight"
 _SIGNALLED = "launcher-signalled"
 _GONE = "launcher-gone"
+_KILLED = "kill-switch"
 _NO_TRANSCRIPT = "none"
 _SESSION_ENDS = ("session-ended", "session-stopped")
 
@@ -223,17 +236,21 @@ def _check_workspace(workspace: Path) -> None:
         raise _Refuse("workspace", reason, f"remove it from {workspace}, after reading what wrote it")
 
 
+def flags_passed(role: str) -> list[str]:
+    """Every flag a launch of this role passes, each of which `claude --help` must list."""
+    passed = _command("claude-path", role, "session", "model", Path("mcp"), Path("settings"))
+    return [argument for argument in passed if argument.startswith("-")]
+
+
 def _check_form(claude: str, role: str, environment: dict[str, str]) -> None:
     """Refuse a `claude` whose help does not list what this launch passes: it never falls back to loading more."""
-    passed = _command(claude, role, "session", "model", Path("mcp"), Path("settings"))
     try:
         done = subprocess.run([claude, "--help"], env=environment, capture_output=True, text=True, timeout=_HELP_TIMEOUT_SECONDS, check=False)
     except (OSError, subprocess.SubprocessError) as error:
         raise _Refuse("load-form", f"no-load-form: `claude --help` could not run: {error}", _FIX_LOAD_FORM) from None
     if done.returncode != 0:
         raise _Refuse("load-form", f"no-load-form: `claude --help` exited {done.returncode}", _FIX_LOAD_FORM)
-    flags = [argument for argument in passed if argument.startswith("-")]
-    missing = [flag for flag in flags if not re.search(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", done.stdout)]
+    missing = [flag for flag in flags_passed(role) if not re.search(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", done.stdout)]
     if missing:
         raise _Refuse("load-form", "no-load-form: its help does not list " + ", ".join(missing), _FIX_LOAD_FORM)
 
@@ -277,17 +294,24 @@ def group_alive(group: int) -> bool:
     return False
 
 
-def stop_group(group: int) -> None:
-    """Stop a session's whole process group: ask, wait, then kill what is left."""
+def _gone_within(seconds: float, alive: Callable[[], bool]) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not alive():
+            return True
+        time.sleep(_TICK_SECONDS)
+    return not alive()
+
+
+def stop_group(group: int) -> bool:
+    """Stop a session's whole process group: ask, wait, then kill what is left; whether it has all gone."""
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(group, signal.SIGTERM)
-    deadline = time.monotonic() + GRACE_SECONDS
-    while time.monotonic() < deadline:
-        if not group_alive(group):
-            return
-        time.sleep(_TICK_SECONDS)
+    if _gone_within(GRACE_SECONDS, lambda: group_alive(group)):
+        return True
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(group, signal.SIGKILL)
+    return _gone_within(_KILLED_GONE_SECONDS, lambda: group_alive(group))
 
 
 def _transcript_source(session: str) -> Path | None:
@@ -331,6 +355,24 @@ def _launch_lock() -> Iterator[None]:
         os.close(fd)
 
 
+def wait_for_launches(seconds: float) -> bool:
+    """Wait until no launch is deciding, so that what was admitted before a pull has started; whether that happened."""
+    paths.home().mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(paths.home() / "launch.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+
+        def locked() -> bool:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            return False
+
+        return _gone_within(seconds, locked)
+    finally:
+        os.close(fd)
+
+
 def _open_sessions(events: list[dict]) -> list[dict]:
     ended = {event["session"] for event in events if event["kind"] in _SESSION_ENDS}
     return [event for event in events if event["kind"] == "session-started" and event["session"] not in ended]
@@ -348,6 +390,48 @@ def _still_its_group(state: dict) -> bool:
         return False
     leader = _process_stat(group)
     return leader is None or leader.started == recorded
+
+
+@dataclass(frozen=True)
+class Running:
+    """A session with something still alive, as its run's `session.json` says: a process group, a launcher, or both."""
+
+    session: str
+    group: int | None
+    launcher: int | None
+    launcher_started: int | None
+
+
+def running_sessions() -> list[Running]:
+    """Each session still running, read from the run directories alone, so that a broken ledger hides none.
+
+    The launcher calling this is left out, since it runs no session now if it is asking.
+    """
+    found = []
+    for path in paths.runs().glob("*/session.json"):
+        try:
+            state = json.loads(path.read_text())
+            group = state["group"] if _still_its_group(state) else None
+            pid = state.get("launcher", -1)
+            alive = pid != os.getpid() and _alive(pid, state.get("launcher_started"))
+            if group is not None or alive:
+                found.append(Running(state["session"], group, pid if alive else None, state.get("launcher_started")))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return found
+
+
+def stop_session(found: Running) -> bool:
+    """Stop a session's group, then see its launcher out, which logs the end; a launcher that does not leave is killed.
+
+    Whether nothing is left in the group.
+    """
+    stopped = found.group is None or stop_group(found.group)
+    pid = found.launcher
+    if pid is not None and not _gone_within(_LAUNCHER_GRACE_SECONDS, lambda: _alive(pid, found.launcher_started)):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, signal.SIGKILL)
+    return stopped
 
 
 def _close_if_gone(ledger: Ledger, started: dict) -> None:
@@ -498,6 +582,8 @@ def _watch(process: subprocess.Popen, launch: _Launch, signalled: list[int]) -> 
     next_weight = began
     while process.poll() is None:
         now = time.monotonic()
+        if kill_state.present():
+            return _KILLED
         if signalled:
             return _SIGNALLED
         if Fraction(now - began) >= launch.max_minutes * 60:
@@ -507,7 +593,8 @@ def _watch(process: subprocess.Popen, launch: _Launch, signalled: list[int]) -> 
             if _weight(launch.session, launch.run_dir) >= launch.max_weight:
                 return _MAX_WEIGHT
         time.sleep(_TICK_SECONDS)
-    return None
+    # The kill switch may have reached the session's group before this saw the file.
+    return _KILLED if kill_state.present() else None
 
 
 def _finish(launch: _Launch, process: subprocess.Popen, stopped: str | None, began: float) -> Finished:
@@ -545,17 +632,20 @@ def _run(launch: _Launch, process: subprocess.Popen) -> Finished:
     return _finish(launch, process, stopped, began)
 
 
-def start(role: str, bet: str | None = None, prompt: str = "", workspace: str | None = None) -> Finished | governor.Refused:
+def start(role: str, bet: str | None = None, prompt: str = "", workspace: str | None = None, scheduled: bool = False) -> Finished | governor.Refused:
     """Run one session from admission to its end; a refused launch starts nothing."""
     with _launch_lock():
         close_gone_sessions()
-        admitted = governor.admit(role, bet)
+        admitted = governor.admit(role, bet, scheduled)
         if isinstance(admitted, governor.Refused):
             return admitted
         try:
             launch = _prepare(admitted, prompt, workspace)
         except _Refuse as refusal:
             return _refuse(role, bet, refusal)
+        # Preparing takes seconds, and the kill switch may have been pulled since the governor looked.
+        if kill_state.present():
+            return _refuse(role, bet, _Refuse("kill", "killed: the kill switch was pulled during this launch", governor.FIX_KILL))
         _record_processes(launch, None)
         try:
             _log_start(launch, admitted)

@@ -32,3 +32,8 @@ def workspaces() -> Path:
 def runs() -> Path:
     """Each session's saved record: its settings, output and copy of its transcript."""
     return home() / "runs"
+
+
+def systemd_user() -> Path:
+    """Where systemd keeps the user's own units."""
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "systemd/user"

@@ -2,7 +2,7 @@
 
 Only a refusal writes: `launch-refused`, with the reason, the share and the reading behind it.
 Whatever cannot be read refuses, and never assumes room.
-It cannot tell a stub from a real `claude`, so every launch it admits needs a `go-given` word.
+It cannot tell a stub from a real `claude`, so every launch it admits needs a `go-given` word, or the open schedule.
 """
 
 from collections import Counter
@@ -10,7 +10,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from fractions import Fraction
 
-from company import contract, reading, settings, times, treasurer, usage
+from company import (
+    contract,
+    kill_state,
+    reading,
+    schedule,
+    settings,
+    times,
+    treasurer,
+    usage,
+)
 from company.ledger import AppendRefused, Ledger, LedgerBroken
 
 ROLES = ("probe", "cell", "strategy", "auditor", "retro")
@@ -18,16 +27,21 @@ GO_SCOPE = "real-sessions"
 FIX_GO = f"company go {GO_SCOPE} --message <Discord id> --sessions <n>"
 FIX_LEDGER = "company ledger verify"
 FIX_PAUSE = "company cell resume"
+FIX_KILL = kill_state.RESUME
+SCHEDULE_GATE = "schedule"
 
 
 @dataclass(frozen=True)
 class Admitted:
-    """Room for one launch. `gate` is what `session-started` cites, and the numbers are the seven-day window's."""
+    """Room for one launch. `gate` is what `session-started` cites, and the numbers are the seven-day window's.
+
+    `launches_left` is None for a scheduled session, which uses no word.
+    """
 
     role: str
     bet: str | None
     gate: str
-    launches_left: int
+    launches_left: int | None
     account_used: float
     company_used: float
     reading_seq: int
@@ -62,6 +76,12 @@ def _events(ledger: Ledger) -> list[dict]:
         raise _Stop("ledger", f"broken: {error}", FIX_LEDGER) from None
 
 
+def _not_killed(events: list[dict]) -> None:
+    held = kill_state.refusal(events)
+    if held:
+        raise _Stop("kill", f"killed: {held}", FIX_KILL)
+
+
 def _settings() -> tuple[dict, Fraction, Fraction]:
     """The file, with the share as a percent and the floor; every number the later checks read is checked here."""
     try:
@@ -90,6 +110,13 @@ def _go(events: list[dict]) -> tuple[str, int]:
         if left > 0:
             return gate, left
     raise _Stop("go", "go-used-up: every go-given word's launches are used", FIX_GO)
+
+
+def _schedule_open(events: list[dict]) -> tuple[str, None]:
+    """A scheduled session uses no word, and needs the schedule on."""
+    if not schedule.enabled(events):
+        raise _Stop("go", "schedule-off: a scheduled session needs the schedule on, and it is off", schedule.ENABLE)
+    return SCHEDULE_GATE, None
 
 
 def _not_paused(events: list[dict], role: str, bet: str | None) -> None:
@@ -167,15 +194,16 @@ def _log(role: str, bet: str | None, stop: _Stop) -> int | None:
         return None
 
 
-def admit(role: str, bet: str | None = None) -> Admitted | Refused:
+def admit(role: str, bet: str | None = None, scheduled: bool = False) -> Admitted | Refused:
     """Whether `role` may start now, for `bet`; this uses up nothing, since a launch does that by citing the `gate`."""
     if role not in ROLES:
         raise ValueError(f"no such role: {role}")
     now = times.now().replace(microsecond=0)
     try:
         events = _events(Ledger())
+        _not_killed(events)
         loaded, share, floor = _settings()
-        gate, left = _go(events)
+        gate, left = _schedule_open(events) if scheduled else _go(events)
         _not_paused(events, role, bet)
         windows = _windows(events, loaded, now)
         _under_floor(windows, floor)

@@ -17,7 +17,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-import stub_session
 from test_suite_guard import run_child_suite
 from usage_records import (
     SETTINGS_INIT,
@@ -25,6 +24,7 @@ from usage_records import (
     record_reading,
     start_session,
     transcript_line,
+    week_reading,
 )
 
 from company import banned, goals, launcher, paths
@@ -38,11 +38,6 @@ BARE = "--" + "bare"
 
 def stamp(when):
     return when.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def week_reading(used_percent=40):
-    now = datetime.now(UTC)
-    return record_reading("seven_day", used_percent, stamp(now + timedelta(hours=72)), stamp(now))
 
 
 def events(kind=None):
@@ -69,24 +64,6 @@ def pid_is_running(pid):
     except OSError:
         return False
     return text.rsplit(")", 1)[1].split()[0] != "Z"
-
-
-@pytest.fixture
-def stub(tmp_path, monkeypatch, transcripts):
-    """Choose the stub as `claude`, with this test's own transcripts."""
-    chosen = stub_session.Stub(tmp_path / "stub")
-    monkeypatch.setenv(launcher.BINARY_VARIABLE, str(chosen.binary))
-    return chosen
-
-
-@pytest.fixture
-def board(company):
-    """Daniel has written their settings, given a go for ten launches, and read the account at 40%."""
-    done = company(*SETTINGS_INIT)
-    assert done.returncode == 0, done.stderr
-    done = company("go", "real-sessions", "--message", "1234", "--sessions", "10")
-    assert done.returncode == 0, done.stderr
-    return week_reading()
 
 
 @pytest.fixture
@@ -1066,7 +1043,9 @@ SPAWNING = {
     "asyncio": {"create_subprocess_exec", "create_subprocess_shell"},
     "pty": {"spawn"},
 }  # fmt: skip
-SPAWNING_MODULES = frozenset({"launcher.py"})
+# Each of these starts a process of its own for a reason: `schedule.py` runs `systemctl`, and `killswitch.py` its self-test.
+SPAWNING_MODULES = frozenset({"launcher.py", "killswitch.py", "schedule.py"})
+CLAUDE_MODULES = frozenset({"launcher.py"})
 
 
 def starts_processes(source):
@@ -1090,11 +1069,21 @@ def names_claude(source):
 
 
 def scan_for_spawners(root):
-    return sorted(path.name for path in Path(root).rglob("*.py") if path.name not in SPAWNING_MODULES and (starts_processes(path.read_text()) or names_claude(path.read_text())))
+    found = []
+    for path in Path(root).rglob("*.py"):
+        source = path.read_text()
+        if (path.name not in SPAWNING_MODULES and starts_processes(source)) or (path.name not in CLAUDE_MODULES and names_claude(source)):
+            found.append(path.name)
+    return sorted(found)
 
 
-def test_the_launcher_is_the_only_code_that_starts_a_process_or_names_claude(repo):
+def test_the_launcher_is_the_only_code_that_names_claude_and_only_these_start_a_process(repo):
     assert scan_for_spawners(repo / "src/company") == []
+
+
+def test_a_module_that_may_start_a_process_still_may_not_name_claude(tmp_path):
+    (tmp_path / "schedule.py").write_text("import subprocess\nsubprocess.run(['claude', '-p'])\n")
+    assert scan_for_spawners(tmp_path) == ["schedule.py"]
 
 
 @pytest.mark.parametrize(

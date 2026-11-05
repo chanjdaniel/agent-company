@@ -1,6 +1,7 @@
 """Fixtures for the whole suite, whose guards live in `harness/suite_guard.py`."""
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ import ledger_history
 import pytest
 import usage_records
 
+from company import launcher
 from company import settings as settings_module
 from company.ledger import Ledger
 
@@ -26,10 +28,11 @@ def repo():
 
 @pytest.fixture(autouse=True)
 def company_home(tmp_path, monkeypatch):
-    """Each test starts with an empty company home and config directory of its own."""
+    """Each test starts with an empty company home, config directory and set of timers of its own."""
     home = tmp_path / "company-home"
     monkeypatch.setenv("COMPANY_HOME", str(home))
     monkeypatch.setenv("COMPANY_CONFIG", str(tmp_path / "company-config"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
     return home
 
 
@@ -42,6 +45,36 @@ def company():
         return subprocess.run([script, *args], capture_output=True, check=False, text=True, timeout=60, **kwargs)
 
     return run
+
+
+@pytest.fixture
+def stub(tmp_path, monkeypatch, transcripts):
+    """Choose the stub session as `claude`, with this test's own transcripts."""
+    import stub_session
+
+    chosen = stub_session.Stub(tmp_path / "stub")
+    monkeypatch.setenv(launcher.BINARY_VARIABLE, str(chosen.binary))
+    return chosen
+
+
+@pytest.fixture
+def systemctl(tmp_path, monkeypatch):
+    """Choose a stub `systemctl`, first on PATH, in place of the suite's blocker."""
+    import stub_session
+
+    chosen = stub_session.Systemctl(tmp_path / "systemctl")
+    monkeypatch.setenv("PATH", f"{chosen.directory}{os.pathsep}{os.environ['PATH']}")
+    return chosen
+
+
+@pytest.fixture
+def board(company):
+    """Daniel has written their settings, given a go for ten launches, and read the account at 40%."""
+    done = company(*usage_records.SETTINGS_INIT)
+    assert done.returncode == 0, done.stderr
+    done = company("go", "real-sessions", "--message", "1234", "--sessions", "10")
+    assert done.returncode == 0, done.stderr
+    return usage_records.week_reading()
 
 
 @pytest.fixture

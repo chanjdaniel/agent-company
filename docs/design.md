@@ -179,6 +179,8 @@ Rules every session starts under:
   A lock held from before `admit` until the session has started keeps two launches from both spending a word's last launch.
 - **A signal to the launcher.**
   SIGTERM, SIGINT or SIGHUP stops the session's group and logs `session-stopped` with the reason `launcher-signalled`, since a Ctrl-C reaches only the launcher, the session being in a group of its own.
+- **The kill switch.**
+  A launcher that sees the kill file stops the session's group and logs `session-stopped` with the reason `kill-switch`, and it refuses a launch whose preparing took long enough for a pull to land.
 - **At the end,** the launcher logs `session-ended` with the exit, the transcript's path and hash and the session's weight, and copies the transcript into the company home, so that it outlives Claude Code's own clean-up and the audit window can rely on it.
   A session with no transcript has `none` for its path and hash.
   Each run's directory, `runs/<run>/` in the company home, also keeps its raw output, settings, server configuration and prompt.
@@ -335,7 +337,8 @@ Notes on single kinds:
 - `settings-changed` holds the changed keys' names and the new digest, not their values.
 - `session-note` is a cell's or the probe's free text, so it is kept out of the strategy session's view, since that session never talks to a cell; that view still holds a cell's registrations and proposals, which it reads as data.
 - `session-started`'s `gate` is `go:<seq>` or `schedule`, and a `go-given` word's launches left are its `sessions` minus the `session-started` events citing it.
-- `launch-refused`'s `check` is the governor's step that refused (`ledger`, `settings`, `go`, `pause`, `reading`, `floor` or `share`) or, written by the launcher, its own (`goal`, `settings`, `binary`, `load-form`, `workspace` or `ledger`); its `reason` starts with a code, such as `stale`, followed by a sentence, and `fix` is what to do about it.
+- `launch-refused`'s `check` is the governor's step that refused (`ledger`, `kill`, `settings`, `go`, `pause`, `reading`, `floor` or `share`, and a scheduled session with the schedule off is refused at `go`) or, written by the launcher, its own (`goal`, `settings`, `binary`, `load-form`, `workspace`, `kill` or `ledger`); its `reason` starts with a code, such as `stale`, followed by a sentence, and `fix` is what to do about it.
+- `kill-step`'s `step` is `hold`, `stop-session`, `schedule` or `rotation`, its `target` the session, `timers` or the account, and its `result` `stopped`, `turned-off`, `moved-aside`, `no-key` or `failed`.
 - `resource-charged`'s `line` is a bet's id or `overhead`, and each event is that line's whole window so far, so the newest of a window and line replaces the rest.
   A charge writes its lines one at a time, so each holds the charge's `charge_id` and its count of lines, `charge_lines`, and only a whole charge, one with all its lines in the ledger, is read: a charge stopped part way counts for nothing.
 - `minutes-charged`'s `subject_seq` is the `approval-decided` or `send-confirmed` it charges, and its `action` is a key of `minutes_table`.
@@ -367,6 +370,8 @@ A correction (`minutes-corrected`, from `company minutes correct`) replaces the 
 It charges only the open window, so to count a window whole it must run after that window's last session has ended and before its reset; a session that ran in a window and has no end before that window's newest whole charge leaves the window's cost unknown.
 It has no flag to set the time it charges at, since what it writes stands for good.
 It runs by Daniel's command until gate C opens the schedule, and then at each session's end and shortly before the newest reading's reset, since a plain daily timer would often miss a window's last session.
+Its job fires every five minutes and charges only when it is due: a session in the newest reading's window has ended since the newest whole charge, or that window has 15 minutes or less to run.
+So a session that ends in a window's last five minutes may miss its window's last charge, and that window's cost then stays unknown, which claims no bar.
 Real-money spending, when Daniel allows any, goes through a card or account with its own hard limit, never Daniel's main card.
 
 ## Cost and the ladder
@@ -493,7 +498,8 @@ The governor cannot tell a stub from a real `claude`, so every launch it admits 
 A floor or share refusal's `launch-refused` holds the window's `account_used`, `company_used` and `reading_seq`, and a reading refusal holds the reading's `reading_seq` when there is a reading to cite.
 A ledger that cannot take the event, one broken at its end, still refuses, and the command says it was not logged.
 Step 5 reads only a pause of scope `cell`, since the company-wide pause stops new outside actions and not sessions; a cell with no bet named is refused, since its pause cannot be read.
-The code holds steps 1, 3, 4 with the go word alone, 5, 6, 7 and 8 so far: ticket 07 adds step 2 and step 4's scheduled session, and ticket 18 adds step 9.
+The code holds every step but 9, which ticket 18 adds.
+A scheduled session is one started with `--scheduled`: it cites the gate `schedule`, uses no word, and is refused with the schedule off; a session started by hand needs a word whether the schedule is on or off.
 
 **When the account's window use cannot be read, the governor refuses the launch and never assumes room.**
 It cannot be read, and the launch is refused, for each of these reasons:
@@ -534,15 +540,31 @@ The kill switch is one command, `company kill`, that does the following:
 2. It disables the company's schedule.
 3. It runs the rotation step of every outside account the company holds, listed in the settings; a step that fails does not stop the others, and is reported.
 
-Only Daniel's resume command undoes it, and every launch is refused until then.
-Any loop's red line can pull it by code, and the ledger names the loop.
+Only Daniel's resume command, `company resume [--message <Discord id>]`, undoes it, and every launch is refused until then.
+A resume leaves the schedule off and a moved key moved, so each of those comes back only by Daniel's own step.
+Any loop's red line can pull it by code, with `killswitch.pull(by, reason, loop)`, and the ledger names the loop.
 Its self-test, `company kill --self-test`, runs in the test suite with stub sessions and accounts in its own temporary home, and on the schedule once gate C opens.
+It reads and writes nothing of the home it was started from, so its result goes to its output alone, which on the schedule is the timer's journal.
+
+A pull must work when the ledger cannot, since `Ledger.append` raises on a broken end.
+So its first act is a file in the company home, `kill.state`, and its actions all come before any ledger write, with each failure a reported step that stops nothing else.
+It finds sessions from each run's `session.json`, and a launcher that is running also watches the file, so a session stops itself even with no kill command running.
+Either the file or an open `kill-pulled` refuses a launch, so a pull the ledger could not take still holds, and a file lost later does not lift it.
+The ledger gets the pull once its actions are done; what it could not take stays in the file, and `company resume` writes it, marked as logged late, when the ledger verifies again.
+A broken ledger refuses a resume, so the hold stands until it is whole.
+A process that leaves the session's process group with `setsid` is out of the signal's reach, which is what C1 asks of a real session.
+
+Each entry of `outside_accounts` is `{"name", "rotation", "key_file"}`, whose `rotation` is `move-key`, the only step the code has, and whose `key_file` is a path inside Daniel's config directory.
+A settings file that fails its digest does not stop a pull, which may be answering that very tamper: its list is used as it stands, each entry is checked, and a `rotation` step on `settings` reports it as failed.
 
 **The paper key's rotation:** the code moves the key aside so it can no longer be used, and tells Daniel to regenerate it at the broker, because the code holds no broker admin path.
 The key is read by the paper module from the key file at use, and passed to no session and no log.
 
-The schedule is systemd user timers behind a runner that tests replace, installed disabled.
-Only Daniel's `company schedule enable --message <Discord id>` turns it on, and the kill switch undoes it.
+The schedule is systemd user timers behind a runner that tests replace, installed disabled, with its jobs listed in code in `schedule.JOBS`.
+The runner is the `systemctl` first on `PATH`, and the suite puts one there that fails any test that did not choose a stub.
+`company schedule install` writes each job's units and turns nothing on.
+Only Daniel's `company schedule enable --message <Discord id>` turns it on, and it logs `schedule-enabled` with the jobs; `company schedule disable` and the kill switch undo it, and `company schedule list` says which it is.
+A timer's service runs `company schedule run <job>`, which asks the ledger again and refuses with the schedule off or the kill switch pulled, so a timer that could not be turned off still runs nothing.
 Until then the kill switch's self-test, `company paper tick`, `company treasurer check`, `company treasurer charge`, the daily audit sample, the weekly audit pass, the batch, the strategy session and the retro run by Daniel's command.
 
 ## The six loops

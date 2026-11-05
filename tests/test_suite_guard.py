@@ -146,6 +146,19 @@ def test_an_unchosen_claude_in_a_child_python_fails_the_test(tmp_path):
     assert "the suite's guard caught this, in this test or just before it: model" in result.stdout
 
 
+def test_an_unchosen_systemctl_fails_the_test(tmp_path):
+    # A real one would change Daniel's own timers.
+    source = bare_test(
+        """
+        import subprocess
+        subprocess.run(["systemctl", "--user", "enable", "--now", "a.timer"], capture_output=True)
+        """
+    )
+    result = run_child_suite(tmp_path, source)
+    assert result.returncode == TEST_FAILED, result.stdout + result.stderr
+    assert "the suite's guard caught this, in this test or just before it: schedule" in result.stdout
+
+
 def test_a_claude_a_test_chose_passes(tmp_path):
     stub = tmp_path / "stub" / "claude"
     stub.parent.mkdir()
@@ -195,6 +208,7 @@ REAL_PATHS = {
     "the company home": f"{REAL_HOME}/.local/state/agent-company/ledger.jsonl",
     "the config directory": f"{REAL_HOME}/.config/agent-company/settings.json",
     "Claude Code's directory": f"{REAL_HOME}/.claude/projects/guard-probe.jsonl",
+    "the user's timers": f"{REAL_HOME}/.config/systemd/user/guard-probe.timer",
 }
 
 
@@ -236,10 +250,12 @@ def test_opening_a_real_path_in_a_child_python_fails_the_test(what, tmp_path):
         ("COMPANY_CONFIG", f"{REAL_HOME}/.config/agent-company"),
         ("CLAUDE_CONFIG_DIR", f"{REAL_HOME}/.claude"),
         ("HOME", REAL_HOME),
+        ("XDG_CONFIG_HOME", f"{REAL_HOME}/.config"),
         ("COMPANY_HOME", None),
         ("COMPANY_CONFIG", None),
         ("CLAUDE_CONFIG_DIR", None),
         ("HOME", None),
+        ("XDG_CONFIG_HOME", None),
     ],
 )
 def test_the_suite_refuses_to_start_with_real_state_in_reach(name, value, tmp_path):
@@ -259,7 +275,7 @@ def test_the_suite_refuses_to_start_with_real_state_in_reach(name, value, tmp_pa
     assert "no test may run" not in result.stdout
 
 
-def test_the_suite_refuses_to_start_without_its_blocker_first_on_path(tmp_path):
+def test_the_suite_refuses_to_start_without_its_blockers_first_on_path(tmp_path):
     conftest = """
         import os
         def pytest_configure(config):

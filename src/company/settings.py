@@ -19,6 +19,7 @@ from company.ledger import AppendRefused, Ledger, LedgerBroken
 
 INIT = "company settings init"
 SET = "company settings set"
+MOVE_KEY = "move-key"
 _NO_FILE = "none"
 
 
@@ -285,9 +286,53 @@ def day_dirs(settings: dict) -> list[str]:
     return value
 
 
+def key_path(account: dict) -> Path:
+    """Where an outside account's key file is: always in the config directory."""
+    return paths.config() / account["key_file"]
+
+
+def account_problem(account) -> str | None:
+    """What is wrong with one entry of `outside_accounts`, whose rotation step the kill switch runs; or None."""
+    if not isinstance(account, dict) or set(account) != {"name", "rotation", "key_file"}:
+        return "an outside account holds exactly a name, a rotation and a key_file"
+    if not isinstance(account["name"], str) or not account["name"]:
+        return "an outside account's name is a text"
+    if account["rotation"] != MOVE_KEY:
+        return f"an outside account's rotation is {MOVE_KEY}, the only step the code has"
+    key_file = account["key_file"]
+    if not isinstance(key_file, str) or not key_file or Path(key_file).is_absolute() or ".." in Path(key_file).parts:
+        return "an outside account's key_file is a path inside the config directory"
+    return None
+
+
 def _outside_accounts(settings: dict, key: str) -> None:
-    if not isinstance(settings.get(key), list):
+    value = settings.get(key)
+    if not isinstance(value, list):
         raise SettingsRefused(f"the setting {key} is not a list of accounts")
+    for account in value:
+        problem = account_problem(account)
+        if problem:
+            raise SettingsRefused(f"the setting {key}: {problem}")
+
+
+def accounts_for_kill() -> tuple[list, str | None]:
+    """The accounts for the kill switch to rotate, and what is wrong with the file they came from.
+
+    A pull must not be stopped by the very tamper it may be answering, so a file that fails its digest, or a ledger that
+    cannot say, still gives its list as it stands, and each entry is checked. It can name only files in this directory.
+    """
+    problem = None
+    try:
+        return load().get("outside_accounts", []), None
+    except SettingsMissing:
+        return [], None
+    except (SettingsRefused, LedgerBroken, OSError) as error:
+        problem = f"the settings are not checked, so their list is used as it stands: {error}"
+    try:
+        value = json.loads(_path().read_bytes()).get("outside_accounts", [])
+    except (OSError, ValueError, AttributeError) as error:
+        return [], f"{problem}; and it cannot be read: {error}"
+    return (value, problem) if isinstance(value, list) else ([], problem)
 
 
 # Every setting the file may hold, with what `init` and `set` check it by.

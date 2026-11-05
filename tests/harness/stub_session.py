@@ -84,3 +84,26 @@ class Stub:
 
     def mcp_config(self):
         return json.loads(Path(self.argument("--mcp-config")).read_text())
+
+
+class Systemctl:
+    """A stub `systemctl` in `directory`, which notes each call; `fail` makes one verb exit 1."""
+
+    def __init__(self, directory: Path):
+        self.directory = directory
+        self.directory.mkdir(parents=True, exist_ok=True)
+        binary = self.directory / "systemctl"
+        here = shlex.quote(str(self.directory))
+        binary.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$*\" >> {here}/calls\n"
+            f'if [ -e {here}/fail-"$2" ]; then echo "$2 failed" >&2; exit 1; fi\n'
+        )
+        binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+
+    def fail(self, verb):
+        (self.directory / f"fail-{verb}").touch()
+
+    def calls(self):
+        path = self.directory / "calls"
+        return path.read_text().splitlines() if path.exists() else []
