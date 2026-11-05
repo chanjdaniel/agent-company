@@ -56,6 +56,9 @@ JOBS = (
     Job("paper-tick", ("paper", "tick"), "*-*-* 21:30:00 UTC"),
     # After each UTC day ends, which is when a promise falls overdue.
     Job("treasurer-check", ("treasurer", "check"), "*-*-* 00:15:00 UTC"),
+    # After that check, and an hour apart, so that the two passes start no session side by side on a Monday.
+    Job("audit-sample", ("audit", "--sample", "--scheduled"), "*-*-* 01:00:00 UTC"),
+    Job("audit-full", ("audit", "--full", "--scheduled"), "Mon *-*-* 02:00:00 UTC"),
 )
 
 
@@ -102,9 +105,10 @@ def _quoted(value: str, expands: bool = False) -> str:
     return '"' + (text.replace("$", "$$") if expands else text) + '"'
 
 
-def _service(found: Job) -> str:
+def _service(found: Job, unit_environment: dict[str, str]) -> str:
     command = " ".join(_quoted(part, expands=True) for part in (sys.executable, "-P", "-m", "company", "schedule", "run", found.name))
-    carried = [f"Environment={_quoted(f'{name}={os.environ[name]}')}\n" for name in _CARRIED if os.environ.get(name)]
+    given = {name: os.environ[name] for name in _CARRIED if os.environ.get(name)} | unit_environment
+    carried = [f"Environment={_quoted(f'{name}={value}')}\n" for name, value in given.items()]
     return f"[Unit]\nDescription=AgentCompany job {found.name}\n\n[Service]\nType=oneshot\n{''.join(carried)}ExecStart={command}\n"
 
 
@@ -120,13 +124,13 @@ def _timer_name(found: Job) -> str:
     return f"{_UNIT_PREFIX}{found.name}.timer"
 
 
-def install() -> None:
-    """Write each job's units and reload; this turns nothing on."""
+def install(unit_environment: dict[str, str]) -> None:
+    """Write each job's units, with what a job that starts a session needs told, and reload; this turns nothing on."""
     directory = paths.systemd_user()
     try:
         directory.mkdir(parents=True, exist_ok=True)
         for found in JOBS:
-            (directory / f"{_UNIT_PREFIX}{found.name}.service").write_text(_service(found))
+            (directory / f"{_UNIT_PREFIX}{found.name}.service").write_text(_service(found, unit_environment))
             (directory / _timer_name(found)).write_text(_timer(found))
     except OSError as error:
         raise ScheduleFailed(f"the unit files cannot be written: {error}") from None
@@ -151,7 +155,7 @@ def _turn_back_off(ledger: Ledger, reason: str) -> None:
     ledger.append("schedule-disabled", {"reason": reason}, "board")
 
 
-def enable(message: str) -> dict:
+def enable(message: str, unit_environment: dict[str, str]) -> dict:
     """Daniel's word: install what is listed, log it, and turn the timers on; a failure turns them off again and logs that."""
     ledger = Ledger()
     events = ledger.read()
@@ -160,7 +164,7 @@ def enable(message: str) -> dict:
         raise ScheduleRefused(f"{held}, so `{kill_state.RESUME}` comes first")
     if enabled(events):
         raise ScheduleRefused("the schedule is already on")
-    install()
+    install(unit_environment)
     event = ledger.append("schedule-enabled", {"message": message, "jobs": [found.name for found in JOBS]}, "board")
     try:
         _systemctl("enable", "--now", *map(_timer_name, JOBS))

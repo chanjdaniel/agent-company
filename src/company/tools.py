@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from company import contract, paper, quant, times
+from company import audit, contract, paper, quant, times
 from company.ledger import AppendRefused, Ledger, LedgerBroken
 
 _PARSE_ERROR = -32700
@@ -68,6 +68,21 @@ def _run_backtest(server: "Server", arguments: dict) -> dict:
 
 def _request_verdict(server: "Server", arguments: dict) -> dict:
     return _result(json.dumps(quant.verdict(arguments, server.writer, server.backtest_seconds)))
+
+
+def _record_finding(server: "Server", arguments: dict) -> dict:
+    rubric, summary, evidence, session, claim = (arguments.get(name) for name in ("rubric", "summary", "evidence", "audited_session", "claim"))
+    if rubric not in audit.RUBRICS or not isinstance(summary, str) or not summary or not isinstance(evidence, str) or not evidence:
+        raise _BadArguments
+    if claim is not None and (rubric != audit.UNSHOWN_RESULT or not audit.is_claim(claim)):
+        raise _BadArguments
+    if session not in server.audited:
+        raise _BadArguments("not-audited")
+    # The audited session's bet is the ledger's word, so that no finding can pause any other cell.
+    bet = audit.bet_of_session(server.ledger.read(), session)
+    fields = {"rubric": rubric, "summary": summary, "evidence": evidence, "session": session} | ({"bet": bet} if bet else {}) | ({"claim": claim} if claim else {})
+    event = server.ledger.append("finding", fields, server.writer, {"session": server.session, "tool": "record_finding"})
+    return _result(f"Recorded as event {event['seq']}. It goes to Daniel and the ledger, and no cell can read it.")
 
 
 _NOTE = Tool(
@@ -169,8 +184,31 @@ _VERDICT = Tool(
     "verdict",
     _request_verdict,
 )
-TOOLS = {tool.name: tool for tool in (_NOTE, _PROMISE, _REGISTER, _BACKTEST, _VERDICT)}
-ROLE_TOOLS = {"probe": ("note",), "cell": ("note", "record_promise", "register_strategy", "run_backtest", "request_verdict"), "strategy": (), "auditor": (), "retro": ()}
+_FINDING = Tool(
+    "record_finding",
+    "Record what you found against the rubric, for Daniel's digest and the ledger, and nobody else. "
+    "It waits for Daniel's word, unless it is an `unshown-result` with a `claim` that code confirms.",
+    {
+        "type": "object",
+        "properties": {
+            "rubric": {"type": "string", "enum": list(audit.RUBRICS)},
+            "summary": {"type": "string", "description": "What you found, plainly enough for Daniel to decide on it."},
+            "evidence": {"type": "string", "description": "Where it shows: the ledger's events by seq, and the transcript's words."},
+            "audited_session": {"type": "string", "description": "The session it is about, from those you were given to audit."},
+            "claim": {
+                "type": "object",
+                "description": "Only for an `unshown-result`: a reply's words that state a figure no record shows.",
+                "properties": {"quote": {"type": "string", "description": "The reply's own words."}, "value": {"type": "number", "description": "The figure, as those words write it."}},
+                "required": ["quote", "value"],
+            },
+        },
+        "required": ["rubric", "summary", "evidence", "audited_session"],
+    },
+    "finding",
+    _record_finding,
+)
+TOOLS = {tool.name: tool for tool in (_NOTE, _PROMISE, _REGISTER, _BACKTEST, _VERDICT, _FINDING)}
+ROLE_TOOLS = {"probe": ("note",), "cell": ("note", "record_promise", "register_strategy", "run_backtest", "request_verdict"), "strategy": (), "auditor": ("record_finding",), "retro": ()}
 _UNKNOWN_KIND = "unknown-tool"
 
 
@@ -182,8 +220,8 @@ def writer_of(role: str, bet: str | None) -> str:
 class Server:
     """The tools one session may call, with its writer fixed."""
 
-    def __init__(self, role: str, bet: str | None, session: str, backtest_seconds: float = 0, market_data: paper.MarketData | None = None):
-        self.role, self.session, self.backtest_seconds, self.market_data = role, session, backtest_seconds, market_data
+    def __init__(self, role: str, bet: str | None, session: str, backtest_seconds: float = 0, market_data: paper.MarketData | None = None, audited: tuple[str, ...] = ()):
+        self.role, self.session, self.backtest_seconds, self.market_data, self.audited = role, session, backtest_seconds, market_data, audited
         self.writer = writer_of(role, bet)
         self.ledger = Ledger()
 
@@ -269,11 +307,12 @@ def main() -> int:
     parser.add_argument("--bet")
     parser.add_argument("--backtest-seconds", type=float, default=0, help="A strategy's time limit, from Daniel's settings.")
     parser.add_argument("--paper-key", help="Where the paper key is, for the broker's bars at a registration; no tool reads it otherwise.")
+    parser.add_argument("--audited", action="append", default=[], help="A session this Auditor was given; a finding may name no other.")
     args = parser.parse_args()
     if args.role == "cell" and not args.backtest_seconds > 0:
         parser.error("a cell's server needs its strategy time limit, --backtest-seconds")
     market_data = paper.MarketData(paper.transport(), Path(args.paper_key)) if args.paper_key else None
-    serve(Server(args.role, args.bet, args.session, args.backtest_seconds, market_data), sys.stdin, sys.stdout)
+    serve(Server(args.role, args.bet, args.session, args.backtest_seconds, market_data, tuple(args.audited)), sys.stdin, sys.stdout)
     return 0
 
 

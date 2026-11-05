@@ -89,7 +89,7 @@ def _usage(step):
 def _reply(session, step):
     """One model reply, in the transcript, in the live output, or in both, as `where` says."""
     model = step.get("model", "claude-opus-5-5")
-    message = {"id": f"msg-{step['request']}", "model": model, "usage": _usage(step), "content": [{"type": "text", "text": "words"}]}
+    message = {"id": f"msg-{step['request']}", "model": model, "usage": _usage(step), "content": step.get("content", [{"type": "text", "text": step.get("text", "words")}])}
     where = step.get("where", "both")
     if where in ("both", "transcript"):
         line = {

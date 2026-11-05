@@ -7,7 +7,7 @@ The research behind it, with its critique, Daniel's decisions and draft tickets,
 
 ## The code
 
-The first slice is being built, and so far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the session launcher and company tools, the kill switch and the schedule, the quant cell's registration, backtest runner and verdict, the paper account and its period, promises and the honesty checks, the test suite and CI.
+The first slice is being built, and so far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the session launcher and company tools, the kill switch and the schedule, the quant cell's registration, backtest runner and verdict, the paper account and its period, promises and the honesty checks, the Auditor, the test suite and CI.
 It is Python 3.13 with no runtime dependency outside the standard library, and needs `uv` to run.
 
 ```sh
@@ -47,6 +47,9 @@ uv run company paper tick              # run the open paper period once, which o
 uv run company treasurer check         # check each promise now settled, once; a broken one pauses its cell
 uv run company promise kept 12 --on 2026-11-05
                                        # Daniel's word that a cell's promise was kept, which nothing else can say
+uv run company audit 20261105T090000Z-1a2b3c4d
+                                       # run the Auditor on a recorded run, on another model; this spends real use
+uv run company finding confirm 12      # Daniel's word on a finding code could not check, which pauses its cell
 uv run company cell resume --bet alpha # lift a cell's pause, which nothing else does
 uv run company complaint record --source inbox --summary "what they said"
 uv run company spam-flag record --source inbox

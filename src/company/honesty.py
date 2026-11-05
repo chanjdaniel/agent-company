@@ -14,13 +14,12 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from fractions import Fraction
 
-from company import contract, paths, settings, times, treasurer
+from company import audit, contract, paths, settings, times, treasurer
 from company.ledger import Ledger
 
 KEPT, BROKEN, NOT_RUN = "kept", "broken", "not-run"
 CELL_SCOPE = "cell"
 RESUME_OUTSIDE = "company cell resume --outside-actions"
-_RUBRIC = "broken-promise"
 _FLAGS = ("complaint", "spam-flag")
 _OUTSIDE_ACTION_DONE = "send-confirmed"
 
@@ -103,6 +102,60 @@ def _is_the_cells(promise: dict) -> bool:
     return promise["writer"].startswith(contract.CELL_PREFIX)
 
 
+def _is_confirmed(events: list[dict], seq: int) -> bool:
+    return any(event["finding_seq"] == seq for event in treasurer.of_kind(events, "finding-confirmed"))
+
+
+def _is_paused_for(events: list[dict], seq: int) -> bool:
+    return any(event["cause_seq"] == seq for event in treasurer.of_kind(events, "cell-paused"))
+
+
+def _confirm_and_pause(ledger: Ledger, events: list[dict], seq: int, bet: str | None, reason: str, writer: str, message: str | None = None) -> None:
+    """The confirmation and its cell's pause, each only if an earlier step did not write it, so that one stopped part way is finished by the next.
+
+    A resume lifts a pause and leaves its cause, so a finding pauses its cell once.
+    """
+    if not _is_confirmed(events, seq):
+        ledger.append("finding-confirmed", {"finding_seq": seq} | ({"message": message} if message else {}), writer)
+    if bet and not _is_paused_for(events, seq):
+        ledger.append("cell-paused", {"scope": CELL_SCOPE, "reason": reason, "cause_seq": seq, "bet": bet}, "treasurer")
+
+
+def _finding_reason(finding: dict) -> str:
+    return f"{finding['rubric']}: finding {finding['seq']}"
+
+
+def confirm_finding(seq: int, message: str | None = None) -> dict:
+    """Daniel's word on a finding code could not check, which pauses its cell; returns the finding."""
+    with _one_at_a_time():
+        ledger = Ledger()
+        events = ledger.read()
+        finding = next((event for event in treasurer.of_kind(events, "finding") if event["seq"] == seq), None)
+        if finding is None:
+            raise _refusal(ledger, "finding-confirmed", "no-such-finding", f"event {seq} is no finding")
+        bet = finding.get("bet")
+        if _is_confirmed(events, seq) and (not bet or _is_paused_for(events, seq)):
+            raise _refusal(ledger, "finding-confirmed", "already-confirmed", f"finding {seq} is already confirmed")
+        _confirm_and_pause(ledger, events, seq, bet, _finding_reason(finding), "board", message)
+        return finding
+
+
+def confirm_by_code() -> list[dict]:
+    """Confirm each finding whose claim code agrees with, and finish what a stopped run left; returns the findings this confirmed."""
+    with _one_at_a_time():
+        ledger = Ledger()
+        events = ledger.read()
+        confirmed = []
+        for finding in treasurer.of_kind(events, "finding"):
+            seq, bet = finding["seq"], finding.get("bet")
+            if "claim" not in finding or (_is_confirmed(events, seq) and (not bet or _is_paused_for(events, seq))):
+                continue
+            if _is_confirmed(events, seq) or audit.code_confirms(events, finding):
+                _confirm_and_pause(ledger, events, seq, bet, _finding_reason(finding), "treasurer")
+                confirmed.append(finding)
+        return confirmed
+
+
 def _record_broken(ledger: Ledger, events: list[dict], promise: dict) -> int:
     """The finding, its confirmation and the pause, each only if an earlier check did not write it; returns the finding's seq."""
     bet = treasurer.bet_of(promise)
@@ -110,13 +163,10 @@ def _record_broken(ledger: Ledger, events: list[dict], promise: dict) -> int:
     finding = next((event["seq"] for event in treasurer.of_kind(events, "finding") if event.get("promise_seq") == seq), None)
     if finding is None:
         summary = f"The cell's promise in event {seq} fell due on {promise['due_date']} with no word that it was kept."
-        fields = {"rubric": _RUBRIC, "summary": summary, "evidence": f"event {seq}", "bet": bet, "promise_seq": seq}
+        fields = {"rubric": audit.BROKEN_PROMISE, "summary": summary, "evidence": f"event {seq}", "bet": bet, "promise_seq": seq}
         finding = ledger.append("finding", fields, "treasurer")["seq"]
-    if not any(event["finding_seq"] == finding for event in treasurer.of_kind(events, "finding-confirmed")):
-        ledger.append("finding-confirmed", {"finding_seq": finding}, "treasurer")
-    if not any(event["cause_seq"] == finding for event in treasurer.of_kind(events, "cell-paused")):
-        reason = f"{_RUBRIC}: the promise in event {seq} fell due on {promise['due_date']}"
-        ledger.append("cell-paused", {"scope": CELL_SCOPE, "reason": reason, "cause_seq": finding, "bet": bet}, "treasurer")
+    reason = f"{audit.BROKEN_PROMISE}: the promise in event {seq} fell due on {promise['due_date']}"
+    _confirm_and_pause(ledger, events, finding, bet, reason, "treasurer")
     return finding
 
 

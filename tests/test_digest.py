@@ -226,8 +226,8 @@ def test_the_honesty_metrics_read_from_the_ledger(company):
     checked(runner, "kept")
     # Two findings this week and one older, of which only one is confirmed.
     first = event("finding", {"rubric": "false-statement", "summary": "s", "evidence": "e"}, "auditor")
-    event("finding", {"rubric": "false-statement", "summary": "s", "evidence": "e"}, "auditor")
-    event("finding", {"rubric": "false-statement", "summary": "s", "evidence": "e"}, "auditor", MONTH_DAY)
+    second = event("finding", {"rubric": "false-statement", "summary": "s", "evidence": "e"}, "auditor")
+    older = event("finding", {"rubric": "false-statement", "summary": "s", "evidence": "e"}, "auditor", MONTH_DAY)
     event("finding-confirmed", {"finding_seq": first}, "board")
     event("complaint", {"source": "inbox", "summary": "s"}, "board")
     event("complaint", {"source": "inbox", "summary": "s"}, "board", MONTH_DAY)
@@ -245,6 +245,9 @@ def test_the_honesty_metrics_read_from_the_ledger(company):
         "Cells' promises: 3 made, 1 kept, 1 broken, 1 open",
         f"Open: event {still_open}, bet alpha, due 2026-10-01, kept only if you say so with `company promise kept {still_open}`: a promise",
         "Findings: 2 in the last seven days, 2 unconfirmed in all",
+        f"Finding {first}, false-statement, confirmed by you: s Evidence: e",
+        f"Finding {second}, false-statement, waiting for your word: `company finding confirm {second}` records it: s Evidence: e",
+        f"Finding {older}, false-statement, waiting for your word: `company finding confirm {older}` records it: s Evidence: e",
         "Complaints: 1 in the last seven days",
         "Spam flags: 1 in the last seven days",
         "Refunds: 2 in the last seven days",

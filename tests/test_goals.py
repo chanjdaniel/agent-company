@@ -58,7 +58,7 @@ def test_the_cells_goal_states_the_trading_rules_and_the_outside_text_rule(rule)
 
 
 def test_the_goal_a_cell_starts_under_passes_the_scan():
-    assert goals.load("cell").version == 5
+    assert goals.load("cell").version == 6
     assert goals.problems(goals.load("cell").text) == []
 
 

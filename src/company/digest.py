@@ -228,6 +228,21 @@ def _findings_line(events: list[dict], week: treasurer.Span) -> str | None:
     return f"Findings: {recent} in the last seven days, {unconfirmed} unconfirmed in all"
 
 
+def _finding_lines(events: list[dict], week: treasurer.Span) -> list[str]:
+    """Each finding this week and each still waiting, since a count gives Daniel nothing to decide on."""
+    confirmed = {e["finding_seq"]: e["writer"] for e in events if e["kind"] == "finding-confirmed"}
+    lines = []
+    for e in events:
+        if e["kind"] != "finding" or (e["seq"] in confirmed and not week.holds(e)):
+            continue
+        if e["seq"] in confirmed:
+            word = "confirmed by you" if confirmed[e["seq"]] == "board" else "confirmed by code"
+        else:
+            word = f"waiting for your word: `company finding confirm {e['seq']}`" + (" pauses the cell" if "bet" in e else " records it")
+        lines.append(f"Finding {e['seq']}, {e['rubric']}{_bet_note(e)}, {word}: {' '.join(e['summary'].split())} Evidence: {' '.join(e['evidence'].split())}")
+    return lines
+
+
 def _count_line(events: list[dict], week: treasurer.Span, kind: str, name: str) -> str | None:
     count = sum(e["kind"] == kind and week.holds(e) for e in events)
     return f"{name}: {count} in the last seven days" if count else None
@@ -250,6 +265,7 @@ def _honesty(events: list[dict], week: treasurer.Span) -> list[str]:
         *_open_lines(events),
         *_not_run_lines(events),
         _findings_line(events, week),
+        *_finding_lines(events, week),
         _count_line(events, week, "complaint", "Complaints"),
         _count_line(events, week, "spam-flag", "Spam flags"),
         _count_line(events, week, "refund", "Refunds"),

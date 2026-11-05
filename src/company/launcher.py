@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from company import (
+    audit,
     banned,
     goals,
     governor,
@@ -35,6 +36,7 @@ from company import (
     times,
     tools,
     usage,
+    views,
 )
 from company.ledger import AppendRefused, Ledger, LedgerBroken
 
@@ -112,6 +114,12 @@ def binary() -> str | None:
     return os.path.abspath(found) if found else None
 
 
+def unit_environment() -> dict[str, str]:
+    """What a timer's service must be told, since the user manager's own path may not hold `claude`."""
+    found = binary()
+    return {BINARY_VARIABLE: found} if found else {}
+
+
 def child_environment(session: str | None = None) -> dict[str, str]:
     """What a session's process gets: the named variables, never a banned one, and the fixed values."""
     kept = {name: os.environ[name] for name in ALLOWED_ENVIRONMENT if name in os.environ and not banned.is_banned(name)}
@@ -169,12 +177,14 @@ def session_settings(workspace: Path) -> dict:
     }
 
 
-def _mcp_config(role: str, bet: str | None, session: str, backtest_seconds: float | None = None) -> dict:
+def _mcp_config(role: str, bet: str | None, session: str, backtest_seconds: float | None = None, audited: tuple[str, ...] = ()) -> dict:
     # `-P`: this starts in the workspace, and with the working directory on its path a file there could run as this code.
     arguments = ["-P", "-m", "company.tools", "--role", role, "--session", session, *(("--bet", bet) if bet else ())]
     # On the command line, as the role and bet are, so that the server needs no path to Daniel's settings.
     # A cell's server reaches the broker's bars for a registration, so it is told where the key is, and of Daniel's directory nothing more.
     arguments += ["--backtest-seconds", str(backtest_seconds), "--paper-key", str(paths.paper_key())] if backtest_seconds is not None else []
+    # On the command line too, so that a finding can name only a session this Auditor was given.
+    arguments += [argument for session_audited in audited for argument in ("--audited", session_audited)]
     server = {"type": "stdio", "command": sys.executable, "args": arguments, "env": {"COMPANY_HOME": str(paths.home()), SESSION_VARIABLE: session}}
     return {"mcpServers": {"company": server}}
 
@@ -202,6 +212,37 @@ def _model(loaded: dict, role: str) -> str:
     if role == "probe":
         return PROBE_MODEL
     return settings.text(loaded, "auditor_model" if role == "auditor" else "cell_model")
+
+
+def _audited(runs: tuple[str, ...]) -> tuple[audit.Subject, ...]:
+    if not runs:
+        return ()
+    try:
+        return audit.subjects(Ledger().read(), runs)
+    except audit.NotAuditable as refused:
+        raise _Refuse("audit", str(refused), audit.FIX_RUN) from None
+
+
+def _check_independent(loaded: dict, model: str, given: tuple[audit.Subject, ...]) -> None:
+    """The Auditor's independence is a different model and no more, so nothing short of that may start."""
+    if model not in {settings.text(loaded, "cell_model"), *(subject.model for subject in given)}:
+        return
+    reason = (
+        f"same-model: the Auditor's model {model} is the audited cell's, and a different Claude model is the only independence it has: "
+        f'see "{audit.RECORDED_GAP}" in docs/design.md'
+    )
+    raise _Refuse("model", reason, f"{settings.SET} auditor_model <a Claude model other than {model}>")
+
+
+def _give_context(role: str, bet: str | None, workspace: Path, given: tuple[audit.Subject, ...]) -> None:
+    """Put in the workspace what the role reads of the home, which it cannot reach for itself."""
+    try:
+        if role == "cell" and bet:
+            views.write(workspace / views.FILE, views.lines(views.cell_view(Ledger().read(), bet)))
+        elif given:
+            audit.give_context(workspace, given, Ledger().path)
+    except (LedgerBroken, OSError) as error:
+        raise _Refuse("workspace", f"no-context: what this session reads could not be put in its workspace: {error}", f"look at {workspace}, after reading what wrote it") from None
 
 
 def _workspace(chosen: str | None, run: str) -> Path:
@@ -542,18 +583,22 @@ class _Launch:
     command: list[str]
     max_minutes: Fraction
     max_weight: Fraction
+    audited: tuple[str, ...]
 
 
-def _prepare(admitted: governor.Admitted, prompt: str, chosen: str | None) -> _Launch:
+def _prepare(admitted: governor.Admitted, prompt: str, chosen: str | None, audited_runs: tuple[str, ...]) -> _Launch:
     """Everything a launch needs short of starting it, where each thing wrong refuses and nothing has started."""
     role, bet = admitted.role, admitted.bet
     try:
         goal = goals.load(role)
     except goals.GoalRefused as refused:
         raise _Refuse("goal", str(refused), "fix the goal text in the package") from None
+    given = _audited(audited_runs)
     try:
         loaded = settings.load()
         model = _model(loaded, role)
+        if role == "auditor":
+            _check_independent(loaded, model, given)
         max_minutes = Fraction(str(settings.positive_number(loaded, "session_max_minutes")))
         max_weight = Fraction(str(settings.positive_number(loaded, "session_max_weight")))
         backtest_seconds = settings.positive_number(loaded, "backtest_max_seconds") if role == "cell" else None
@@ -567,14 +612,16 @@ def _prepare(admitted: governor.Admitted, prompt: str, chosen: str | None) -> _L
     run = f"{times.now().strftime('%Y%m%dT%H%M%SZ')}-{session[:8]}"
     workspace = _workspace(chosen, run)
     _check_workspace(workspace)
+    _give_context(role, bet, workspace, given)
     run_dir = paths.runs() / run
     run_dir.mkdir(parents=True, mode=0o700)
     mcp, session_file = run_dir / "mcp.json", run_dir / "settings.json"
-    _write_json(mcp, _mcp_config(role, bet, session, backtest_seconds))
+    _write_json(mcp, _mcp_config(role, bet, session, backtest_seconds, tuple(subject.session for subject in given)))
     _write_json(session_file, session_settings(workspace))
-    (run_dir / "prompt.txt").write_text(goal.text + (f"\n{prompt}\n" if prompt else ""))
+    told = "".join(f"\n{part}\n" for part in (audit.prompt(given) if given else "", prompt) if part)
+    (run_dir / "prompt.txt").write_text(goal.text + told)
     command = _command(claude, role, session, model, mcp, session_file)
-    return _Launch(role, bet, session, run, run_dir, workspace, model, command, max_minutes, max_weight)
+    return _Launch(role, bet, session, run, run_dir, workspace, model, command, max_minutes, max_weight, audited_runs)
 
 
 def _log_start(launch: _Launch, admitted: governor.Admitted) -> None:
@@ -590,6 +637,8 @@ def _log_start(launch: _Launch, admitted: governor.Admitted) -> None:
     }
     if launch.bet:
         fields["bet"] = launch.bet
+    if launch.audited:
+        fields["audited"] = list(launch.audited)
     Ledger().append("session-started", fields, "launcher")
 
 
@@ -698,15 +747,15 @@ def _charge_at_the_end() -> None:
         print(f"company: the charge at this session's end did not run: {error}", file=sys.stderr)
 
 
-def start(role: str, bet: str | None = None, prompt: str = "", workspace: str | None = None, scheduled: bool = False) -> Finished | governor.Refused:
-    """Run one session from admission to its end; a refused launch starts nothing."""
+def start(role: str, bet: str | None = None, prompt: str = "", workspace: str | None = None, scheduled: bool = False, audited: tuple[str, ...] = ()) -> Finished | governor.Refused:
+    """Run one session from admission to its end; a refused launch starts nothing. `audited` names the runs an Auditor is given."""
     with _launch_lock():
         close_gone_sessions()
         admitted = governor.admit(role, bet, scheduled)
         if isinstance(admitted, governor.Refused):
             return admitted
         try:
-            launch = _prepare(admitted, prompt, workspace)
+            launch = _prepare(admitted, prompt, workspace, audited)
         except _Refuse as refusal:
             return _refuse(role, bet, refusal)
         # Preparing takes seconds, and the kill switch may have been pulled since the governor looked.

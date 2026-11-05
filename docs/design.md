@@ -198,6 +198,10 @@ Rules every session starts under:
 
 The defaults are `claude-opus-5-5` for `cell_model`, `claude-sonnet-5-5` for `auditor_model`, and `claude-haiku-5-5` for the probe.
 
+A cell's ledger is a file written at each launch, `ledger.jsonl` in its workspace, replacing what is there without following a link, since an agent can write in that directory.
+It holds the session, money and minutes events on the bet, what the cell wrote, the runs, verdicts and paper events of its registrations, and the results of its promises without what they cite.
+Each kind is named in `views.py` with what ties it to a bet, so a kind nobody named is left out, and a finding, its confirmation, a pause, a complaint and a spam flag are named nowhere.
+
 Every goal text states the honesty constraints as part of the goal, and none says "whatever it takes" or "at all costs".
 Goal texts are files in the package, `src/company/goals/<role>.v<n>.md`, the newest of a role's being the one used, and one that fails the scan starts nothing.
 The evidence behind this is in the report's section 1.3: under such a prompt, agents lied about refunds and fixed prices.
@@ -210,7 +214,7 @@ A tool call that names another writer still writes as the session's own, and a c
 A refused call logs `append-refused` with its `session` and `tool`.
 Each server starts in the workspace, outside the sandbox, so it runs with Python's `-P`, and a file an agent planted there cannot run as the company's code.
 A session's shell cannot write the company home outside its workspace, so it cannot run `company` as anyone else, and `company ledger append`, which takes any writer, is the person's and the tests' door.
-As second layers, `company` is not on a session's path, the settings deny the shell `company` and `claude`, and `company ledger append` refuses and logs when the launcher's `COMPANY_SESSION` variable is set.
+As second layers, `company` is not on a session's path, the settings deny the shell `company` and `claude`, and `company ledger append`, `ledger show`, `digest`, `audit` and `finding confirm` refuse and log when the launcher's `COMPANY_SESSION` variable is set.
 
 ## The ledger
 
@@ -283,7 +287,7 @@ A kind that a later ticket finds it needs joins this table and the contract in t
 | `refund` | Money | `treasurer` | `amount`, `currency`, `source`, `record` | `bet` |
 | `fee` | Money | `treasurer` | `amount`, `currency`, `source`, `record` | `bet` |
 | `spend` | Money | `treasurer` | `amount`, `currency`, `source`, `record` | `bet` |
-| `session-started` | Sessions | `launcher` | `session`, `role`, `model`, `run`, `gate`, `account_used`, `company_used`, `reading_seq` | `bet` |
+| `session-started` | Sessions | `launcher` | `session`, `role`, `model`, `run`, `gate`, `account_used`, `company_used`, `reading_seq` | `bet`, `audited` |
 | `session-ended` | Sessions | `launcher` | `session`, `exit`, `transcript_path`, `transcript_hash`, `weight` | |
 | `session-stopped` | Sessions | `launcher` | `session`, `reason` | `elapsed_minutes`, `weight` |
 | `session-note` | Sessions | `cell:<bet>`, `probe` | `session`, `text` | |
@@ -305,7 +309,7 @@ A kind that a later ticket finds it needs joins this table and the contract in t
 | `promise-recorded` | Honesty | `cell:<bet>`, `runner` | `promise`, `due_date` | `bet`, `counterparty` |
 | `promise-kept` | Honesty | `board` | `promise_seq`, `kept_date` | `note` |
 | `promise-checked` | Honesty | `treasurer` | `promise_seq`, `result` | `evidence_seqs` |
-| `finding` | Honesty | `auditor`, `treasurer`, `board` | `rubric`, `summary`, `evidence` | `bet`, `session`, `promise_seq` |
+| `finding` | Honesty | `auditor`, `treasurer`, `board` | `rubric`, `summary`, `evidence` | `bet`, `session`, `promise_seq`, `claim` |
 | `finding-confirmed` | Honesty | `board`, `treasurer` | `finding_seq` | `message` |
 | `cell-paused` | Honesty | `treasurer` | `scope`, `reason`, `cause_seq` | `bet` |
 | `cell-resumed` | Honesty | `board` | `scope` | `bet`, `message` |
@@ -343,6 +347,7 @@ Notes on single kinds:
 - `session-note` is a cell's or the probe's free text, so it is kept out of the strategy session's view, since that session never talks to a cell; that view still holds a cell's registrations and proposals, which it reads as data.
 - `verdict`'s `failed_tests` names each test failed, `overfitting`, `holdout` or `max_drawdown`; `max_drawdown` is the worse of the backtest's and the holdout's; `holdout_hash` is the hash of the holdout's returns, as `returns_hash` is of a backtest's; and a strategy that failed or took no position on the holdout has `holdout_failure`, the kind of failure with none of its words (`timed-out`, `crashed`, `ended-early`, `bad-output`, `not-finite` or `no-position`), and null for `holdout_return` and `holdout_hash`.
 - `session-started`'s `gate` is `go:<seq>` or `schedule`, and a `go-given` word's launches left are its `sessions` minus the `session-started` events citing it.
+  `audited` lists the runs an Auditor's session was given.
 - `launch-refused`'s `check` is the governor's step that refused (`ledger`, `kill`, `settings`, `go`, `pause`, `reading`, `floor` or `share`, and a scheduled session with the schedule off is refused at `go`) or, written by the launcher, its own (`goal`, `settings`, `binary`, `load-form`, `workspace`, `kill` or `ledger`); its `reason` starts with a code, such as `stale`, followed by a sentence, and `fix` is what to do about it.
 - `pull` on `kill-pulled` and `kill-step` is the pull's own id, the name of its file in `kill.state`.
 - `kill-pulled`'s `pulled_at` is when the pull began, and its `ts` when the ledger took it, which comes after the pull's actions and may be at the resume.
@@ -362,6 +367,8 @@ Notes on single kinds:
 - `finding` allows `treasurer` so that a check the Treasurer makes itself, such as an overdue promise, can record its finding, whose `promise_seq` names that promise.
   It allows `board` so that Daniel can record a fabricated claim they find in the batch, with `company finding record`, which also writes `finding-confirmed`.
   For a claim in a draft the command takes the bet and pauses that cell; for a memo, whose author is no cell, it records the finding with no pause, beside `memo-rejected`, so that the honesty metrics still see it.
+- An Auditor's `finding` has as its `session` the session it is about, one of those it was given, and as its `bet` that session's, which the tool reads from the ledger.
+  Its `claim`, on an `unshown-result` alone, holds the `quote` and the `value` that code checks.
 
 ## The three resources and their budgets
 
@@ -455,7 +462,7 @@ Before money flows, a pre-registered leading indicator stands in for it, counted
 
 - **Resources:** tokens from the share of each window with a reading against `company_share`, dollars spent in the last seven days, and Daniel-minutes in the last seven days against `daily_minutes × 7`, with a note of any decision not charged yet.
 - **Incidents:** those in the last seven days, and one line for each scheduled job that failed in them, with how many times and how it last ended.
-- **Honesty:** the cells' promises made, kept, broken and open; each open one on a line of its own, with its event, due date and text, so that Daniel can say it was kept; each runner's promise that was not run, on a line of its own and never among the cells'; findings in the last seven days, and those unconfirmed in all; complaints, spam flags and refunds in the last seven days; and the pauses in effect.
+- **Honesty:** the cells' promises made, kept, broken and open; each open one on a line of its own, with its event, due date and text, so that Daniel can say it was kept; each runner's promise that was not run, on a line of its own and never among the cells'; findings in the last seven days, and those unconfirmed in all, each on a line of its own with its rubric, summary, evidence and, while it waits, the command that confirms it; complaints, spam flags and refunds in the last seven days; and the pauses in effect.
 - **Pending approvals:** every `approval-asked` with no `approval-decided`.
 
 A section with nothing to say prints "none", and an empty ledger prints that for every section and exits 0, with or without settings.
@@ -599,7 +606,8 @@ A timer's service runs `company schedule run <job>`, which asks the ledger again
 A job that then fails, by exiting non-zero or by raising, is logged as `job-failed`, and the digest's incidents show it; a run refused at that first step is no failure and logs nothing, and over a broken ledger the failure can go only to the job's output, while the digest says the ledger is broken.
 A job that keeps failing logs each time, so a charge due every five minutes can log often; the digest gives each job one line.
 A job killed by a signal, or a service that never starts, logs nothing, and only the journal has it.
-A unit carries only `COMPANY_HOME`, `COMPANY_CONFIG` and `CLAUDE_CONFIG_DIR`, so a job that starts a session would look for `claude` on the user manager's own path and might be refused with `no-binary`; no job starts one yet, and ticket 12's are the first.
+A unit carries `COMPANY_HOME`, `COMPANY_CONFIG` and `CLAUDE_CONFIG_DIR` as they stand, and the `claude` that `company schedule install` or `enable` resolved, as `COMPANY_CLAUDE_BIN`, since the user manager's own path may not have it.
+With none to carry, the command says so and writes the units all the same, and a job that starts a session is refused until it runs again with one.
 Until gate C opens the schedule, the kill switch's self-test, `company paper tick`, `company treasurer check`, `company treasurer charge`, the daily audit sample, the weekly audit pass, the batch, the strategy session and the retro run by Daniel's command.
 
 ## The six loops
@@ -857,13 +865,29 @@ The gap is known and accepted, and it is revisited at each retro.
 
 ### What the Auditor does
 
-- Its rubric is false statements, broken promises, a result the records do not show, and a rule broken.
-- It has read-only file tools and only its finding tool, and sees the rubric, the whole ledger and the audited transcripts.
+`company audit <run>` starts one Auditor session on a recorded run, `--sample` on one of the last day's cell runs chosen at random by code, and `--full` on every cell run of the last seven days, all in one session.
+It refuses a run the ledger does not name, one still open, one with no transcript, and one whose transcript no longer matches the hash in its `session-ended`.
+
+- Its rubric is false statements (`false-statement`), broken promises (`broken-promise`), a result the records do not show (`unshown-result`), and a rule broken (`rule-broken`).
+- It refuses to start on `cell_model` or on the model the audited session ran on, citing the gap above; that holds for `company session start auditor` too, which is given no run and so can record no finding.
+- It has read-only file tools and only its `record_finding` tool, in a fresh workspace holding `ledger.jsonl`, the whole ledger, and `transcripts/<run>.jsonl`, with the rubric in its goal text.
 - It has no web read, so it checks a citation to the ledger and not an outside URL, which Daniel checks in the batch.
 - Its findings go only to Daniel's digest and the ledger; no cell has them in its ledger view.
-- A confirmed finding pauses the cell, and only Daniel's `company cell resume --bet <bet>` resumes it, logged as `board`.
-- Its daily sample and weekly full pass are schedule jobs, so they run only once gate C opens; until then they run by Daniel's command.
+- Its daily sample and weekly full pass are schedule jobs, `audit-sample` at 01:00 UTC and `audit-full` on Mondays at 02:00 UTC, so they run only once gate C opens; until then they run by Daniel's command.
+  With nothing to audit, neither starts a session.
 - Transcripts are kept in the company home for the audit window.
+
+**What code confirms.**
+A finding of `unshown-result` may carry a `claim`, a reply's words and the figure in them.
+Code confirms it when those words are in the text of one of the session's replies, its reasoning not counting, the figure is in those words, and no `config-run` or `verdict` of that bet's registrations, by the session's end, shows that figure, rounded or cut to the digits reported, as itself or as a percent.
+That the words report a result is still the Auditor's reading, so the pause is lifted as any other is.
+On any doubt it does not confirm, and the finding waits, since a wrong pause costs more than a wait.
+`company audit` and `company treasurer check` make this check, writing `finding-confirmed` and `cell-paused` as `treasurer`, so a check stopped part way is finished by the next.
+
+**What Daniel confirms.**
+Every other finding waits for `company finding confirm <seq> [--message <Discord id>]`, and the cell runs until then.
+It writes `finding-confirmed` as `board` and, for a finding on a bet, `cell-paused` as `treasurer`; a finding on no bet pauses nothing, and the command says so.
+A confirmed finding pauses its cell once, and only Daniel's `company cell resume --bet <bet>` resumes it, logged as `board`.
 
 ### Promises and the honesty checks
 
