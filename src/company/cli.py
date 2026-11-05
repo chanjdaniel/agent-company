@@ -6,8 +6,11 @@ import json
 import os
 import sys
 import traceback
+import unicodedata
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
+from typing import TextIO, cast
 
 from company import (
     audit,
@@ -309,14 +312,18 @@ def _promise_kept(args) -> int:
         print("company: --on must be a day like 2026-11-05, and no later than today. Nothing was recorded.", file=sys.stderr)
         return EXIT_USAGE
     try:
-        event = honesty.keep_promise(args.promise, on, args.note)
+        kept = honesty.keep_promise(args.promise, on, args.note)
     except honesty.Refused as refused:
         print(f"company: refused: {refused}. Nothing was recorded; event {refused.seq} in the ledger records the refusal.", file=sys.stderr)
         return EXIT_REFUSED
     except (AppendRefused, LedgerBroken, OSError) as refused:
         print(f"company: refused: {refused}. Nothing was recorded; see `company ledger verify`.", file=sys.stderr)
         return EXIT_REFUSED
-    print(f"Recorded event {event['seq']}: the promise in event {args.promise} was kept on {event['kept_date']}. The next `company treasurer check` logs it.")
+    said = f"Recorded event {kept.event['seq']}: the promise in event {args.promise} was kept on {kept.event['kept_date']}."
+    if kept.finding is None:
+        print(f"{said} The next `company treasurer check` logs it.")
+    else:
+        print(f"{said} A check already read it as broken, in finding {kept.finding}, and that stays in the ledger beside your word; the digest counts it as broken then said kept. `{honesty.resume_command(kept.bet)}` lifts any pause.")
     return EXIT_OK
 
 
@@ -459,7 +466,19 @@ def _go(args) -> int:
         print(f"company: refused: {refused}. No launch was granted.", file=sys.stderr)
         return EXIT_REFUSED
     print(f"Recorded event {event['seq']}: a go for {_launches(args.sessions)}, on message {args.message}.")
+    _say_if_the_check_does_not_stand(ledger)
     return EXIT_OK
+
+
+def _say_if_the_check_does_not_stand(ledger: Ledger) -> None:
+    """A go is Daniel's word and is never refused for this, but extra usage is what would bill a long session for real, and nothing else sends them back to look."""
+    try:
+        stands = preflight.account_check_stands(ledger.read())
+    except (LedgerBroken, OSError) as error:
+        print(f"company: whether your account check stands could not be read: {error}. `company preflight` says.", file=sys.stderr)
+        return
+    if not stands:
+        print(f"Your account check does not stand: you have not said, since the go before this one, that extra usage is off and that the design's dependencies still hold. This go is recorded all the same. Check both, then `{preflight.ACCOUNT_CHECKED}`.")
 
 
 def _print_refusal(answer: governor.Refused) -> None:
@@ -1030,6 +1049,37 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+# Controls, formats such as the bidirectional overrides, lone surrogates, and the line and paragraph separators.
+_NOT_FOR_A_SCREEN = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
+
+
+class _Screen:
+    """An output stream that writes no character that could move a terminal's cursor, reorder its text, or fail to encode.
+
+    What a cell or a session wrote reaches Daniel's screen, on the page they read about it, so this holds for all that the command prints.
+    """
+
+    def __init__(self, stream: TextIO):
+        self._stream = stream
+
+    def write(self, text: str) -> int:
+        return self._stream.write("".join(character for character in text if character in "\n\t" or unicodedata.category(character) not in _NOT_FOR_A_SCREEN))
+
+    def __getattr__(self, name: str):
+        return getattr(self._stream, name)
+
+
+@contextlib.contextmanager
+def _printable_output() -> Iterator[None]:
+    stdout, stderr = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = cast(TextIO, _Screen(stdout)), cast(TextIO, _Screen(stderr))
+    try:
+        yield
+    finally:
+        sys.stdout, sys.stderr = stdout, stderr
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
-    return args.run(args)
+    with _printable_output():
+        args = _parser().parse_args(argv)
+        return args.run(args)

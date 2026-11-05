@@ -194,7 +194,7 @@ def _play(step, session, tools):
             _record("progress.jsonl", {"hanging": os.getpid()})
             time.sleep(step.get("seconds", 600))
         case "children":
-            pids = [subprocess.Popen(["/bin/sleep", "600"], **step.get("popen", {})).pid for _ in range(step["count"])]
+            pids = [subprocess.Popen(step.get("argv", ["/bin/sleep", "600"]), **step.get("popen", {})).pid for _ in range(step["count"])]
             _record("progress.jsonl", {"children": pids})
         case "ignore-term":
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -222,7 +222,7 @@ def main():
     global _prompt
     script = json.loads((DIRECTORY / "script.json").read_text())
     _prompt = "" if "--help" in sys.argv else sys.stdin.read()
-    _record("calls.jsonl", {"argv": sys.argv[1:], "cwd": os.getcwd(), "stdin": None if "--help" in sys.argv else _prompt})
+    _record("calls.jsonl", {"argv": sys.argv[1:], "cwd": os.getcwd(), "parent": os.getppid(), "stdin": None if "--help" in sys.argv else _prompt})
     if "--help" in sys.argv:
         print("\n".join(flag for flag in HELP_FLAGS if flag not in script.get("help_lacks", [])))
         return script.get("help_exit", 0)

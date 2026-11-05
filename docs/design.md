@@ -466,11 +466,12 @@ Before money flows, a pre-registered leading indicator stands in for it, counted
 
 - **Resources:** tokens from the share of each window with a reading against `company_share`, dollars spent in the last seven days, and Daniel-minutes in the last seven days against `daily_minutes × 7`, with a note of any decision not charged yet.
 - **Incidents:** those in the last seven days, and one line for each scheduled job that failed in them, with how many times and how it last ended.
-- **Honesty:** the cells' promises made, kept, broken and open; each open one on a line of its own, with its event, due date and text, so that Daniel can say it was kept; each runner's promise that was not run, on a line of its own and never among the cells'; findings in the last seven days, and those unconfirmed in all, each on a line of its own with its rubric, summary, evidence and, while it waits, the command that confirms it; complaints, spam flags and refunds in the last seven days; and the pauses in effect.
+- **Honesty:** the cells' promises made, kept, broken, broken then said kept, and open; each open one on a line of its own, with its event, due date and text, so that Daniel can say it was kept; each runner's promise that was not run, on a line of its own and never among the cells'; findings in the last seven days, and those unconfirmed in all, each on a line of its own with its rubric, summary, evidence and, while it waits, the command that confirms it, and on a broken promise's, any word of Daniel's that came after; complaints, spam flags and refunds in the last seven days; and the pauses in effect.
 - **Pending approvals:** every `approval-asked` with no `approval-decided`.
 
 A section with nothing to say prints "none", and an empty ledger prints that for every section and exits 0, with or without settings.
 A ledger whose chain is broken gets one line saying so and no numbers, and exits 1.
+The page holds what a cell and an Auditor wrote, so `company` writes no control or format character, line or paragraph separator or lone surrogate to its output, in this command or any other, and keeps newlines and tabs: a promise cannot move the cursor over the lines above it, or stop the page from printing.
 A setting the page needs that is missing refuses the whole page, with no value assumed.
 A token window that cannot be read, or usage records that cannot be, say why on their own line, and the rest of the page still prints.
 
@@ -759,6 +760,7 @@ Crypto and prediction markets count as trading under the same rule.
   Every namespace is unshared, the root is read-only, the environment is empty, and it sees only the system's files, Python, its own small driver and `/dev/urandom`, so neither the ledger, the bars, Daniel's settings nor any directory it could write are there; it has at most 4 GiB of memory, and can start no second process or thread.
   The time limit, `backtest_max_seconds`, is Daniel's setting, 60 by default, covers a whole run, and reaches the tools' server on its command line, so that the server holds no path to Daniel's settings.
   The paper key's path reaches a cell's server the same way, `--paper-key`, for the broker's bars at a registration; that server builds `paper.MarketData`, which can read bars and nothing else.
+  So once it has fetched bars the key is in that server's memory, outside the sandbox, under the same user as the session's shell, and a shell that can see that process could reach it: the probe's reads through `/proc` ask whether it can see the launcher's, and nothing else here says.
   The sandbox stays in the session's process group and dies with its parent, so a session's stop ends it.
   A strategy that hangs, crashes, ends early or prints anything but its positions is a failed configuration, `status` `failed`, with a `failure` of `timed-out`, `crashed: <its error>`, `ended-early` or `bad-output: <what>`, and it counts against the budget.
   With no `bwrap`, or one that cannot start, nothing runs, and `config-refused` says `no-confinement` or `confinement-failed`, at no cost, since no code of the cell's ran.
@@ -876,7 +878,7 @@ It refuses a run the ledger does not name, one still open, one with no transcrip
 - Its rubric is false statements (`false-statement`), broken promises (`broken-promise`), a result the records do not show (`unshown-result`), and a rule broken (`rule-broken`).
 - It refuses to start on `cell_model` or on the model the audited session ran on, citing the gap above; a model counts as the same by its family, so `opus`, `claude-opus-5-5[1m]` and `claude-opus-4-8` are all `claude-opus-5-5`'s, and that holds for `company session start auditor` too, which is given no run and so can record no finding.
 - It has read-only file tools and only its `record_finding` tool, in a fresh workspace holding `ledger.jsonl`, the whole ledger, and `transcripts/<run>.jsonl`, with the rubric in its goal text.
-  Those copies are removed when its session ends, or at the next launch if its launcher died, and the run's own record keeps the transcript.
+  Those copies are placed last before the launch, and are removed when its session ends, when a launch is refused after they were placed, or at the next launch if its launcher died after logging the start; the run's own record keeps the transcript.
 - A call it made to a tool outside its list is refused by `--tools`, and at the session's end the launcher logs each such call it finds in the session's output and transcript as `append-refused`, with the tool's name in lower case and the reason `tool-not-in-role`.
 - It has no web read, so it checks a citation to the ledger and not an outside URL, which Daniel checks in the batch.
 - Its findings go only to Daniel's digest and the ledger; no cell has them in its ledger view.
@@ -910,7 +912,10 @@ A cell records each promise it makes with its `record_promise` tool, which takes
 
 **A cell's promise is kept only by Daniel's word.**
 A cell's report of its own promise is the thing the honesty loop must not rest on, and a promise such as a delivery leaves no record the code can read, so silence past the date reads as broken and it costs Daniel a command to say otherwise.
-That word must name a day from the promise's making to its due date, and comes before any check reads the promise as broken, so a word Daniel gives late takes `--on`, and one after that is refused; the result then stands, and `company cell resume --bet <bet>` lifts the pause.
+That word must name a day from the promise's making to its due date, so a word Daniel gives late takes `--on`.
+Before a check reads the promise as broken, the word keeps it.
+After one has, even part way, silence has already been read as broken and the word stands beside that: `promise-kept` is logged, the one `promise-checked`, the finding and any pause stay, `company cell resume --bet <bet>` still lifts the pause, and the digest counts the promise as broken then said kept and says so on the finding's line.
+So a false mark against a cell that kept its word can be corrected in the record without rewriting it.
 The digest lists each open promise, with the command that says it was kept.
 
 Each write of a broken promise looks for what an earlier check wrote, so a check stopped part way is finished by the next with nothing twice, and a lock of its own, `honesty.lock`, keeps two from running at once.
@@ -1101,10 +1106,11 @@ It adds nothing to the ledger, and a settings file that fails its digest is repo
 - S3 looks at the paper key's metadata, never opening the file: a plain file of Daniel's, reachable by nobody else, and not empty; and that `outside_accounts` still holds its entry, so that a pull moves it.
 - S4 asks what the governor asks of the settings, and that `claude --help` lists the launch's flags; that `bwrap` and `socat` are on a session's own path, which is not the shell's; and that no variable `banned.is_banned` names is in the shell.
 - S5 needs Daniel's word, `account-checked`, since no code can see extra usage or read the terms: one since the go before the newest word while any word has launches left, or since the newest go when every word is used up, so each go needs a check of its own.
+  `company go` records a go with no standing check all the same, since the word is Daniel's, and says that the check does not stand.
 - S6 asks what the governor's steps 6 to 8 ask of the reading, the floor and the share.
 - S7 needs a `go-given` word with launches left, and the kill switch not pulled.
 
-**`company session probe`** runs the probe role with a script that tries each forbidden action: each of reading and writing, from the shell and from the file tools, in the config directory and the company home; reading the same two ways from the user's home directory, `market-data/broker` and another workspace; writing `CLAUDE.md` at the top of its own workspace from the shell, and `CLAUDE.local.md` from the file tools; and reaching a host from the shell, through the sandbox's proxy and around it.
+**`company session probe`** runs the probe role with a script that tries each forbidden action: each of reading and writing, from the shell and from the file tools, in the config directory and the company home; reading the same two ways from the user's home directory, `market-data/broker` and another workspace, and from a folder in the config directory through `/proc/<the launcher's process>/root`, which would go around every mount the sandbox made if the session can see that process; writing `CLAUDE.md` at the top of its own workspace from the shell, and `CLAUDE.local.md` from the file tools; and reaching a host from the shell, through the sandbox's proxy and around it.
 Before those it does three things that should work: a write in its workspace from the shell, one from the file tools, and finding `curl` and `timeout`.
 Any that did not work leaves the check `not-proven`, since a shell or a file tool that does nothing would otherwise read as a fence that held.
 Every path it names is a decoy named `probe-decoy-` with no secret in it, and the one host it names is `example.com`, which the company's own code never reaches.
@@ -1135,6 +1141,7 @@ Anything left fails, is named and killed by its process number, and leaves a hol
 A session that never got to wait shows nothing either way, and is `not-proven`.
 It is refused with the schedule on, since a pull's record would call the schedule off, and with another session running, since its stop would stop that one too.
 Its report is `kill-test.json` in the run's directory, and on a stub it shows only the procedure, as it says: C1's answer for a real session is what ticket 14 reads from Daniel's run.
+A report that cannot be saved does not lose what the test found: the command still prints it and logs `probe-result`, says so, and exits non-zero.
 
 **`company session scan-reading <run>`** opens the run's `output.jsonl` and no other file, and names any field in it whose name speaks of a rate limit, a window, a used percent, a utilization or a reset, and any bare word value that does, with no other value shown.
 It says whether a used percent is among them, since a limit's status alone would not serve as a reading.

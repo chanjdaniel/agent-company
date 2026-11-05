@@ -5,6 +5,7 @@ Each fixture's time is in the past of the real clock, and a boundary sets the ch
 """
 
 import os
+import unicodedata
 from datetime import timedelta
 
 import pytest
@@ -193,14 +194,42 @@ def test_a_word_with_no_date_means_today_so_it_is_refused_once_the_date_has_pass
     assert events("promise-kept") == []
 
 
-def test_a_word_on_a_promise_already_checked_or_already_kept_is_refused(company, digest_settings, check):
-    broken = promise()
+def test_a_word_after_the_check_stands_beside_the_one_broken_result(company, digest_settings, check):
+    seq = promise()
     check()
-    done = company("promise", "kept", str(broken), "--on", DUE)
-    assert done.returncode == 1
-    assert "broken" in done.stderr
-    assert events("append-refused")[-1]["reason"] == "already-checked"
+    finding = events("finding")[0]["seq"]
 
+    done = company("promise", "kept", str(seq), "--on", DUE, "--note", "the buyer has it")
+
+    assert done.returncode == 0, done.stderr
+    assert f"read it as broken, in finding {finding}" in done.stdout
+    assert "company cell resume --bet alpha" in done.stdout
+    assert "next `company treasurer check`" not in done.stdout
+    assert [(found["promise_seq"], found["kept_date"]) for found in events("promise-kept")] == [(seq, DUE)]
+    check()
+    assert checked_results() == [(seq, "broken")]
+    assert [found["promise_seq"] for found in events("finding")] == [seq]
+    # The word corrects the count, and the pause stays Daniel's to lift.
+    assert len(events("cell-paused")) == 1
+    honesty = honesty_section(company).splitlines()
+    assert honesty[0] == "Cells' promises: 1 made, 0 kept, 0 broken, 1 broken then said kept, 0 open"
+    assert any(line.startswith(f"Finding {finding}, broken-promise") and f"you later said event {seq} was kept on {DUE}" in line for line in honesty)
+    assert "Paused now: cell alpha" in honesty
+
+
+def test_a_late_word_still_cannot_name_a_day_past_the_due_date(company, digest_settings, check):
+    seq = promise()
+    check()
+
+    done = company("promise", "kept", str(seq))
+
+    assert done.returncode == 1
+    assert events("append-refused")[-1]["reason"] == "after-its-due-date"
+    assert events("promise-kept") == []
+    assert "1 made, 0 kept, 1 broken, 0 open" in honesty_section(company)
+
+
+def test_a_second_word_on_a_promise_is_refused(company, digest_settings):
     kept = promise(due="2099-01-01")
     assert company("promise", "kept", str(kept)).returncode == 0
     done = company("promise", "kept", str(kept))
@@ -209,17 +238,15 @@ def test_a_word_on_a_promise_already_checked_or_already_kept_is_refused(company,
     assert len(events("promise-kept")) == 1
 
 
-def test_a_word_after_a_check_stopped_part_way_is_refused_since_it_read_the_promise_as_broken(company, digest_settings, check):
+def test_a_word_after_a_check_stopped_part_way_stands_beside_the_broken_result_that_check_began(company, digest_settings, check):
     seq = promise()
     finding = event("finding", {"rubric": "broken-promise", "summary": "s", "evidence": "e", "bet": "alpha", "promise_seq": seq}, "treasurer")
 
     done = company("promise", "kept", str(seq), "--on", DUE)
 
-    assert done.returncode == 1
-    assert str(finding) in done.stderr
-    assert "company cell resume --bet alpha" in done.stderr
-    assert events("append-refused")[-1]["reason"] == "already-found-broken"
-    assert events("promise-kept") == []
+    assert done.returncode == 0, done.stderr
+    assert f"in finding {finding}" in done.stdout
+    assert len(events("promise-kept")) == 1
     check()
     assert checked_results() == [(seq, "broken")]
     assert [found["finding_seq"] for found in events("finding-confirmed")] == [finding]
@@ -312,6 +339,26 @@ def test_the_digest_names_each_open_promise_so_that_daniel_can_say_it_was_kept(c
         "Cells' promises: 2 made, 1 kept, 0 broken, 1 open",
         f"Open: event {seq}, bet alpha, due 2099-01-01, kept only if you say so with `company promise kept {seq}`: deliver the report",
     ]
+
+
+CONTROLS = "x\u001b[2K\u001b[1A\u001b[2Kgone\u009b2J\u202e\u2028\r\ud800"
+
+
+def test_a_promise_and_a_finding_reach_the_digest_with_no_control_or_format_character(company, digest_settings):
+    tools = CellTools(bet="alpha")
+    try:
+        answer = tools.call("record_promise", {"promise": CONTROLS, "due_date": "2099-01-01"})
+    finally:
+        tools.close()
+    assert not answer["isError"], answer
+    assert CONTROLS in [found["promise"] for found in events("promise-recorded")]
+    event("finding", {"rubric": "false-statement", "summary": CONTROLS, "evidence": CONTROLS, "bet": "alpha"}, "auditor")
+
+    done = company("digest")
+
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.count("gone") == 3
+    assert {character for character in done.stdout if character not in "\n\t" and unicodedata.category(character) in ("Cc", "Cf", "Cs", "Zl", "Zp")} == set()
 
 
 def test_a_cells_promises_are_counted_apart_from_a_runners_not_run(company, digest_settings, check):

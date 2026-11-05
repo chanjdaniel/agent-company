@@ -90,8 +90,15 @@ def _runner_result(events: list[dict], promise: dict, today: str) -> tuple[str, 
     return None
 
 
+def _finding_of(events: list[dict], seq: int) -> int | None:
+    """The finding a check wrote on this promise, which is its reading as broken, even if the check stopped there."""
+    return next((event["seq"] for event in treasurer.of_kind(events, "finding") if event.get("promise_seq") == seq), None)
+
+
 def _cell_result(events: list[dict], promise: dict, today: str) -> tuple[str, list[int]] | None:
-    """A cell's promise: Daniel's word keeps it, and past its date with none it is broken."""
+    """A cell's promise: Daniel's word keeps it, and past its date with none it is broken, which a word after that reading does not change."""
+    if _finding_of(events, promise["seq"]) is not None:
+        return BROKEN, []
     word = next((event for event in treasurer.of_kind(events, "promise-kept") if event["promise_seq"] == promise["seq"]), None)
     if word is not None and word["kept_date"] <= promise["due_date"]:
         return KEPT, [word["seq"]]
@@ -168,7 +175,7 @@ def _record_broken(ledger: Ledger, events: list[dict], promise: dict) -> int:
     """The finding, its confirmation and the pause, each only if an earlier check did not write it; returns the finding's seq."""
     bet = treasurer.bet_of(promise)
     seq = promise["seq"]
-    finding = next((event["seq"] for event in treasurer.of_kind(events, "finding") if event.get("promise_seq") == seq), None)
+    finding = _finding_of(events, seq)
     if finding is None:
         summary = f"The cell's promise in event {seq} fell due on {promise['due_date']} with no word that it was kept."
         fields = {"rubric": audit.BROKEN_PROMISE, "summary": summary, "evidence": f"event {seq}", "bet": bet, "promise_seq": seq}
@@ -206,8 +213,20 @@ def _refusal(ledger: Ledger, kind: str, reason: str, words: str) -> Refused:
     return Refused(words, ledger.refuse(kind, "board", reason)["seq"])
 
 
-def keep_promise(seq: int, on: date, note: str | None = None) -> dict:
-    """Daniel's word that a cell's promise was kept on this day, which must be by its due date and before any check read it."""
+@dataclass(frozen=True)
+class Kept:
+    """Daniel's word on a promise; `finding`, if any, is the check's reading of it as broken, which stands beside the word."""
+
+    event: dict
+    finding: int | None
+    bet: str
+
+
+def keep_promise(seq: int, on: date, note: str | None = None) -> Kept:
+    """Daniel's word that a cell's promise was kept on this day, which must be by its due date.
+
+    Before any check reads the promise, the word is what keeps it. After one read it as broken, the word corrects the record without rewriting it: the one result, its finding and any pause stay, and the digest counts the promise apart.
+    """
     with _one_at_a_time():
         ledger = Ledger()
         events = ledger.read()
@@ -216,13 +235,6 @@ def keep_promise(seq: int, on: date, note: str | None = None) -> dict:
             raise _refusal(ledger, "promise-kept", "no-such-promise", f"event {seq} is no promise")
         if not _is_the_cells(promise):
             raise _refusal(ledger, "promise-kept", "not-a-cells-promise", f"event {seq} is the code's own promise, which only its paper period's close keeps")
-        checked = next((event for event in treasurer.of_kind(events, "promise-checked") if event["promise_seq"] == seq), None)
-        if checked is not None:
-            raise _refusal(ledger, "promise-kept", "already-checked", f"the check already read event {seq} as {checked['result']}, and a promise gets one result")
-        finding = next((event["seq"] for event in treasurer.of_kind(events, "finding") if event.get("promise_seq") == seq), None)
-        if finding is not None:
-            words = f"a check already read event {seq} as broken, in finding {finding}, and the next check finishes that; `{resume_command(treasurer.bet_of(promise))}` lifts the pause"
-            raise _refusal(ledger, "promise-kept", "already-found-broken", words)
         if any(event["promise_seq"] == seq for event in treasurer.of_kind(events, "promise-kept")):
             raise _refusal(ledger, "promise-kept", "already-kept", f"event {seq} already has your word that it was kept")
         if on.isoformat() > promise["due_date"]:
@@ -232,7 +244,8 @@ def keep_promise(seq: int, on: date, note: str | None = None) -> dict:
         if on.isoformat() < made:
             raise _refusal(ledger, "promise-kept", "before-it-was-made", f"event {seq} was made on {made}, so it cannot have been kept on {on.isoformat()}")
         fields = {"promise_seq": seq, "kept_date": on.isoformat()}
-        return ledger.append("promise-kept", fields | ({"note": note} if note else {}), "board")
+        event = ledger.append("promise-kept", fields | ({"note": note} if note else {}), "board")
+        return Kept(event, _finding_of(events, seq), treasurer.bet_of(promise))
 
 
 def resume(scope: str, bet: str | None = None, message: str | None = None) -> dict:

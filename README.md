@@ -54,7 +54,7 @@ uv run company paper check             # one read-only call to the paper account
 uv run company paper tick              # run the open paper period once, which only code does; no real money is involved
 uv run company treasurer check         # check each promise now settled, once; a broken one pauses its cell
 uv run company promise kept 12 --on 2026-11-05
-                                       # Daniel's word that a cell's promise was kept, which nothing else can say
+                                       # Daniel's word that a cell's promise was kept, which nothing else can say; after a check read it as broken, it stands beside that result
 uv run company audit 20261105T090000Z-1a2b3c4d
                                        # run the Auditor on a recorded run, on another model; this spends real use
 uv run company finding confirm 12      # Daniel's word on a finding code could not check, which pauses its cell

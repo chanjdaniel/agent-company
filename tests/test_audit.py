@@ -13,7 +13,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from session_checks import events, wait_for
+from session_checks import events, patch_every_company, wait_for
 from usage_records import SETTINGS_INIT, TEAM, transcript_line, week_reading
 
 from company import audit, goals, paths, schedule, times, tools, views
@@ -461,6 +461,29 @@ def test_a_directory_planted_at_the_views_path_refuses_the_launch(company, stub,
     assert done.returncode == 1
     assert "no-context" in done.stdout
     assert stub.session_calls() == []
+
+
+# What a refused launch leaves
+
+
+FILLED_THEN = {
+    "the kill switch pulled during the launch": ["import company.launcher", "company.launcher._really_prepare = company.launcher._prepare", "def prepare(*given):", "    prepared = company.launcher._really_prepare(*given)", "    company.launcher.kill_state.present = lambda: True", "    return prepared", "company.launcher._prepare = prepare"],
+    "a start that cannot be logged": ["import company.ledger", "company.ledger.Ledger.really_append = company.ledger.Ledger.append", "def append(self, kind, *rest, **more):", "    if kind == 'session-started':", "        raise OSError('the disk is full')", "    return self.really_append(kind, *rest, **more)", "company.ledger.Ledger.append = append"],
+    "a claude that cannot start": ["import company.launcher", "def spawn(launch):", "    raise OSError(13, 'Permission denied')", "company.launcher._spawn = spawn"],
+}
+
+
+@pytest.mark.parametrize("what", FILLED_THEN)
+def test_an_auditor_launch_refused_after_its_workspace_was_filled_leaves_no_copy_there(company, stub, cell_run, tmp_path, monkeypatch, what):
+    cell = cell_run()
+    patch_every_company(tmp_path, monkeypatch, *FILLED_THEN[what])
+
+    done = company("audit", cell["run"])
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert events("launch-refused")[-1]["role"] == "auditor"
+    assert [path for path in paths.workspaces().rglob(views.FILE) if path.parent.name != cell["run"]] == []
+    assert list(paths.workspaces().rglob(audit.TRANSCRIPTS)) == []
 
 
 # Confirmed by code

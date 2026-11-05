@@ -687,7 +687,6 @@ def _prepare(admitted: governor.Admitted, prompt: str, chosen: str | None, audit
     run = f"{times.now().strftime('%Y%m%dT%H%M%SZ')}-{session[:8]}"
     workspace = _workspace(chosen, run)
     _check_workspace(workspace)
-    _give_context(role, bet, workspace, given)
     run_dir = paths.runs() / run
     run_dir.mkdir(parents=True, mode=0o700)
     mcp, session_file = run_dir / "mcp.json", run_dir / "settings.json"
@@ -696,6 +695,8 @@ def _prepare(admitted: governor.Admitted, prompt: str, chosen: str | None, audit
     task = "".join(f"\n{part}\n" for part in (audit.prompt(given) if given else "", prompt) if part)
     (run_dir / "prompt.txt").write_text(goal.text + task)
     command = _command(claude, role, session, model, mcp, session_file)
+    # Last, so that nothing above can leave what this copies behind.
+    _give_context(role, bet, workspace, given)
     return _Launch(role, bet, session, run, run_dir, workspace, model, command, max_minutes, max_weight, audited_runs)
 
 
@@ -824,6 +825,16 @@ def _charge_at_the_end() -> None:
         print(f"company: the charge at this session's end did not run: {error}", file=sys.stderr)
 
 
+def _refuse_prepared(launch: _Launch, refusal: _Refuse) -> governor.Refused:
+    """Refuse a launch whose workspace is filled, taking an Auditor's copies away, since no session's end will come to do it."""
+    if launch.audited_runs:
+        try:
+            audit.remove_context(launch.workspace)
+        except OSError as error:
+            print(f"company: the whole ledger's copy in {launch.workspace} could not be removed: {error}. Remove it by hand.", file=sys.stderr)
+    return _refuse(launch.role, launch.bet, refusal)
+
+
 def start(role: str, bet: str | None = None, prompt: str = "", workspace: str | None = None, scheduled: bool = False, audited_runs: tuple[str, ...] = ()) -> Finished | governor.Refused:
     """Run one session from admission to its end; a refused launch starts nothing. `audited_runs` names the runs an Auditor is given."""
     with _launch_lock():
@@ -837,13 +848,13 @@ def start(role: str, bet: str | None = None, prompt: str = "", workspace: str | 
             return _refuse(role, bet, refusal)
         # Preparing takes seconds, and the kill switch may have been pulled since the governor looked.
         if kill_state.present():
-            return _refuse(role, bet, _Refuse("kill", "killed: the kill switch was pulled during this launch", governor.FIX_KILL))
+            return _refuse_prepared(launch, _Refuse("kill", "killed: the kill switch was pulled during this launch", governor.FIX_KILL))
         _record_processes(launch, None)
         try:
             _log_start(launch, admitted)
         except (AppendRefused, LedgerBroken, OSError) as error:
             _forget_processes(launch)
-            return _refuse(role, bet, _Refuse("ledger", f"unlogged: the session's start could not be logged: {error}", governor.FIX_LEDGER))
+            return _refuse_prepared(launch, _Refuse("ledger", f"unlogged: the session's start could not be logged: {error}", governor.FIX_LEDGER))
         try:
             process = _spawn(launch)
         except OSError as error:
@@ -851,7 +862,7 @@ def start(role: str, bet: str | None = None, prompt: str = "", workspace: str | 
             # If the ledger will not take this either, the next launch closes the session, since it has no group.
             with contextlib.suppress(AppendRefused, LedgerBroken, OSError):
                 Ledger().append("session-stopped", {"session": launch.session, "reason": "not-started"}, "launcher")
-            return _refuse(role, bet, _Refuse("binary", f"no-start: `claude` could not start: {error.strerror}", f"check {launch.command[0]}"))
+            return _refuse_prepared(launch, _Refuse("binary", f"no-start: `claude` could not start: {error.strerror}", f"check {launch.command[0]}"))
         _record_processes(launch, process.pid)
     finished = _run(launch, process)
     _charge_at_the_end()

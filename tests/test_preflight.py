@@ -222,6 +222,35 @@ def test_a_second_go_with_no_check_since_the_first_leaves_s5_open(stub, company,
     assert section(company("preflight").stdout, "S5").startswith("S5 passed")
 
 
+GO = ("go", "real-sessions", "--message", "1", "--sessions", "1")
+
+
+def test_a_go_with_no_account_check_is_recorded_and_says_the_check_does_not_stand(company):
+    done = company(*GO)
+    assert done.returncode == 0, done.stderr
+    assert len(events("go-given")) == 1
+    assert "does not stand" in done.stdout
+    assert "company account checked" in done.stdout
+
+
+def test_a_go_on_a_check_from_before_an_earlier_go_says_the_check_does_not_stand(company):
+    assert company("account", "checked").returncode == 0
+    assert "does not stand" not in company(*GO).stdout
+    done = company(*GO)
+    assert done.returncode == 0, done.stderr
+    assert len(events("go-given")) == 2
+    assert "does not stand" in done.stdout
+
+
+def test_a_go_on_a_check_that_stands_says_nothing_more(company):
+    assert "does not stand" not in (company("account", "checked"), company(*GO))[1].stdout
+    assert company("account", "checked").returncode == 0
+    done = company(*GO)
+    assert done.returncode == 0, done.stderr
+    assert "does not stand" not in done.stdout
+    assert "company account checked" not in done.stdout
+
+
 def test_a_word_used_up_needs_a_new_check_before_the_next_go(stub, company, usage_ready):
     assert company("account", "checked").returncode == 0
     assert company("go", "real-sessions", "--message", "1", "--sessions", "1").returncode == 0

@@ -1,7 +1,7 @@
 """`docs/first-run.md`: every command it names, run in its order, on the stub, by the code `uv tool install` puts in place.
 
 The walk starts from a home with nothing in it and sets only `HOME`, so that each command finds what the one before left where the runbook says.
-`company paper check` is the one command not in a child, since the broker's fake is chosen in this process; no test reaches the broker.
+`company paper check` and `company paper tick` are the commands not in a child, since the broker's fake is chosen in this process; no test reaches the broker.
 """
 
 import json
@@ -19,6 +19,7 @@ from usage_records import TEAM, transcript_line
 from company import cli, paper, paths, times
 
 REPO = Path(__file__).resolve().parents[1]
+IN_THIS_PROCESS = ("company paper check", "company paper tick")
 BLOCK = re.compile(r"^```(sh|json)\n(.*?)\n```$", re.MULTILINE | re.DOTALL)
 
 
@@ -82,8 +83,16 @@ def test_it_says_how_to_stop_everything_and_what_is_daniels_alone():
     assert "## Stop everything" in text
     assert "## Which commands are yours alone" in text
     alone = text.split("## Which commands are yours alone", 1)[1].split("\n## ", 1)[0]
-    for command in ("company session probe", "company session probe --kill-test", "company go real-sessions", "company kill", "company resume", "company paper check"):
+    for command in ("company session probe", "company session probe --kill-test", "company go real-sessions", "company kill", "company resume", "company paper check", "company paper tick", "company complaint record", "company spam-flag record", "company schedule enable"):
         assert f"`{command}`" in alone
+
+
+def test_it_says_what_a_passing_verdict_asks_of_daniel_and_when():
+    after = runbook().split("## After a session", 1)[1].split("\n## ", 1)[0]
+    assert "company paper tick" in after
+    assert "21:30 UTC" in after
+    assert "passing verdict" in after
+    assert "kill" in after
 
 
 def test_it_says_sign_in_is_unproven_and_what_a_failed_one_looks_like():
@@ -200,10 +209,10 @@ def test_each_command_runs_in_order_on_the_stub(stub, systemctl, tmp_path, monke
         walk.before(written)
         command = walk.filled(written)
         ran.append(written)
-        if written == "company paper check":
+        if written in IN_THIS_PROCESS:
             monkeypatch.setattr(paper, "transport", FakeBroker)
             capsys.readouterr()
-            code = cli.main(["paper", "check"])
+            code = cli.main(written.split()[1:])
             captured = capsys.readouterr()
             output = captured.out + captured.err
         else:

@@ -194,8 +194,11 @@ def _promises_line(events: list[dict]) -> str | None:
         return None
     results = {e["promise_seq"]: e["result"] for e in events if e["kind"] == "promise-checked" and e["promise_seq"] in made}
     kept = sum(result == honesty.KEPT for result in results.values())
-    failed = sum(result == honesty.BROKEN for result in results.values())
-    return f"Cells' promises: {len(made)} made, {kept} kept, {failed} broken, {len(made) - len(results)} open"
+    said_kept = {e["promise_seq"] for e in events if e["kind"] == "promise-kept"}
+    broken = [seq for seq, result in results.items() if result == honesty.BROKEN]
+    later = sum(seq in said_kept for seq in broken)
+    corrected = f"{later} broken then said kept, " if later else ""
+    return f"Cells' promises: {len(made)} made, {kept} kept, {len(broken) - later} broken, {corrected}{len(made) - len(results)} open"
 
 
 def _open_lines(events: list[dict]) -> list[str]:
@@ -231,6 +234,7 @@ def _findings_line(events: list[dict], week: treasurer.Span) -> str | None:
 def _finding_lines(events: list[dict], week: treasurer.Span) -> list[str]:
     """Each finding this week and each still waiting, since a count gives Daniel nothing to decide on."""
     confirmed = {e["finding_seq"]: e["writer"] for e in events if e["kind"] == "finding-confirmed"}
+    said_kept = {e["promise_seq"]: e["kept_date"] for e in events if e["kind"] == "promise-kept"}
     lines = []
     for e in events:
         if e["kind"] != "finding" or (e["seq"] in confirmed and not week.holds(e)):
@@ -239,6 +243,8 @@ def _finding_lines(events: list[dict], week: treasurer.Span) -> list[str]:
             word = "confirmed by you" if confirmed[e["seq"]] == "board" else "confirmed by code"
         else:
             word = f"waiting for your word: `company finding confirm {e['seq']}`" + (" pauses the cell" if "bet" in e else " records it")
+        if e.get("promise_seq") in said_kept:
+            word += f", and you later said event {e['promise_seq']} was kept on {said_kept[e['promise_seq']]}"
         lines.append(f"Finding {e['seq']}, {e['rubric']}{_bet_note(e)}, {word}: {' '.join(e['summary'].split())} Evidence: {' '.join(e['evidence'].split())}")
     return lines
 

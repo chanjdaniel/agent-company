@@ -16,13 +16,14 @@ With extra usage off, a session past the account's limits stops, and nothing is 
 
 ## Which commands are yours alone
 
-No worker of the agent team may start a company session, so only you run these, against your real home:
+No worker of the agent team may start a company session or use the key, so only you run these, against your real home:
 
 - `uv tool install`, `company settings init`, `company account checked`, `company reading record`, and `company go real-sessions`
 - `company session probe`, `company session probe --kill-test`, `company session start`, and `company audit`
-- `company paper check`
+- `company paper check` and `company paper tick`
 - `company treasurer check`, `company treasurer charge`, `company promise kept`, `company finding confirm`, and `company cell resume`
 - `company kill` and `company resume`
+- `company complaint record`, `company spam-flag record`, and `company schedule enable`, which this first run does not need
 
 A worker reads what these leave behind, read-only, and never the key.
 The one command here that a worker runs on your real home is `company session scan-reading <run>`, which reads that run's saved output and nothing else.
@@ -158,6 +159,9 @@ company go real-sessions --message <Discord id> --sessions <n>
 
 You should see `a go for`.
 
+If you have not said `company account checked` since the go before this one, it also says your account check does not stand.
+The go is recorded all the same, so do S5 again before you launch: extra usage left on is what could bill a long session for real.
+
 ```sh
 company preflight
 ```
@@ -176,6 +180,7 @@ You should see `PAPER, no real money`.
 
 This is a cheap real session that tries each forbidden action.
 It writes and reads only decoys, each named `probe-decoy-` and holding no secret: in your config directory, in the company home and its `market-data/broker`, in your home directory, and in a workspace beside its own.
+It also tries to read one in your config directory through `/proc/<this command's process>/root`, which would go around every mount of its sandbox if the session can see this process.
 While it runs, a decoy `CLAUDE.md` sits in `workspaces/` in the company home, and a decoy rule sits in `~/.claude/rules`, where another session you start in that minute could load it: it holds a marker, and asks nothing of whoever reads it.
 It removes them all at its end, with its own workspace; if it is killed outright, any that stay can be deleted by hand.
 
@@ -261,6 +266,19 @@ company treasurer charge
 
 You should see `Charged:`.
 
+If the cell's session ended in a passing verdict, a paper period has opened, with the code's promise that it closes by its end date, and until the schedule is on nothing runs it but you:
+
+```sh
+company paper tick
+```
+
+You should see `no real money`.
+
+Run it once a day, after 21:30 UTC, until the period closes.
+Each run reads the account, closes the period if it is past its drawdown kill or its end date, and otherwise places the strategy's orders on the paper host.
+The kill and the end date act only when it runs, so positions from one tick sit with no kill until the next, and with no tick to close the period by its end date, the code's promise reads `not-run`.
+With no period open it says so, and does nothing.
+
 ```sh
 company digest
 ```
@@ -268,7 +286,7 @@ company digest
 You should see `## Bar`.
 
 The digest lists each finding and each open promise, with the event number these commands take.
-Only you can say a cell's promise was kept, and with no such word at the first check after its day ends, it is broken:
+Only you can say a cell's promise was kept, and with no such word at the first check after its day ends, it is broken, so say it before that check:
 
 ```sh
 company promise kept <promise>
@@ -281,6 +299,8 @@ company treasurer check
 ```
 
 You should see `kept.`
+
+A word after that check needs `--on` with a day by the due date, and stands beside the broken result: the digest counts the promise as broken then said kept, and the finding and the pause stay until you lift the pause.
 
 A finding that code could not check waits for your word, which pauses its cell:
 
