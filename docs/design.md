@@ -3,7 +3,7 @@
 This is the design the first slice builds, written 2026-11-04.
 It turns the research in [`docs/research/2026-11-02-org-and-profit-loops/`](research/2026-11-02-org-and-profit-loops/report.md) and Daniel's decisions into one document that later work is checked against.
 Where this document and the report or critique differ, this document holds; where this document and Daniel's word differ, Daniel's word holds, and this document is wrong.
-So far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, the test suite with its guards and scan, and CI; nothing else here exists as code yet.
+So far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the session launcher, the company tools' server with its note tool, the goal texts, the kill switch, the schedule with its first two jobs, the test suite with its guards and scan, and CI; nothing else here exists as code yet.
 
 Words used throughout:
 
@@ -107,7 +107,7 @@ Each of these can move, and Daniel re-checks them before each go (S5).
   If it moves, the share stops describing what sessions spend; since extra usage is off, sessions stop rather than bill, and the launcher is the one module that changes.
 - **`--bare` becoming the default.**
   Claude Code's [headless docs](https://code.claude.com/docs/en/headless) (read 2026-11-04) say `--bare` "will become the default for `-p` in a future release", and that bare mode "doesn't use your subscription login".
-  With no key in the environment, such a release would make every company session fail at sign-in, which stops the company and costs nothing, and the launcher would then need whatever flag keeps the sign-in.
+  With no key in the environment, such a release would make every company session fail at sign-in, which stops the company and uses no model, and the launcher would then need whatever flag keeps the sign-in.
 - **The terms.**
   Claude Code's [legal page](https://code.claude.com/docs/en/legal-and-compliance) (read 2026-11-04) says subscription sign-in "is designed to support ordinary use of Claude Code and other native Anthropic applications", and that advertised limits "assume ordinary, individual usage of Claude Code and the Agent SDK".
   The same page says developers building products or services, "including those using the Agent SDK, should use API key authentication", and that this does not "prevent an end user from signing in to the unmodified Claude Code binary with their own Claude subscription".
@@ -122,16 +122,23 @@ The launcher is the only code that starts `claude`, and it calls the governor fi
 It takes the binary from `COMPANY_CLAUDE_BIN` or `PATH`, so tests use the stub.
 
 It starts `claude -p` in its own process group, rather than `claude --bg`, so it holds the process, needs no session-management command, sets the session id itself and captures the output.
-The flags are `--session-id`, `--output-format stream-json --verbose`, `--strict-mcp-config --mcp-config`, `--settings`, `--setting-sources` and `--model`, with a non-prompting permission mode (the docs' `dontAsk` denies whatever would otherwise prompt) and an explicit tool list.
-Ticket 06 checks each flag against `claude --help`, and the probe proves them on a real session.
+The flags are `--session-id`, `--output-format stream-json --verbose`, `--restricted`, `--strict-mcp-config --mcp-config`, `--settings`, `--disable-slash-commands` and `--model`, with a non-prompting permission mode (the docs' `dontAsk` denies whatever would otherwise prompt) and an explicit tool list in `--tools` and `--allowedTools`.
+The prompt, the role's goal text with any task after it, goes on stdin, since a flag that takes many values would swallow a prompt behind it.
+Ticket 06 checked each flag against `claude --help` of version 2.1.318, and the probe proves them on a real session.
+Before each launch the launcher reads `claude --help`, and a `claude` that does not list a flag the launch passes starts nothing and logs `launch-refused`.
 
 Rules every session starts under:
 
 - **Never `--bare`,** since it authenticates only by API key.
 - **An allow-listed environment.**
-  The child keeps only named variables, so a new one is excluded by default, and that list excludes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY` and anything else the scan's list names.
+  The child keeps only named variables, so a new one is excluded by default, and that list excludes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY` and anything else the scan's list names, which the launcher and the scan both read from `src/company/banned.py`.
+  Its `PATH` is fixed at `/usr/local/bin:/usr/bin:/bin`, so no directory of Daniel's own tools is on a session's path, and neither `COMPANY_HOME` nor `COMPANY_CONFIG` reaches it.
 - **Generated settings.**
-  They set `sandbox.enabled`, `sandbox.failIfUnavailable` and `sandbox.allowUnsandboxedCommands: false`, a read boundary (`sandbox.filesystem.denyRead` of the home directory, with the workspace allowed), no network hosts, and permission rules denying `Read`, `Write` and `Edit` outside the workspace.
+  They set `sandbox.enabled`, `sandbox.failIfUnavailable` and `sandbox.allowUnsandboxedCommands: false`, a read boundary (`sandbox.filesystem.denyRead` of the home directory, the company home, the config directory and Claude Code's directory, with the workspace allowed), no write beyond the working directory the sandbox already allows and its per-user temporary directory, no network hosts, and permission rules keeping the file tools inside the workspace.
+  At the sandbox layer the read boundary is those directories and not the whole disk, since commands need to read the system's own files.
+  At the permission layer, `permissions.blockReadsOutsideWorkingDirectories` and `permissions.blockWritesOutsideWorkingDirectories` say "outside the workspace", because no deny rule can: a deny beats an allow, and the workspace sits inside the home directory.
+  Deny rules also name the config directory, Claude Code's directory, and the ledger, locks, kill records and runs in the company home.
+  They are `Read` and `Edit` rules, since the [permission docs](https://code.claude.com/docs/en/permissions) (read 2026-11-05) say a `Write(path)` rule is accepted and never matches, and that `Edit` rules cover every tool that edits.
   They set no `apiKeyHelper`, no hook and no status line, and the session loads no user-level settings, instructions, skills, subagents, plugins, auto memory or MCP servers.
 - **Both layers are needed.**
   The [sandbox docs](https://code.claude.com/docs/en/sandboxing) (read 2026-11-04) say "The sandbox covers shell commands only", and that tools such as `Read`, `Edit`, `Write`, `WebFetch` and `WebSearch` "follow permission rules instead".
@@ -145,15 +152,39 @@ Rules every session starts under:
   So an instruction file an agent wrote in its workspace could carry instructions into a later session, and Daniel's `~/.claude/CLAUDE.md`, skills, subagents and auto memory would sit beside a cell's goal text and in the Auditor's fresh context.
   None of these enters a session, from the workspace, a folder above it or `~/.claude`.
 - **How the launcher holds these two rules.**
-  It keeps `--strict-mcp-config`, denies writes to `.claude/`, `.mcp.json`, `CLAUDE.md` and `CLAUDE.local.md` at any depth in the workspace, and refuses to start a session in a workspace that holds any of them, logging `launch-refused`.
-  It loads no user, project or local settings, and turns off the rest, in the form ticket 06 finds.
-  That form is not settled: the docs list only those three sources for `--setting-sources`, do not say it gates instruction files, skills, subagents or auto memory, and advise `--setting-sources user`, which would load what this rule keeps out.
-  The candidates ticket 06 checks, from the [CLI reference](https://code.claude.com/docs/en/cli-reference) and the [environment variables page](https://code.claude.com/docs/en/env-vars) (read 2026-11-04), are `--restricted`, which "loads only managed settings and `--settings`"; `--safe-mode`, under which MCP servers do not load, and the company tools are MCP servers; `--disable-slash-commands`; `CLAUDE_CODE_DISABLE_CLAUDE_MDS`; and `CLAUDE_CODE_DISABLE_AUTO_MEMORY`.
+  It keeps `--strict-mcp-config`, denies the file tools writes to `.claude/`, `.mcp.json`, `CLAUDE.md` and `CLAUDE.local.md` at any depth in the workspace, and refuses to start a session in a workspace that holds any of them, logging `launch-refused`.
+  The settings deny the shell those names only at the top of the workspace, since the [settings reference](https://code.claude.com/docs/en/settings-reference) (read 2026-11-05) says that on Linux a sandbox write rule takes no wildcard but a trailing `/**`.
+  The docs do not say how `denyWrite` treats a path that does not exist yet, as all four are in a fresh workspace, so even that denial is unproven until ticket 13's probe tries it.
+  So a shell can write one deeper down, and what stops it reaching a session is the refusal: the next launch in that workspace starts nothing.
+  A workspace must lie under the company home's `workspaces/`, and with none chosen a session gets a fresh one.
+  The form that loads nothing else, from the [CLI reference](https://code.claude.com/docs/en/cli-reference) and the [environment variables page](https://code.claude.com/docs/en/env-vars) (read 2026-11-05), is these together:
+  - `--restricted`, which "loads only managed settings and `--settings`", so no user, project or local settings, and so no plugin they enable;
+  - `--disable-slash-commands`, which disables "all skills and commands";
+  - a `--tools` list that never names the Agent tool, so no subagent can be called;
+  - `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`, which prevents "loading any CLAUDE.md memory files into context, including user, project, and auto memory files", and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`.
+  The settings also turn off hooks, connectors and what syncs from the claude.ai account.
+  `--safe-mode` would load no MCP server, and the company tools are MCP servers; `--setting-sources` is never passed, since the docs list only three sources for it and advise `user`, which would load what this rule keeps out.
+  `--restricted` also removes the built-in tools that run commands unless `--tools` names them, and confines the file tools to the working directories, which is what the rules above ask.
+  **The docs do not say in so many words that the sign-in survives `--restricted`.**
+  They say bare mode never reads it and list no such limit for restricted mode, and they keep credentials outside the settings files, so the launcher relies on it, and the first real probe is what shows it.
+  If it does not, the session fails at sign-in, which uses no model and spends the one launch of the go word that its `session-started` cited.
   **If no documented form does this with the sign-in still working, the launcher refuses every real launch and the builder asks; it never falls back to user settings.**
   Ticket 06 proves the refusals on the stub, and only Daniel's probe, read in ticket 14, can prove what a real session loads.
 - **Limits.**
-  `session_max_minutes` and `session_max_weight` are enforced from the live output, and a session past either has its group stopped and `session-stopped` logged.
+  `session_max_minutes` and `session_max_weight` are enforced as the session runs, the weight from its live output or its transcript, whichever has seen more, and a session past either has its group stopped and `session-stopped` logged, followed by `session-ended`.
+  A session's group is also stopped when it ends by itself, so that nothing it started runs on.
+- **A launcher that dies.**
+  A session with no end event claims no bar for any window from its start on, so before each launch, refused or not, the launcher closes each session whose launcher has gone: it stops any of the session's group that is left, since nothing watches its limits any more, and logs `session-stopped` with the reason `launcher-gone`.
+  The next charge then counts the open window; the closed windows the session ran in stay named until they leave the trailing month, since nothing charges a window after its reset.
+- **One launch decides at a time.**
+  A lock held from before `admit` until the session has started keeps two launches from both spending a word's last launch.
+- **A signal to the launcher.**
+  SIGTERM, SIGINT or SIGHUP stops the session's group and logs `session-stopped` with the reason `launcher-signalled`, since a Ctrl-C reaches only the launcher, the session being in a group of its own.
+- **The kill switch.**
+  A launcher that sees `kill.state` stops the session's group and logs `session-stopped` with the reason `kill-switch`, and it refuses a launch whose preparing took long enough for a pull to land.
 - **At the end,** the launcher logs `session-ended` with the exit, the transcript's path and hash and the session's weight, and copies the transcript into the company home, so that it outlives Claude Code's own clean-up and the audit window can rely on it.
+  A session with no transcript has `none` for its path and hash.
+  Each run's directory, `runs/<run>/` in the company home, also keeps its raw output, settings, server configuration and prompt.
 
 ### Roles
 
@@ -168,6 +199,7 @@ Rules every session starts under:
 The defaults are `claude-opus-5-5` for `cell_model`, `claude-sonnet-5-5` for `auditor_model`, and `claude-haiku-5-5` for the probe.
 
 Every goal text states the honesty constraints as part of the goal, and none says "whatever it takes" or "at all costs".
+Goal texts are files in the package, `src/company/goals/<role>.v<n>.md`, the newest of a role's being the one used, and one that fails the scan starts nothing.
 The evidence behind this is in the report's section 1.3: under such a prompt, agents lied about refunds and fixed prices.
 
 ### Company tools
@@ -175,7 +207,10 @@ The evidence behind this is in the report's section 1.3: under such a prompt, ag
 Agents reach the ledger only through company tools on a local stdio MCP server, one per session.
 The launcher starts it with the role and bet fixed, so the writer is settled when the session starts, which a flag or an environment variable inside a session could not do.
 A tool call that names another writer still writes as the session's own, and a call to a tool outside the role is refused and logged.
-A session's shell cannot write the company home outside its workspace, so it cannot run `company` as anyone else.
+A refused call logs `append-refused` with its `session` and `tool`.
+Each server starts in the workspace, outside the sandbox, so it runs with Python's `-P`, and a file an agent planted there cannot run as the company's code.
+A session's shell cannot write the company home outside its workspace, so it cannot run `company` as anyone else, and `company ledger append`, which takes any writer, is the person's and the tests' door.
+As second layers, `company` is not on a session's path, the settings deny the shell `company` and `claude`, and `company ledger append` refuses and logs when the launcher's `COMPANY_SESSION` variable is set.
 
 ## The ledger
 
@@ -220,6 +255,7 @@ An `append-refused` event's writer is the code writer making the append, or `tre
 - `minutes` is a number from zero up.
 - `week_start` is the UTC time a seven-day window opens.
 - `charge_id` is a UUID, one per run of the charge, and `charge_lines` a whole number from 1 up.
+- `sessions` is a whole number of launches, from 1 up.
 - `weight` is a list-price weight, which is an apportioning key and never a cost.
 - On events written through company tools, `session` and `data_hash` are filled in by the tool, not by the agent.
 
@@ -250,8 +286,8 @@ A kind that a later ticket finds it needs joins this table and the contract in t
 | `session-stopped` | Sessions | `launcher` | `session`, `reason` | `elapsed_minutes`, `weight` |
 | `session-note` | Sessions | `cell:<bet>`, `probe` | `session`, `text` | |
 | `launch-refused` | Sessions | `governor`, `launcher` | `role`, `check`, `reason`, `fix` | `bet`, `account_used`, `company_used`, `reading_seq` |
-| `kill-pulled` | Kill switch | `killswitch` | `by`, `reason` | `loop` |
-| `kill-step` | Kill switch | `killswitch` | `step`, `target`, `result` | `detail` |
+| `kill-pulled` | Kill switch | `killswitch` | `pull`, `by`, `reason` | `pulled_at`, `loop` |
+| `kill-step` | Kill switch | `killswitch` | `pull`, `step`, `target`, `result` | `detail` |
 | `resumed` | Kill switch | `board` | `kill_seq` | `message` |
 | `strategy-registered` | Quant | `cell:<bet>` | `strategy`, `universe`, `data_source`, `data_hash`, `in_sample`, `holdout`, `cost_model`, `slippage_model`, `max_configurations`, `acceptance` | `paper_days` |
 | `config-run` | Quant | `runner` | `registration_seq`, `config_hash`, `status`, `budget_used` | `sharpe`, `n_returns`, `skew`, `kurtosis`, `total_return`, `max_drawdown`, `returns_hash`, `failure` |
@@ -302,6 +338,10 @@ Notes on single kinds:
 - `settings-changed` holds the changed keys' names and the new digest, not their values.
 - `session-note` is a cell's or the probe's free text, so it is kept out of the strategy session's view, since that session never talks to a cell; that view still holds a cell's registrations and proposals, which it reads as data.
 - `session-started`'s `gate` is `go:<seq>` or `schedule`, and a `go-given` word's launches left are its `sessions` minus the `session-started` events citing it.
+- `launch-refused`'s `check` is the governor's step that refused (`ledger`, `kill`, `settings`, `go`, `pause`, `reading`, `floor` or `share`, and a scheduled session with the schedule off is refused at `go`) or, written by the launcher, its own (`goal`, `settings`, `binary`, `load-form`, `workspace`, `kill` or `ledger`); its `reason` starts with a code, such as `stale`, followed by a sentence, and `fix` is what to do about it.
+- `pull` on `kill-pulled` and `kill-step` is the pull's own id, the name of its file in `kill.state`.
+- `kill-pulled`'s `pulled_at` is when the pull began, and its `ts` when the ledger took it, which comes after the pull's actions and may be at the resume.
+- `kill-step`'s `step` is `hold`, `stop-session`, `schedule` or `rotation`; its `target` names what the step acted on, such as the session, `timers` or the account; and its `result` is `stopped`, `turned-off`, `moved-aside`, `no-key`, `held-no-record` or `failed`.
 - `resource-charged`'s `line` is a bet's id or `overhead`, and each event is that line's whole window so far, so the newest of a window and line replaces the rest.
   A charge writes its lines one at a time, so each holds the charge's `charge_id` and its count of lines, `charge_lines`, and only a whole charge, one with all its lines in the ledger, is read: a charge stopped part way counts for nothing.
 - `minutes-charged`'s `subject_seq` is the `approval-decided` or `send-confirmed` it charges, and its `action` is a key of `minutes_table`.
@@ -333,6 +373,8 @@ A correction (`minutes-corrected`, from `company minutes correct`) replaces the 
 It charges only the open window, so to count a window whole it must run after that window's last session has ended and before its reset; a session that ran in a window and has no end before that window's newest whole charge leaves the window's cost unknown.
 It has no flag to set the time it charges at, since what it writes stands for good.
 It runs by Daniel's command until gate C opens the schedule, and then at each session's end and shortly before the newest reading's reset, since a plain daily timer would often miss a window's last session.
+With the schedule on, the launcher fires the charge's job at each session's end.
+Its timer also fires it every five minutes, for a session whose launcher died and for a window's last minutes, and the job charges only when it is due: a session in the newest reading's window has ended since the newest whole charge, or that window has 15 minutes or less to run.
 Real-money spending, when Daniel allows any, goes through a card or account with its own hard limit, never Daniel's main card.
 
 ## Cost and the ladder
@@ -452,6 +494,16 @@ The governor is code.
 `team_floor` is the percent of a window above which the company stops, to protect the agent team's own work even when the company's share has room; its value is open and Daniel's to set.
 No value of either is compiled in, and missing settings refuse every launch.
 
+`company governor check <role> [--bet <id>]` answers admitted or refused, with the number of launches left and each window's use, or with the reason and the fix.
+An admission writes nothing and uses no launch: a launch uses one by citing the admission's `gate` in `session-started`, and the oldest word with launches left is the one cited.
+`company go real-sessions --message <Discord id> --sessions <n>` writes a word, needs both flags, and is the only command that does.
+The governor cannot tell a stub from a real `claude`, so every launch it admits needs a word, or the open schedule.
+A floor or share refusal's `launch-refused` holds the window's `account_used`, `company_used` and `reading_seq`, and a reading refusal holds the reading's `reading_seq` when there is a reading to cite.
+A ledger that cannot take the event, one broken at its end, still refuses, and the command says it was not logged.
+Step 5 reads only a pause of scope `cell`, since the company-wide pause stops new outside actions and not sessions; a cell with no bet named is refused, since its pause cannot be read.
+The code holds every step but 9, which ticket 18 adds.
+A scheduled session is one started with `--scheduled`: it cites the gate `schedule`, uses no word, and is refused with the schedule off; a session started by hand needs a word whether the schedule is on or off.
+
 **When the account's window use cannot be read, the governor refuses the launch and never assumes room.**
 It cannot be read, and the launch is refused, for each of these reasons:
 
@@ -491,16 +543,51 @@ The kill switch is one command, `company kill`, that does the following:
 2. It disables the company's schedule.
 3. It runs the rotation step of every outside account the company holds, listed in the settings; a step that fails does not stop the others, and is reported.
 
-Only Daniel's resume command undoes it, and every launch is refused until then.
-Any loop's red line can pull it by code, and the ledger names the loop.
+Only Daniel's resume command, `company resume [--message <Discord id>]`, undoes it, and every launch is refused until then.
+A resume leaves the schedule off and a moved key moved, so each of those comes back only by Daniel's own step.
+Any loop's red line can pull it by code outside a session, with `killswitch.pull(by, reason, loop)`, and the ledger names the loop.
 Its self-test, `company kill --self-test`, runs in the test suite with stub sessions and accounts in its own temporary home, and on the schedule once gate C opens.
+It reads and writes nothing of the home it was started from, so its result goes to its output alone, which on the schedule is the timer's journal.
+So nobody sees a scheduled self-test that fails until ticket 11 records a failed job where Daniel reads, and the schedule stays off until gate C.
+
+A pull must work when the ledger cannot, since `Ledger.append` raises on a broken end.
+So its first act is a file of its own in the company home's `kill.state` directory, and its actions all come before any ledger write and take no lock, with each failure a reported step that stops nothing else.
+It finds sessions from each run's `session.json`, reading the machine's processes once for each sweep whatever the number of runs, and a launcher that is running also watches for `kill.state`, so a session stops itself even with no kill command running.
+A launcher that has logged its session's end clears its processes from that record, so a live process that has finished a session is not running one.
+Either `kill.state` or an open `kill-pulled` refuses a launch, so a pull the ledger could not take still holds, and a record lost later does not lift it.
+The ledger gets the pull once its actions are done, and the command reports after 30 seconds if the ledger's lock is held for that long.
+A pull keeps its steps in its file after each of its four actions, so one ended part way leaves what it had done.
+If `kill.state` stands but the pull's first write of its file failed, its `hold` step on `kill-file` says `held-no-record`, since the directory holds every launch, and the command still exits as a failure.
+If `kill.state` is not there and the ledger did not say it took a pull, the command says that it could not see that the pull holds any launch, and points to `company ledger verify`, since a line can reach the ledger when its head record cannot.
+What the ledger has not taken stays in the pull's file, and `company resume` writes it when the ledger verifies again, before it lifts the hold.
+Each pull writes only its own file, and the ledger's events for its `pull` id say how far it got, so pulls that overlap and a resume refused part way write nothing twice; a lock of its own, which no action waits on, keeps two writers or two resumes from reading that at once.
+A pull's file names its process until the pull has done, and a resume refuses while that process runs, since the pull is still stopping sessions and moving keys and launches may not start under it; a pull that died part way does not stop a resume.
+A resume writes and closes only the pulls it read, so a pull that lands during it keeps its hold, and the resume names the pulls it closed and says that one still holds; it says the same when the hold cannot be cleared.
+A resume says so of a pull whose process ended before it had done, or whose steps cannot be read or have not a step's shape, in its output and by a failed `hold` step on `kill-file` in the ledger, and tells Daniel to check each session and key, since the record is a report and must not keep the company stopped.
+A record the ledger's contract refuses does refuse the resume, which names the file to mend or remove, since guessing at it would write something false.
+A resume waits 35 seconds for `kill.lock` and `ledger.lock` to come free, longer than a pull's write-up may hold the first, and refuses by name if one stays held, since whatever holds it may be frozen.
+
+**No company tool pulls it.**
+A tool's server has the session's environment, so it cannot see Daniel's config or reach the user's timers, and a pull there would leave a key in place and report timers that are on as turned off.
+So `killswitch.pull`, which `company kill` calls, refuses and logs `append-refused` when the launcher's `COMPANY_SESSION` variable is set, and the command says the switch was not pulled and names the variable; a red line that a tool sees goes in the ledger for code outside the session to pull on.
+
+A broken ledger refuses a resume, so the hold stands until it is whole.
+A process that leaves the session's process group with `setsid` is out of the signal's reach, which is what C1 asks of a real session.
+
+Each entry of `outside_accounts` is `{"name", "rotation", "key_file"}`, whose `rotation` is `move-key`, the only step the code has, and whose `key_file` is a path inside Daniel's config directory that is not that directory or one of the settings' own files.
+A pull reads that list from the file as it stands, each entry checked, since it must not wait on a lock or be stopped by the tamper it may be answering; a file that then fails its digest is reported by a `rotation` step on `settings` with the result `failed`.
 
 **The paper key's rotation:** the code moves the key aside so it can no longer be used, and tells Daniel to regenerate it at the broker, because the code holds no broker admin path.
 The key is read by the paper module from the key file at use, and passed to no session and no log.
 
-The schedule is systemd user timers behind a runner that tests replace, installed disabled.
-Only Daniel's `company schedule enable --message <Discord id>` turns it on, and the kill switch undoes it.
-Until then the kill switch's self-test, `company paper tick`, `company treasurer check`, `company treasurer charge`, the daily audit sample, the weekly audit pass, the batch, the strategy session and the retro run by Daniel's command.
+The schedule is systemd user timers behind a runner that tests replace, installed disabled, with its jobs listed in code in `schedule.JOBS`.
+The runner is the `systemctl` first on `PATH`, and the suite puts one there that fails any test that did not choose a stub.
+`company schedule install` writes each job's units and turns nothing on.
+Only Daniel's `company schedule enable --message <Discord id>` turns it on, and it logs `schedule-enabled` with the jobs; `company schedule disable` and the kill switch undo it, and `company schedule list` says which it is.
+If `enable` fails, or a pull lands during it, it turns the timers back off and logs `schedule-disabled`.
+A timer's service runs `company schedule run <job>`, which asks the ledger again and refuses with the schedule off or the kill switch pulled, so a timer that could not be turned off still runs nothing.
+A unit carries only `COMPANY_HOME`, `COMPANY_CONFIG` and `CLAUDE_CONFIG_DIR`, so a job that starts a session would look for `claude` on the user manager's own path and might be refused with `no-binary`; no job starts one yet, and ticket 12's are the first.
+Until gate C opens the schedule, the kill switch's self-test, `company paper tick`, `company treasurer check`, `company treasurer charge`, the daily audit sample, the weekly audit pass, the batch, the strategy session and the retro run by Daniel's command.
 
 ## The six loops
 
@@ -745,12 +832,21 @@ A JSON file in Daniel's config directory holds `company_share`, `team_floor`, `m
 - Only `company settings init` and `company settings set` change it, and each logs `settings-changed` as `board` with the new digest.
 - `load()` compares the file with the last recorded digest; a mismatch logs `settings-tamper` and refuses.
 - A session cannot write it, because of the session rules; the digest catches anything that gets past them.
+- `company settings init` takes `--company-share`, `--team-floor`, `--monthly-price`, `--plan-name`, `--reading-max-age-minutes`, `--session-max-minutes` and `--session-max-weight`, all required since this document gives them no value, and optionally `--cell-model`, `--auditor-model` and `--message`.
+  It writes the numbers this document records for the rest, except `weekly_send_cap`, which stays unset until Daniel sets it.
+- `company settings set <key> <value> [--message <id>]` changes one setting, where the value is JSON or else plain text; `init` and `set` refuse a value that cannot be right, and change nothing.
+- A file removed after a change was recorded, or present with none recorded, counts as a mismatch too; with neither, the settings are just missing, and nothing is logged.
+- `set` refuses a file that no longer matches, since it would bless the edit, and `init` refuses a file that still does.
+  So `init` is the way back from a mismatch: it logs `settings-tamper` for the file it replaces, and writes a whole new file that takes nothing from it.
+- `company digest` refuses on a mismatch too, and logs nothing, since it promises to write nothing; the next launch, charge or share logs it.
+- The digest goes in the ledger just before the file moves into place, so a refused append changes nothing, a lock keeps a reader from falling between the two, and a crash between them reads as a mismatch.
 
 ### Numbers set here
 
 Each of these is **Daniel's to change,** with `company settings set`.
 
 **The complaint threshold** (`complaint_threshold`): complaints and spam flags together reaching two in a trailing 30 days, or 2% of outside actions in that time if that is higher, pause new outside actions company-wide until Daniel reviews.
+The file holds it as `count` 2, `days` 30 and `outside_action_fraction` 0.02.
 
 **The portfolio rule's numbers** (`portfolio`), where the file holds each percent as a fraction, such as 0.1 for 10%, and a share above 1 is refused:
 
@@ -780,14 +876,15 @@ Each of these is **Daniel's to change,** with `company settings set`.
 | `tests/` | The suite and its fixtures |
 | `docs/` | `design.md`, `first-run.md` and `runs/` |
 | `.github/workflows/ci.yml` | One job named `test` on each PR to `dev` and `main`, with actions pinned by commit hash, read-only permissions and no secrets |
-| The company home, outside the repository (default `~/.local/state/agent-company/`, or `COMPANY_HOME`) | The ledger, session workspaces and the replay set |
+| The company home, outside the repository (default `~/.local/state/agent-company/`, or `COMPANY_HOME`) | The ledger, session workspaces, each session's run and the replay set |
 | Daniel's config directory, outside the repository (default `~/.config/agent-company/`, or `COMPANY_CONFIG`) | Their settings and the paper key |
 
 `company` is a thin command line over deep modules: Ledger, Usage, Reading, Treasurer, Settings, Governor, Launcher, Company tools, Quant, Paper, Kill switch, Schedule, and one entry each for Batch, Outreach, Opportunity, Portfolio, Retro and Replay.
 
 The suite runs with no network and no model session, and fails on any attempt at either.
 It tests through the `company` command or the company tools over stdio, using a stub `claude` that plays a script through the same tools a real session uses.
-Its guards are in `tests/harness/`: each Python process has an audit hook on sockets and on Daniel's real paths, and a `claude` first on `PATH` fails the test.
+Its guards are in `tests/harness/`: each Python process has an audit hook on sockets and on Daniel's real paths, and a `claude` and a `systemctl` first on `PATH` fail the test.
+The launcher's allow-list strips the guard from a session's environment, as it must, so the seam is in the test's own executable and never in the company's code: the stub's wrapper notes the environment it was given, then sets the guard and the blocker again for the stub and the company tools it starts.
 Its scan, `tests/scan_rules.py`, walks every tracked file for what the runtime section bans; `docs/design.md`, `docs/first-run.md` and the research may name a banned variable, setting or flag and any URL, but no file but the scan's own may hold a real key's shape, a model vendor's host or SDK import, or the live broker host.
 
 ## Phases
@@ -835,7 +932,7 @@ No worker reads or writes a secret, Daniel's settings or the real company home, 
 | S1 | Say which jurisdiction's commercial-email law applies to them; answered with CASL as the planning default | With the plan's approval | Ticket 01 |
 | S2 | Say the merge word for each PR, or give the plan-time word | The end of each phase | The next phase |
 | S3 | Create the free paper-trading account and save its key in the path `docs/first-run.md` names, mode 600 | Once phase 4 is merged | Ticket 14 |
-| S4 | Install the merged `company` command, then run `company settings init` with the 25% share, the floor (recommended 60%, and open), the subscription's tier and monthly price, and the models | Once phase 4 is merged | Ticket 14 |
+| S4 | Install the merged `company` command, then run `company settings init` with the 25% share, the floor (recommended 60%, and open), the subscription's tier and monthly price, the reading's maximum age, a session's limits, and the models if not the defaults | Once phase 4 is merged | Ticket 14 |
 | S5 | Check on the account page that extra usage is off, since no code can see or set it, and that the dependencies under "Dependencies to re-check" still say what this document cites | Once phase 4 is merged, and before each go | Ticket 14 |
 | S6 | Record a reading of the account's use from the usage page with `company reading record`, and optionally install the status-line recorder in their interactive session's settings | Once phase 4 is merged, and whenever a launch refuses for a stale reading | Tickets 14 and 21 |
 | S7 | Gate A: give the go with `company go real-sessions`, then run the commands in `docs/first-run.md` | Ticket 13 merged and `company preflight` passing | Ticket 14 |

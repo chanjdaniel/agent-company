@@ -38,11 +38,12 @@ class Current:
 
 @dataclass(frozen=True)
 class Unreadable:
-    """Why a window's use cannot be read: a code for each reason, with a sentence for Daniel."""
+    """Why a window's use cannot be read: a code for each reason, with a sentence for Daniel, and the reading's event if there is one."""
 
     window: str
     reason: str
     detail: str
+    seq: int | None = None
 
 
 def _percent_problem(value) -> bool:
@@ -75,12 +76,12 @@ def assess(window: str, events: list[dict], records: usage.Records, max_age_minu
     if wrong is None and newest.get("source") not in (HAND, STATUSLINE):
         wrong = "its source is not one the company knows"
     if wrong or resets_at is None or taken_at is None:
-        return Unreadable(window, "malformed", f"the newest {window} reading, event {seq}, is malformed: {wrong}")
+        return Unreadable(window, "malformed", f"the newest {window} reading, event {seq}, is malformed: {wrong}", seq)
     if resets_at <= now:
-        return Unreadable(window, "window-reset", f"the window of the newest {window} reading, event {seq}, has reset")
+        return Unreadable(window, "window-reset", f"the window of the newest {window} reading, event {seq}, has reset", seq)
     if now - taken_at > timedelta(minutes=max_age_minutes):
         detail = f"the newest {window} reading, event {seq}, is older than {max_age_minutes} minutes"
-        return Unreadable(window, "stale", detail)
+        return Unreadable(window, "stale", detail, seq)
 
     window_start = resets_at - length
     read_percent = Fraction(str(newest["used_percent"]))
@@ -88,10 +89,10 @@ def assess(window: str, events: list[dict], records: usage.Records, max_age_minu
     since = sum(records.weights(taken_at, now).values(), Fraction(0))
     if since and not read_percent:
         detail = f"use has followed the newest {window} reading, event {seq}, which read zero percent"
-        return Unreadable(window, "zero-percent", detail)
+        return Unreadable(window, "zero-percent", detail, seq)
     if since and not up_to:
         detail = f"use has followed the newest {window} reading, event {seq}, with no weight in the records up to it"
-        return Unreadable(window, "no-weight", detail)
+        return Unreadable(window, "no-weight", detail, seq)
     added = since * read_percent / up_to if since else Fraction(0)
     return Current(
         window, read_percent + added, read_percent, added, window_start, resets_at, taken_at, newest["source"], seq

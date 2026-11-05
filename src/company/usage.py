@@ -7,17 +7,20 @@ The weight is an apportioning key between sessions, and never a cost.
 
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
 from importlib import resources
 from pathlib import Path
+from typing import TypeGuard
 
 from company import paths
 
 COUNTS = ("input", "cache_write_1h", "cache_write_5m", "cache_read", "output")
 _DAY_FILE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\.jsonl")
 _PER_TOKENS = 1_000_000
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 def _count(value) -> int:
@@ -101,6 +104,45 @@ def load(since: datetime, day_dirs=()) -> Records:
     return Records(replies, unpriced, prices.dearest)
 
 
+def session_weight(transcript_lines: Iterable[str], output_lines: Iterable[str]) -> Fraction:
+    """One session's weight as it runs, from its own transcript and its live output, whichever has seen more.
+
+    Reading both keeps a ceiling working when either one's form changes, and costs no scan of every session's records.
+    """
+    prices = Prices.load()
+    weights = []
+    for rows in (map(_own_transcript_row, transcript_lines), map(_output_row, output_lines)):
+        found: dict[str, dict] = {}
+        for row in rows:
+            if row:
+                _add(found, row)
+        weights.append(sum((prices.weigh(row["model"], row) for row in found.values()), Fraction(0)))
+    return max(weights)
+
+
+def _own_transcript_row(line: str) -> dict | None:
+    return _transcript_row(line, None)
+
+
+def _output_row(line: str) -> dict | None:
+    """One reply from a line of `--output-format stream-json`, where a reply is known by its message's id."""
+    if '"assistant"' not in line:
+        return None
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(entry, dict) or entry.get("type") != "assistant":
+        return None
+    message = entry.get("message")
+    if not isinstance(message, dict):
+        return None
+    request = message.get("id")
+    if not _text(request):
+        return None
+    return _reply_row(request, _EPOCH, "output", message, entry.get("parent_tool_use_id") is not None)
+
+
 def _add(found: dict, row: dict) -> None:
     old = found.get(row["request"])
     if old is None:
@@ -151,6 +193,10 @@ def _transcript_row(line: str, parent: str | None) -> dict | None:
     request, session, at = entry.get("requestId"), parent or entry.get("sessionId"), _time(entry.get("timestamp"))
     if not _text(request) or not _text(session) or at is None:
         return None
+    return _reply_row(request, at, session, message, bool(parent or entry.get("isSidechain")))
+
+
+def _reply_row(request: str, at: datetime, session: str, message: dict, sidechain: bool) -> dict:
     usage = message.get("usage")
     if not isinstance(usage, dict):
         usage = {}
@@ -159,7 +205,7 @@ def _transcript_row(line: str, parent: str | None) -> dict | None:
     if isinstance(lifetimes, dict):
         write_1h = _count(lifetimes.get("ephemeral_1h_input_tokens"))
         write_5m = _count(lifetimes.get("ephemeral_5m_input_tokens"))
-    elif parent or entry.get("isSidechain"):
+    elif sidechain:
         write_1h, write_5m = 0, write
     else:
         write_1h, write_5m = write, 0
@@ -176,7 +222,7 @@ def _transcript_row(line: str, parent: str | None) -> dict | None:
     }
 
 
-def _text(value) -> bool:
+def _text(value) -> TypeGuard[str]:
     return isinstance(value, str) and bool(value)
 
 

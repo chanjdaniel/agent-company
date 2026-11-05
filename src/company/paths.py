@@ -14,6 +14,26 @@ def config() -> Path:
     return Path(os.environ.get("COMPANY_CONFIG") or Path.home() / ".config/agent-company")
 
 
+def claude_directory() -> Path:
+    """Claude Code's own directory, which no session may reach."""
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+
+
 def claude_projects() -> Path:
-    """Where Claude Code keeps its transcripts, which only Usage reads."""
-    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+    """Where Claude Code keeps its transcripts, which Usage weighs and the launcher copies."""
+    return claude_directory() / "projects"
+
+
+def workspaces() -> Path:
+    """Where sessions work; the only part of the company home a session can reach."""
+    return home() / "workspaces"
+
+
+def runs() -> Path:
+    """Each session's saved record: its settings, output and copy of its transcript."""
+    return home() / "runs"
+
+
+def systemd_user() -> Path:
+    """Where systemd keeps the user's own units."""
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "systemd/user"

@@ -13,6 +13,7 @@ BARS = {0: "Running", 1: "Own share", 2: "Self-funding", 3: "Whole subscription"
 TOP_BAR = 3
 SEND_ACTION = "message-send"
 WEEK = timedelta(days=7)
+CHARGE_LEAD = timedelta(minutes=15)
 _MONTH_WEEKS = 4
 _WEEKS_PER_YEAR = 52
 _MONTHS_PER_YEAR = 12
@@ -430,6 +431,26 @@ def minutes_total(events: list[dict], span: Span) -> Fraction:
     """Daniel-minutes spent in `span`: a charge counts when its decision or send was made, however late it was charged."""
     by_seq = {event["seq"]: event for event in events}
     return sum((minutes for subject, minutes in minutes_by_subject(events).items() if span.holds(by_seq[subject])), Fraction(0))
+
+
+def charge_due(events: list[dict], now: datetime) -> bool:
+    """Whether a charge is worth running now: a window is counted whole only by one after its last session and before its reset.
+
+    So one is due once a session in the newest reading's window has ended since the newest whole charge, and in the last
+    `CHARGE_LEAD` of that window whatever else has happened, since a charge writes only what has changed.
+    """
+    readings = [event for event in _of_kind(events, "usage-reading") if event["window"] == "seven_day"]
+    resets = times.parse_stamp(readings[-1]["resets_at"]) if readings else None
+    if resets is None or now >= resets:
+        return False
+    if now >= resets - CHARGE_LEAD:
+        return True
+    newest = max((event["seq"] for event in _whole_charges(events)), default=0)
+    opened = resets - WEEK
+    return any(
+        event["seq"] > newest and (ended := times.parse_stamp(event["ts"])) is not None and ended >= opened
+        for event in _of_kind(events, "session-ended", "session-stopped")
+    )
 
 
 def week_charges_due(result: Share, events: list[dict]) -> list[dict]:

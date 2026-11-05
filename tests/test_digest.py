@@ -297,7 +297,9 @@ def test_no_pending_approval_says_none(company):
 
 
 @pytest.mark.parametrize("with_settings", [True, False])
-def test_a_digest_over_an_empty_ledger_prints_each_section_with_none_and_exits_zero(company, tmp_path, with_settings):
+def test_a_digest_over_an_empty_ledger_prints_each_section_with_none_and_exits_zero(company, company_home, tmp_path, with_settings):
+    (company_home / "ledger.jsonl").unlink()
+    (company_home / "ledger.head").unlink()
     if not with_settings:
         (tmp_path / "company-config" / "settings.json").unlink()
 
@@ -305,6 +307,18 @@ def test_a_digest_over_an_empty_ledger_prints_each_section_with_none_and_exits_z
 
     for name in SECTIONS:
         assert section(text, name) == "none"
+
+
+def test_changed_settings_refuse_the_page_and_the_digest_still_writes_nothing(company, company_home, tmp_path):
+    (tmp_path / "company-config" / "settings.json").write_text("{}")
+    before = (company_home / "ledger.jsonl").read_bytes()
+
+    result = company("digest", "--now", NOW)
+
+    assert result.returncode == 1
+    assert "company settings init" in result.stderr
+    assert result.stdout == ""
+    assert (company_home / "ledger.jsonl").read_bytes() == before
 
 
 def test_a_digest_takes_the_real_time_by_default(company):

@@ -1,6 +1,9 @@
 """Fixtures for the whole suite, whose guards live in `harness/suite_guard.py`."""
 
+import contextlib
 import json
+import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -9,11 +12,26 @@ import ledger_history
 import pytest
 import usage_records
 
+from company import launcher
+from company import settings as settings_module
+from company.ledger import Ledger
+
 sys.path.insert(0, str(Path(__file__).resolve().parent / "harness"))
 
 pytest_plugins = ["suite_guard"]
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+def stop_what_is_left():
+    """End every session a test left running, passing or failing: its launcher first, which would otherwise stop nothing once killed."""
+    for found in launcher.running_sessions():
+        if found.launcher is not None:
+            with contextlib.suppress(OSError):
+                os.kill(found.launcher, signal.SIGKILL)
+        if found.group is not None:
+            with contextlib.suppress(OSError):
+                os.killpg(found.group, signal.SIGKILL)
 
 
 @pytest.fixture
@@ -23,10 +41,11 @@ def repo():
 
 @pytest.fixture(autouse=True)
 def company_home(tmp_path, monkeypatch):
-    """Each test starts with an empty company home and config directory of its own."""
+    """Each test starts with an empty company home, config directory and set of timers of its own."""
     home = tmp_path / "company-home"
     monkeypatch.setenv("COMPANY_HOME", str(home))
     monkeypatch.setenv("COMPANY_CONFIG", str(tmp_path / "company-config"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
     return home
 
 
@@ -42,6 +61,37 @@ def company():
 
 
 @pytest.fixture
+def stub(tmp_path, monkeypatch, transcripts):
+    """Choose the stub session as `claude`, with this test's own transcripts."""
+    import stub_session
+
+    chosen = stub_session.Stub(tmp_path / "stub")
+    monkeypatch.setenv(launcher.BINARY_VARIABLE, str(chosen.binary))
+    yield chosen
+    stop_what_is_left()
+
+
+@pytest.fixture
+def systemctl(tmp_path, monkeypatch):
+    """Choose a stub `systemctl`, first on PATH, in place of the suite's blocker."""
+    import stub_session
+
+    chosen = stub_session.Systemctl(tmp_path / "systemctl")
+    monkeypatch.setenv("PATH", f"{chosen.directory}{os.pathsep}{os.environ['PATH']}")
+    return chosen
+
+
+@pytest.fixture
+def board(company):
+    """Daniel has written their settings, given a go for ten launches, and read the account at 40%."""
+    done = company(*usage_records.SETTINGS_INIT)
+    assert done.returncode == 0, done.stderr
+    done = company("go", "real-sessions", "--message", "1234", "--sessions", "10")
+    assert done.returncode == 0, done.stderr
+    return usage_records.week_reading()
+
+
+@pytest.fixture
 def transcripts(tmp_path, monkeypatch):
     """An empty `CLAUDE_CONFIG_DIR` of this test's own, to write transcripts into."""
     config_dir = tmp_path / "claude-config"
@@ -51,12 +101,15 @@ def transcripts(tmp_path, monkeypatch):
 
 @pytest.fixture
 def settings(tmp_path):
-    """Write Daniel's settings file with what the share reads, and return a way to change it."""
+    """Write Daniel's settings file with what the share reads, past the checks of `company settings set` so that a
+    test can hold a bad value, and record its digest as that command does; return a way to change it."""
 
     def write(**changes):
         path = tmp_path / "company-config" / "settings.json"
         path.parent.mkdir(exist_ok=True)
         path.write_text(json.dumps({**usage_records.SETTINGS, **changes}))
+        fields = {"digest": settings_module.digest_of(path.read_bytes()), "keys": sorted(changes)}
+        Ledger().append("settings-changed", fields, "board")
 
     write()
     return write

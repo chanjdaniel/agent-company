@@ -1,6 +1,6 @@
 """What no tracked file may hold: the rule "no model API key, no model API, and no outside host but the paper broker's".
 
-This file and `test_scan.py` are the only files exempt from every rule, since they must name what they ban.
+This file, `test_scan.py` and the package's `banned.py` are the only files exempt from every rule, since they must name what they ban.
 A finding names the file, line and rule, and never the matched text, since that may be a real key.
 """
 
@@ -10,11 +10,13 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from company import banned
+
 # These must name the banned settings to explain the rule, so a few rules do not apply to them.
 DOCUMENTS = ("docs/design.md", "docs/first-run.md", "docs/research/")
 PAPER_MODULE = "src/company/paper.py"
 PAPER_HOSTS = ("paper-api.alpaca.markets", "data.alpaca.markets")
-SCAN_FILES = ("tests/scan_rules.py", "tests/test_scan.py")
+SCAN_FILES = ("tests/scan_rules.py", "tests/test_scan.py", "src/company/banned.py")
 
 
 def _is_document(path):
@@ -37,7 +39,6 @@ class Rule:
     exempt: object = _never
 
 
-VENDORS = "ANTHROPIC|OPENAI|GEMINI|GOOGLE|MISTRAL|COHERE|OPENROUTER|GROQ|DEEPSEEK|XAI|TOGETHER"
 SDKS = (
     r"anthropic|openai|claude_agent_sdk|claude_code_sdk|google\.generativeai|google\.genai|mistralai|cohere"
     r"|litellm|langchain\w*|groq"
@@ -45,16 +46,7 @@ SDKS = (
 URL = re.compile(r"\b(?:https?|wss?|ftp)://[^\s\"'<>)\]]+", re.IGNORECASE)
 
 RULES = (
-    Rule(
-        "model-key-variable",
-        re.compile(
-            rf"\b(?:{VENDORS})_(?:API_KEY|AUTH_TOKEN|BASE_URL)\b"
-            r"|\bCLAUDE_CODE_USE_(?:BEDROCK|VERTEX|FOUNDRY)\b"
-            r"|\bCLAUDE_CODE_OAUTH_TOKEN\b"
-            r"|\bAWS_BEARER_TOKEN_BEDROCK\b"
-        ),
-        _is_document,
-    ),
+    Rule("model-key-variable", banned.MODEL_KEY_VARIABLE, _is_document),
     Rule(
         "model-vendor-host",
         re.compile(

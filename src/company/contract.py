@@ -11,8 +11,8 @@ from company import times
 _NAME = re.compile(r"[a-z0-9][a-z0-9_:-]{0,63}")
 _BET = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 _CELL_WRITER = "cell:<bet>"
-_CELL_PREFIX = "cell:"
-_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+CELL_PREFIX = "cell:"
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _DISCORD_ID = re.compile(r"[0-9]{1,32}")
 # From zero up: a refund written as -5.00 would add to net revenue, since refunds are subtracted.
 _DECIMAL = re.compile(r"[0-9]+(\.[0-9]+)?")
@@ -25,6 +25,11 @@ def _whole(value) -> bool:
 
 def _matches(pattern: re.Pattern, value) -> bool:
     return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+def is_bet(value) -> bool:
+    """Whether this is a bet's id."""
+    return _matches(_BET, value)
 
 
 def _is_seq(value, next_seq: int) -> bool:
@@ -56,7 +61,7 @@ def _type_holds(type_name: str, value, next_seq: int) -> bool:
         case "date":
             return _is_date(value)
         case "uuid":
-            return _matches(_UUID, value)
+            return _matches(UUID, value)
         case "bet":
             return _matches(_BET, value)
         case "discord-id":
@@ -124,8 +129,8 @@ class Contract:
         """The name a writer goes by in the contract, or None if it is no writer."""
         if not isinstance(writer, str):
             return None
-        if writer.startswith(_CELL_PREFIX):
-            return _CELL_WRITER if _matches(_BET, writer.removeprefix(_CELL_PREFIX)) else None
+        if writer.startswith(CELL_PREFIX):
+            return _CELL_WRITER if _matches(_BET, writer.removeprefix(CELL_PREFIX)) else None
         known = {name for group in self.writers.values() for name in group} - {_CELL_WRITER}
         return writer if writer in known else None
 
