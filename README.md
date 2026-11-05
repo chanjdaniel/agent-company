@@ -71,6 +71,6 @@ Only `company settings init` and `company settings set` change that file, and a 
 The two shares are fractions, such as 0.25 for 25%, and a number above 1 is refused.
 
 Runtime state lives outside the repository.
-The company home, `~/.local/state/agent-company/` or `COMPANY_HOME`, holds the ledger, session workspaces and each session's run, and will hold the replay set.
+The company home, `~/.local/state/agent-company/` or `COMPANY_HOME`, holds the ledger, session workspaces, each session's run, the market data and each configuration run, and will hold the replay set.
 Daniel's config directory, `~/.config/agent-company/` or `COMPANY_CONFIG`, holds their settings and the paper key, `paper.key`: its key id and secret on two lines, mode 600.
 The schedule's units go in systemd's own directory for the user, `~/.config/systemd/user/` or under `XDG_CONFIG_HOME`.
