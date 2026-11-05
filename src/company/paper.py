@@ -101,6 +101,21 @@ def _key_file_problem(found: os.stat_result) -> str | None:
     return None
 
 
+def key_file_unfit() -> str | None:
+    """What keeps the key file from use, from its metadata alone: this never opens it, and a link fails as a read would."""
+    path = paths.paper_key()
+    try:
+        found = os.lstat(path)
+    except FileNotFoundError:
+        return f"there is no paper key at {path}: {_HOW}"
+    except OSError as error:
+        return f"the paper key at {path} cannot be looked at: {error.strerror}"
+    problem = _key_file_problem(found)
+    if problem:
+        return f"the paper key at {path} {problem}"
+    return f"the paper key at {path} is empty: {_HOW}" if found.st_size == 0 else None
+
+
 def _read_key(path: Path) -> tuple[str, str]:
     """The key id and secret, read now, from a file only its owner can reach."""
     try:

@@ -278,6 +278,7 @@ A kind that a later ticket finds it needs joins this table and the contract in t
 | `schedule-enabled` | Governance | `board` | `message`, `jobs` | |
 | `schedule-disabled` | Governance | `board`, `killswitch` | `reason` | |
 | `job-failed` | Governance | `scheduler` | `job`, `exit` | |
+| `account-checked` | Governance | `board` | | `message` |
 | `append-refused` | Governance | `treasurer`, `governor`, `launcher`, `scheduler`, `killswitch`, `runner` | `attempted_kind`, `attempted_writer`, `reason` | `session`, `tool` |
 | `usage-reading` | Resources | `board`, `governor` | `window`, `used_percent`, `resets_at`, `taken_at`, `source` | |
 | `resource-charged` | Resources | `treasurer` | `week_start`, `line`, `weight`, `fraction`, `company_used`, `cost`, `reading_seq`, `charge_id`, `charge_lines` | |
@@ -291,6 +292,7 @@ A kind that a later ticket finds it needs joins this table and the contract in t
 | `session-ended` | Sessions | `launcher` | `session`, `exit`, `transcript_path`, `transcript_hash`, `weight` | |
 | `session-stopped` | Sessions | `launcher` | `session`, `reason` | `elapsed_minutes`, `weight` |
 | `session-note` | Sessions | `cell:<bet>`, `probe` | `session`, `text` | |
+| `probe-result` | Sessions | `treasurer` | `session`, `run`, `check`, `result` | `succeeded`, `unreported`, `present`, `left_running` |
 | `launch-refused` | Sessions | `governor`, `launcher` | `role`, `check`, `reason`, `fix` | `bet`, `account_used`, `company_used`, `reading_seq` |
 | `kill-pulled` | Kill switch | `killswitch` | `pull`, `by`, `reason` | `pulled_at`, `loop` |
 | `kill-step` | Kill switch | `killswitch` | `pull`, `step`, `target`, `result` | `detail` |
@@ -349,6 +351,8 @@ Notes on single kinds:
 - `session-started`'s `gate` is `go:<seq>` or `schedule`, and a `go-given` word's launches left are its `sessions` minus the `session-started` events citing it.
   `audited_runs` lists the runs an Auditor's session was given.
 - `launch-refused`'s `check` is the governor's step that refused (`ledger`, `kill`, `settings`, `go`, `pause`, `reading`, `floor` or `share`, and a scheduled session with the schedule off is refused at `go`) or, written by the launcher, its own (`goal`, `audit`, `settings`, `model`, `binary`, `load-form`, `workspace`, `kill` or `ledger`); its `reason` starts with a code, such as `stale`, followed by a sentence, and `fix` is what to do about it.
+- `account-checked` is Daniel's word, from `company account checked`, that extra usage is off and that the dependencies under "Dependencies to re-check" still hold, since no code can see either.
+- `probe-result`'s `check` is `guardrails` or `kill-test`, and its `result` is `passed`, `failed` or `not-proven`; `succeeded` and `unreported` list a probe's actions, `present` what it found loaded, and `left_running` counts what a kill test found.
 - `pull` on `kill-pulled` and `kill-step` is the pull's own id, the name of its file in `kill.state`.
 - `kill-pulled`'s `pulled_at` is when the pull began, and its `ts` when the ledger took it, which comes after the pull's actions and may be at the resume.
 - `kill-step`'s `step` is `hold`, `stop-session`, `schedule` or `rotation`; its `target` names what the step acted on, such as the session, `timers` or the account; and its `result` is `stopped`, `turned-off`, `moved-aside`, `no-key`, `held-no-record` or `failed`.
@@ -561,6 +565,7 @@ The kill switch is one command, `company kill`, that does the following:
 Only Daniel's resume command, `company resume [--message <Discord id>]`, undoes it, and every launch is refused until then.
 A resume leaves the schedule off and a moved key moved, so each of those comes back only by Daniel's own step.
 Any loop's red line can pull it by code outside a session, with `killswitch.pull(by, reason, loop)`, and the ledger names the loop.
+The probe's kill test alone passes `stop_only`, which holds and stops as a pull does and leaves the timers and the keys alone.
 Its self-test, `company kill --self-test`, runs in the test suite with stub sessions and accounts in its own temporary home, and on the schedule once gate C opens.
 It reads and writes nothing of the home it was started from, so its result goes to its output, which on the schedule is the timer's journal; `company schedule run`, in the real home, then logs `job-failed` if it failed, and the digest shows that.
 
@@ -1063,9 +1068,9 @@ No worker reads or writes a secret, Daniel's settings or the real company home, 
 | S2 | Say the merge word for each PR, or give the plan-time word | The end of each phase | The next phase |
 | S3 | Create the free paper-trading account and save its key id and secret on two lines in `paper.key` in their config directory, mode 600 | Once phase 4 is merged | Ticket 14 |
 | S4 | Install the merged `company` command, then run `company settings init` with the 25% share, the floor (recommended 60%, and open), the subscription's tier and monthly price, the reading's maximum age, a session's limits, and the models if not the defaults | Once phase 4 is merged | Ticket 14 |
-| S5 | Check on the account page that extra usage is off, since no code can see or set it, and that the dependencies under "Dependencies to re-check" still say what this document cites | Once phase 4 is merged, and before each go | Ticket 14 |
+| S5 | Check on the account page that extra usage is off, since no code can see or set it, and that the dependencies under "Dependencies to re-check" still say what this document cites, then say so with `company account checked` | Once phase 4 is merged, and before each go | Ticket 14 |
 | S6 | Record a reading of the account's use from the usage page with `company reading record`, and optionally install the status-line recorder in their interactive session's settings | Once phase 4 is merged, and whenever a launch refuses for a stale reading | Tickets 14 and 21 |
-| S7 | Gate A: give the go with `company go real-sessions`, then run the commands in `docs/first-run.md` | Ticket 13 merged and `company preflight` passing | Ticket 14 |
+| S7 | Gate A: give the go with `company go real-sessions`, then run the commands in `docs/first-run.md` | Ticket 13 merged, and `company preflight` open on S7 alone | Ticket 14 |
 | S8 | Gate B: give the go for the strategy and retro sessions, then run their commands | Phase 6 merged | Ticket 21 |
 | S9 | Decide the first batch with `company batch decide`, including each memo's admission and each retro proposal | After S8's sessions end | Ticket 21's close |
 | S10 | Set the weekly outreach send cap | Before the first revenue bet, outside this task | Nothing here: with no cap set, the batch holds every send |
@@ -1086,6 +1091,48 @@ This stays Daniel's own command, and the kill switch undoes it.
 It blocks nothing here, since the task closes with the schedule off.
 
 The merged code sets no default that opens any of the three gates.
+
+### The first run
+
+`docs/first-run.md` is the runbook for S3 to S7, and a test runs each of its commands, in its order, on the stub.
+
+**`company preflight`** lists each of S3 to S7 as passed or open, with what closes it, and exits zero only when all have passed.
+It writes nothing, and a settings file that fails its digest is reported and not logged.
+- S3 looks at the paper key's metadata, never opening the file: a plain file of Daniel's, reachable by nobody else, and not empty; and that `outside_accounts` still holds its entry, so that a pull moves it.
+- S4 asks what the governor asks of the settings, and that `claude --help` lists the launch's flags; that `bwrap` and `socat` are on a session's own path, which is not the shell's; and that no variable `banned.is_banned` names is in the shell.
+- S5 needs Daniel's word, `account-checked`, since no code can see extra usage or read the terms: one since the go before the word in force, or since the newest go when every word is used up, so each go needs a check of its own.
+- S6 asks what the governor's steps 6 to 8 ask of the reading, the floor and the share.
+- S7 needs a `go-given` word with launches left, and the kill switch not pulled.
+
+**`company session probe`** runs the probe role with a script that tries each forbidden action: each of reading and writing, from the shell and from the file tools, in the config directory and the company home; reading from the user's home directory, `market-data/broker` and another workspace; writing `CLAUDE.md` at the top of its own workspace from the shell, and `CLAUDE.local.md` from the file tools; and reaching a host from the shell, through the sandbox's proxy and around it.
+Every path it names is a decoy named `probe-decoy-` with no secret in it, and the one host it names is `example.com`, which the company's own code never reaches.
+The session reports each result through its note tool, as `PROBE <action> refused` or `PROBE <action> succeeded`.
+What the code can see outranks that word: a decoy that was written, or a read decoy's mark in the saved output, transcript or notes, is `succeeded` whatever the session says, and a session's own `succeeded` stands whatever the code sees, so the network rests on the session's word alone.
+A forbidden action that succeeded fails the check and pulls the kill switch.
+An action not reported, or a session that exits non-zero or is stopped, shows nothing either way, which is `not-proven`, with no pull, as a failed sign-in is.
+
+The probe also checks what a real session loads.
+A decoy `CLAUDE.md` holding a marker sits in `workspaces/`, the folder above its workspace, and a decoy rule holding a marker sits in `rules/` in Claude Code's directory, since the docs name only `CLAUDE.md` files for `CLAUDE_CODE_DISABLE_CLAUDE_MDS`.
+Neither asks anything of a reader, since the rule could load into another session Daniel starts in that minute.
+A model's context need not be in its transcript, so the script also has it copy out any instruction file its context holds, in a `PROBE instructions` note, and with no such note the check is `not-proven`.
+The saved output, the transcript and the notes are scanned for each marker and for the lines of Daniel's `CLAUDE.md` of 25 characters or more, as words and not as escaped JSON, and each answer is reported only as `present` or `absent`.
+`present` fails the check with no pull, since nothing was reached, and Daniel starts nothing further until it is fixed.
+
+The result is `probe-report.json` in the run's directory and `probe-result` in the ledger.
+Each decoy is removed at the end, and one left by a probe killed outright holds no secret.
+
+**`company session probe --kill-test`** starts a probe that says it is waiting and runs a `sleep` with a number no other process holds, then pulls with `stop_only`, which holds and stops as a pull does and leaves the timers and keys alone.
+An awake launcher may see the hold and stop its own session before the pull's sweep looks, by the same signal to the group, in which case no `stop-session` step is logged.
+What is left is everything the launcher's group holds, every process with the session's `COMPANY_SESSION` in its environment, and every process with that number on its command line, which is how a process that left the group is found.
+Nothing left, with the command seen running first, passes and resumes.
+Anything left fails, is named and ended by its process number, and leaves the hold in place until `company resume`, since no further session should start on a stop that failed.
+A session that never got to wait shows nothing either way, and is `not-proven`.
+It is refused with the schedule on, since a pull's record would call the schedule off, and with another session running, since its stop would stop that one too.
+Its report is `kill-test.json` in the run's directory, and on a stub it shows only the procedure, as it says: C1's answer for a real session is what ticket 14 reads from Daniel's run.
+
+**`company session scan-reading <run>`** opens the run's `output.jsonl` and no other file, and names any field in it whose name speaks of a rate limit, a window, a used percent, a utilization or a reset, and any bare word value that does, with no other value shown.
+It says whether a used percent is among them, since a limit's status alone would not serve as a reading.
+This is C2's answer, and a worker may run it on the real home.
 
 ## Sources
 

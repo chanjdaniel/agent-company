@@ -346,6 +346,9 @@ def accounts_for_kill() -> tuple[list, str | None]:
     return (value, None) if isinstance(value, list) else ([], "the settings hold no list of outside accounts, so none was rotated")
 
 
+# What `init` writes for `outside_accounts`, so that a pull moves the paper key with no step of Daniel's.
+PAPER_ACCOUNTS = [{"name": "paper", "rotation": MOVE_KEY, "key_file": paths.PAPER_KEY}]
+
 # Every setting the file may hold, with what `init` and `set` check it by.
 KEYS: dict[str, Callable[[dict, str], object]] = {
     "company_share": fraction,
@@ -387,6 +390,6 @@ _DESIGN_VALUES = {
         "closure_kills": 2,
         "margin_lookback_weeks": 4,
     },
-    "outside_accounts": [{"name": "paper", "rotation": MOVE_KEY, "key_file": paths.PAPER_KEY}],
+    "outside_accounts": PAPER_ACCOUNTS,
     "usage_day_dirs": [],
 }

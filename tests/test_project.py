@@ -85,7 +85,7 @@ def test_the_ci_job_is_named_test_and_runs_the_test_command(workflow):
 
 def test_the_ci_gives_the_strategy_runner_a_bwrap_that_can_start_before_the_tests(workflow):
     """Ubuntu's runner restricts unprivileged user namespaces, and `bwrap` needs one, so installing it alone would not do."""
-    install = workflow.index("apt-get install -y bubblewrap")
+    install = workflow.index("apt-get install -y bubblewrap socat")
     allow = workflow.index("kernel.apparmor_restrict_unprivileged_userns=0")
     assert max(install, allow) < workflow.index("uv run --locked pytest")
 

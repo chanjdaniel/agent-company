@@ -33,6 +33,11 @@ HELP_FLAGS = (
 )
 
 
+# A line of the probe's script, as a model reads it: its action, how it is tried, and on what.
+_ACTION = re.compile(r"^- (?P<name>\S+): with (?P<how>Bash, run exactly|the Write tool, write the word probe to|the Read tool, read): `(?P<target>.*)`$", re.MULTILINE)
+_prompt = ""
+
+
 def _flag(name):
     arguments = sys.argv[1:]
     return arguments[arguments.index(name) + 1] if name in arguments else None
@@ -105,12 +110,54 @@ def _reply(session, step):
         print(json.dumps({"type": "assistant", "session_id": session, "message": message}), flush=True)
 
 
+def _note(tools, text):
+    _record("tool_results.jsonl", tools.request("tools/call", {"name": "note", "arguments": {"text": text}}))
+
+
+def _try(how, target):
+    """Do what one line of the probe's script says, which a sandbox would have stopped; what it read, for the output."""
+    if how == "the Write tool, write the word probe to":
+        Path(target).write_text("probe\n")
+        return ""
+    if how == "the Read tool, read":
+        return Path(target).read_text()
+    return subprocess.run(["/bin/sh", "-c", target], capture_output=True, text=True, check=False).stdout
+
+
+def _probe_actions(step, session, tools):
+    """Play the probe's script as a session would: `succeed` is done and said, `lie` is done and denied, `claim` is said and not done, `skip` is neither."""
+    succeed, lie, claim, skip = (set(step.get(name, ())) for name in ("succeed", "lie", "claim", "skip"))
+    for number, found in enumerate(_ACTION.finditer(_prompt)):
+        name = found["name"]
+        if name in skip:
+            continue
+        # Nothing here may reach a network, so what a session would have reached is only said.
+        if name in succeed | lie and "network" not in name:
+            _reply(session, {"request": f"probe-{number}", "output": 1, "text": _try(found["how"], found["target"]) or "done"})
+        _note(tools, f"PROBE {name} {'succeeded' if name in succeed | claim else 'refused'}")
+    if step.get("instructions", True):
+        _note(tools, f"PROBE instructions {step.get('copied', 'none')}")
+
+
 def _play(step, session, tools):
     match step["do"]:
         case "tool":
             tools = tools or Tools()
             answer = tools.request("tools/call", {"name": step["name"], "arguments": step.get("arguments", {})})
             _record("tool_results.jsonl", answer)
+        case "probe-actions":
+            tools = tools or Tools()
+            _probe_actions(step, session, tools)
+        case "echo-files":
+            # As a session that loaded these into its context would show them, by copying them out.
+            for pattern in step["patterns"]:
+                for path in sorted(Path(os.path.expandvars(pattern)).parent.glob(Path(pattern).name)):
+                    _reply(session, {"request": f"echo-{path.name}", "output": 1, "text": path.read_text()})
+        case "reply-file":
+            _reply(session, {"request": f"file-{step['path']}", "output": 1, "text": Path(step["path"]).read_text(), "where": step["where"]})
+        case "wait-as-told":
+            pids = [subprocess.Popen(["/bin/sleep", re.search(r"sleep (\d+)", _prompt)[1]], **step.get("popen", {})).pid]
+            _record("progress.jsonl", {"children": pids})
         case "list-tools":
             tools = tools or Tools()
             _record("tool_lists.jsonl", tools.request("tools/list", {}))
@@ -147,8 +194,10 @@ def _play(step, session, tools):
 
 
 def main():
+    global _prompt
     script = json.loads((DIRECTORY / "script.json").read_text())
-    _record("calls.jsonl", {"argv": sys.argv[1:], "cwd": os.getcwd(), "stdin": None if "--help" in sys.argv else sys.stdin.read()})
+    _prompt = "" if "--help" in sys.argv else sys.stdin.read()
+    _record("calls.jsonl", {"argv": sys.argv[1:], "cwd": os.getcwd(), "stdin": None if "--help" in sys.argv else _prompt})
     if "--help" in sys.argv:
         print("\n".join(flag for flag in HELP_FLAGS if flag not in script.get("help_lacks", [])))
         return script.get("help_exit", 0)

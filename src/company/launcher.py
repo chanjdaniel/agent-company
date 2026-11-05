@@ -311,6 +311,18 @@ def _check_form(claude: str, role: str, environment: dict[str, str]) -> None:
         raise _Refuse("load-form", "no-load-form: its help does not list " + ", ".join(missing), _FIX_LOAD_FORM)
 
 
+def form_problem(role: str) -> str | None:
+    """What keeps a launch of this role from starting on the `claude` here, by its help alone; it starts no session."""
+    claude = binary()
+    if claude is None:
+        return "no-binary: no `claude` is on PATH"
+    try:
+        _check_form(claude, role, child_environment())
+    except _Refuse as refused:
+        return refused.reason
+    return None
+
+
 def _write_json(path: Path, value: dict) -> None:
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value, indent=2) + "\n")
@@ -386,6 +398,48 @@ def stop_group(group: int) -> bool:
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(group, signal.SIGKILL)
     return _ends_within(_KILLED_GONE_SECONDS, lambda: group_alive(group))
+
+
+def _proc_fields(pid: int, name: str) -> list[bytes]:
+    """A process's NUL-separated `cmdline` or `environ`; nothing if it has gone or is not ours to read."""
+    try:
+        return Path(f"/proc/{pid}/{name}").read_bytes().split(b"\0")
+    except OSError:
+        return []
+
+
+@dataclass(frozen=True)
+class SessionProcess:
+    """A process still running on a session's behalf, and enough of it to name it to Daniel."""
+
+    pid: int
+    started: int
+    command: str
+
+
+def session_processes(session: str, group: int | None = None, mark: str | None = None) -> list[SessionProcess]:
+    """Everything running that is this session's, wherever it went: in its group, holding the variable the launcher set, or with `mark` on its command line.
+
+    A process that left the group with `setsid` is out of a signal's reach, and this is what finds it.
+    """
+    wanted = f"{SESSION_VARIABLE}={session}".encode()
+    found = []
+    for pid, stat in _Processes().stats.items():
+        if pid == os.getpid() or stat.state == "Z":
+            continue
+        command = _proc_fields(pid, "cmdline")
+        marked = mark is not None and any(mark.encode() in part for part in command)
+        if stat.group == group or marked or wanted in _proc_fields(pid, "environ"):
+            found.append(SessionProcess(pid, stat.started, b" ".join(part for part in command if part).decode("utf-8", "replace")[:200]))
+    return sorted(found, key=lambda process: process.pid)
+
+
+def end_processes(processes: list[SessionProcess]) -> None:
+    """Kill these, each only if it is still the process that was found."""
+    for process in processes:
+        if _alive(process.pid, process.started):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(process.pid, signal.SIGKILL)
 
 
 def _transcript_source(session: str) -> Path | None:

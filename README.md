@@ -3,11 +3,12 @@
 An experiment in agentic business: an organized company of agents collaborating toward one goal, earning a profit.
 
 The company's design is in [`docs/design.md`](docs/design.md): its structure, its runtime on Daniel's subscription, its ledger, and the self-improving loops that seek profit.
+[`docs/first-run.md`](docs/first-run.md) is the runbook for the first real run, with its commands in order.
 The research behind it, with its critique, Daniel's decisions and draft tickets, is in [`docs/research/2026-11-02-org-and-profit-loops/`](docs/research/2026-11-02-org-and-profit-loops/report.md).
 
 ## The code
 
-The first slice is being built, and so far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the session launcher and company tools, the kill switch and the schedule, the quant cell's registration, backtest runner and verdict, the paper account and its period, promises and the honesty checks, the Auditor, the test suite and CI.
+The first slice is being built, and so far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the session launcher and company tools, the kill switch and the schedule, the quant cell's registration, backtest runner and verdict, the paper account and its period, promises and the honesty checks, the Auditor, the preflight, the probe and the runbook for the first real run, the test suite and CI.
 It is Python 3.13 with no runtime dependency outside the standard library, and needs `uv` to run.
 
 ```sh
@@ -34,6 +35,13 @@ uv run company governor check cell --bet alpha
                                        # whether a session may start now, and why not
 uv run company session start probe --prompt "say hello"
                                        # run one session to its end, if the governor admits it; this spends real use
+uv run company preflight               # each of Daniel's steps from S3 to S7, passed or open with what closes it
+uv run company account checked         # Daniel's word that extra usage is off and the design's dependencies still hold
+uv run company session probe           # a cheap session that tries each forbidden action on decoys; this spends real use
+uv run company session probe --kill-test
+                                       # stop a waiting probe with the kill switch's stop step, and show nothing is left; this spends real use
+uv run company session scan-reading 20261105T100805Z-aeffba18
+                                       # whether a run's saved output holds any account-window fields, and which
 uv run company kill --reason "why"     # stop every session, turn off the schedule, rotate each outside account, and hold every launch
 uv run company resume                  # Daniel's word that launches may start again; the schedule stays off
 uv run company kill --self-test        # a whole pull on stubs, in a temporary home of its own

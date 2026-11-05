@@ -20,6 +20,8 @@ from company import (
     launcher,
     paper,
     paper_period,
+    preflight,
+    probe,
     reading,
     schedule,
     settings,
@@ -484,6 +486,80 @@ def _session_exit(answer: launcher.Finished | governor.Refused) -> int:
     return EXIT_OK if answer.exit == 0 and not answer.stopped and not answer.unlogged else EXIT_REFUSED
 
 
+def _session_probe(args) -> int:
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, "session-started", "launcher") or _is_broken(ledger):
+        return EXIT_REFUSED
+    try:
+        return _kill_test() if args.kill_test else _guardrail_probe()
+    except probe.ProbeRefused as refused:
+        logged = f"event {refused.seq} in the ledger records the refusal" if refused.seq else "the ledger could not record the refusal"
+        print(f"company: refused: {refused}. No session started; {logged}.", file=sys.stderr)
+        return EXIT_REFUSED
+
+
+def _probe_exit(result: str, unlogged: str | None) -> int:
+    if unlogged:
+        print(f"company: {unlogged}.", file=sys.stderr)
+    return EXIT_OK if result == probe.PASSED and not unlogged else EXIT_REFUSED
+
+
+def _guardrail_probe() -> int:
+    report, pulled, unlogged = probe.guardrails()
+    if isinstance(report, governor.Refused):
+        _print_refusal(report)
+        return EXIT_REFUSED
+    print("\n".join(probe.probe_lines(report)))
+    if pulled is not None:
+        _print_pull(pulled, f"the probe saw a forbidden action work: {', '.join(report.succeeded)}")
+    return _probe_exit(report.result, unlogged)
+
+
+def _kill_test() -> int:
+    report, unlogged = probe.kill_test()
+    if isinstance(report, governor.Refused):
+        _print_refusal(report)
+        return EXIT_REFUSED
+    print("\n".join(probe.kill_lines(report)))
+    return _probe_exit(report.result, unlogged)
+
+
+def _scan_reading(args) -> int:
+    try:
+        scan = probe.scan_reading(args.saved_run)
+    except probe.ScanRefused as refused:
+        print(f"company: refused: {refused}", file=sys.stderr)
+        return EXIT_REFUSED
+    if scan.fields:
+        print(f"The saved output of run {scan.run} holds account-window fields: {', '.join(scan.fields)}.")
+        print(f"A window's use itself, a used percent, is {'among them' if scan.holds_use else 'not among them'}.")
+    else:
+        print(f"The saved output of run {scan.run} holds no account-window fields.")
+    return EXIT_OK
+
+
+def _preflight(args) -> int:
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, "preflight", "board") or _is_broken(ledger):
+        return EXIT_REFUSED
+    found = preflight.steps(ledger.read())
+    print("\n".join(preflight.report(found)))
+    return EXIT_OK if all(step.passed for step in found) else EXIT_REFUSED
+
+
+def _account_checked(args) -> int:
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, "account-checked", "board") or _is_broken(ledger):
+        return EXIT_REFUSED
+    try:
+        event = ledger.append("account-checked", {"message": args.message} if args.message else {}, "board")
+    except (AppendRefused, LedgerBroken) as refused:
+        print(f"company: refused: {refused}. Nothing was recorded.", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"Recorded event {event['seq']}: you checked that extra usage is off and that the design's dependencies still hold. Say it again before each go.")
+    return EXIT_OK
+
+
 def _audit_runs(args, events: list[dict]) -> list[str]:
     if args.audited_run:
         return [args.audited_run]
@@ -553,7 +629,11 @@ def _kill(args) -> int:
     except killswitch.PullRefused as refused:
         print(f"company: refused: {refused}.", file=sys.stderr)
         return EXIT_REFUSED
-    print(f"The kill switch is pulled: {args.reason}.")
+    return _print_pull(pulled, args.reason)
+
+
+def _print_pull(pulled: killswitch.Pulled, reason: str) -> int:
+    print(f"The kill switch is pulled: {reason}.")
     for step in pulled.steps:
         print(f"{step.step} {step.target}: {step.result}" + (f" ({step.detail})" if step.detail else ""))
     if pulled.unlogged:
@@ -873,6 +953,24 @@ def _parser() -> argparse.ArgumentParser:
     begin.add_argument("--workspace", help="A workspace under the company's; with none, a fresh one.")
     begin.add_argument("--scheduled", action="store_true", help="Start as a scheduled session, which needs the schedule on and no word.")
     begin.set_defaults(run=_session_start)
+
+    tries = actions.add_parser("probe", help="Run the cheap session that tries each forbidden action on decoys; any that works pulls the kill switch.")
+    tries.add_argument("--kill-test", action="store_true", help="Instead, start a probe that waits, stop it with the kill switch's stop step, show nothing is left, and resume.")
+    tries.set_defaults(run=_session_probe)
+
+    scans = actions.add_parser("scan-reading", help="Say whether a run's saved output holds any account-window fields, and which; it reads that one file.")
+    scans.add_argument("saved_run", metavar="run", help="The run, as `session-started` names it.")
+    scans.set_defaults(run=_scan_reading)
+
+    ready = commands.add_parser("preflight", help="List each of Daniel's steps from S3 to S7 as passed or open, with what closes it. It writes nothing, and never reads the key.")
+    ready.set_defaults(run=_preflight)
+
+    the_account = commands.add_parser("account", help="Daniel's word on what no code can see of the account.")
+    actions = the_account.add_subparsers(dest="action", required=True)
+
+    checked = actions.add_parser("checked", help="Say you have checked that extra usage is off and that the design's dependencies still hold; say it before each go.")
+    checked.add_argument("--message", help="The Discord id of Daniel's word, if there is one.")
+    checked.set_defaults(run=_account_checked)
 
     audits = commands.add_parser("audit", help="Run the Auditor on a recorded session, on a different model from the cell's.")
     which = audits.add_mutually_exclusive_group(required=True)

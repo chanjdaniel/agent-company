@@ -83,10 +83,10 @@ def _not_killed(events: list[dict]) -> None:
         raise _Stop("kill", f"killed: {held}", FIX_KILL)
 
 
-def _settings() -> tuple[dict, Fraction, Fraction]:
+def _settings(log_tamper: bool = True) -> tuple[dict, Fraction, Fraction]:
     """The file, with the share as a percent and the floor; every number the later checks read is checked here."""
     try:
-        loaded = settings.load()
+        loaded = settings.load(log_tamper)
         share = Fraction(str(settings.fraction(loaded, "company_share"))) * 100
         floor = Fraction(str(settings.percent(loaded, "team_floor")))
         settings.positive_number(loaded, "monthly_price")
@@ -99,18 +99,29 @@ def _settings() -> tuple[dict, Fraction, Fraction]:
     return loaded, share, floor
 
 
-def _go(events: list[dict]) -> tuple[str, int]:
+def go_words(events: list[dict]) -> list[dict]:
+    """Daniel's words for real launches, oldest first."""
+    return [e for e in events if e["kind"] == "go-given" and e["scope"] == GO_SCOPE]
+
+
+def open_word(events: list[dict]) -> tuple[str, int] | None:
     """The oldest word with launches left, and how many; a launch uses one by citing it in `session-started`."""
-    words = [e for e in events if e["kind"] == "go-given" and e["scope"] == GO_SCOPE]
-    if not words:
-        raise _Stop("go", "no-go: no go-given word is on record", FIX_GO)
     used = Counter(e["gate"] for e in events if e["kind"] == "session-started")
-    for word in words:
+    for word in go_words(events):
         gate = f"go:{word['seq']}"
         left = word["sessions"] - used[gate]
         if left > 0:
             return gate, left
-    raise _Stop("go", "go-used-up: every go-given word's launches are used", FIX_GO)
+    return None
+
+
+def _go(events: list[dict]) -> tuple[str, int]:
+    if not go_words(events):
+        raise _Stop("go", "no-go: no go-given word is on record", FIX_GO)
+    found = open_word(events)
+    if found is None:
+        raise _Stop("go", "go-used-up: every go-given word's launches are used", FIX_GO)
+    return found
 
 
 def _schedule_open(events: list[dict]) -> tuple[str, None]:
@@ -178,6 +189,35 @@ def _under_share(windows: tuple[treasurer.WindowShare, ...], share: Fraction) ->
             reason = f"share-used: the company has used {float(window.company_used):.2f}% of {seen.window}, at or past its share of {float(share):g}%"
             fix = f"wait for the reset at {times.stamp(seen.resets_at)}; only `{settings.SET} company_share` moves the share"
             raise _Stop("share", reason, fix, _numbers(window))
+
+
+@dataclass(frozen=True)
+class Blocked:
+    """What would refuse a launch, for a report that promises to write nothing."""
+
+    reason: str
+    fix: str
+
+
+def settings_blocked() -> Blocked | None:
+    """What step 3 would say of the settings, with nothing logged."""
+    try:
+        _settings(log_tamper=False)
+    except _Stop as stop:
+        return Blocked(stop.reason, stop.fix)
+    return None
+
+
+def room_blocked(events: list[dict]) -> Blocked | None:
+    """What steps 6 to 8 would say of the reading, the floor and the share, with nothing logged."""
+    try:
+        loaded, share, floor = _settings(log_tamper=False)
+        windows = _windows(events, loaded, times.now().replace(microsecond=0))
+        _under_floor(windows, floor)
+        _under_share(windows, share)
+    except _Stop as stop:
+        return Blocked(stop.reason, stop.fix)
+    return None
 
 
 def _log(role: str, bet: str | None, stop: _Stop) -> int | None:

@@ -272,8 +272,11 @@ def _within(seconds: float, work: Callable[[], str | None]) -> str | None:
     return answers[0] if answers else f"the ledger did not answer in {seconds} seconds, so its lock is held"
 
 
-def pull(by: str, reason: str, loop: str | None = None) -> Pulled:
-    """Stop everything now, and hold every launch until `resume`; a loop's red line calls this, and names itself."""
+def pull(by: str, reason: str, loop: str | None = None, stop_only: bool = False) -> Pulled:
+    """Stop everything now, and hold every launch until `resume`; a loop's red line calls this, and names itself.
+
+    `stop_only` is the probe's kill test, which holds and stops as a pull does and leaves the timers and the keys alone.
+    """
     _refuse_inside_a_session()
     # Its time first, so that the file names sort in the order the pulls began.
     # Its process, until it has done, so that a resume can tell a pull still going from one that died.
@@ -282,7 +285,8 @@ def pull(by: str, reason: str, loop: str | None = None) -> Pulled:
     # The directory holds every launch by being there, whether or not this pull's file got into it.
     steps = [Step(HOLD, _KILL_FILE, HELD_NO_RECORD if kill_state.present() else FAILED, problem)] if problem else []
     # The last sweep comes last, since it may wait for a launch that is still deciding, and nothing else should wait with it.
-    for name, target, action in ((STOP_SESSION, "sessions", _stop_sweep), (SCHEDULE, "timers", _schedule_off), (ROTATION, "settings", _rotate_accounts), (STOP_SESSION, "sessions", _last_sweep)):
+    between = () if stop_only else ((SCHEDULE, "timers", _schedule_off), (ROTATION, "settings", _rotate_accounts))
+    for name, target, action in ((STOP_SESSION, "sessions", _stop_sweep), *between, (STOP_SESSION, "sessions", _last_sweep)):
         steps += _attempt(name, target, action)
         # After each, so that a pull ended part way leaves what it had done.
         record["steps"] = [step.fields() for step in steps]
