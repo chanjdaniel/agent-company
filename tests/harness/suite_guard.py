@@ -4,13 +4,17 @@ At start-up it moves HOME, the company home, the config directory, Claude Code's
 the temporary directory into one scratch directory, and puts a `claude` and a `systemctl` first on PATH that fail the test.
 It refuses to start if any of those is not in the scratch directory by the time the session opens.
 Every process gets `audit_guard`, this one directly and each child Python through `sitecustomize`.
+At the end it fails the run on any process of the suite still running, which it knows by that directory in its environment.
 """
 
+import contextlib
 import os
 import pwd
 import shutil
+import signal
 import stat
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +26,8 @@ ISOLATED = ("HOME", "COMPANY_HOME", "COMPANY_CONFIG", "CLAUDE_CONFIG_DIR", "XDG_
 # What a blocker on PATH stands for, and the word the guard's log files it under.
 BLOCKED = {"claude": "model", "systemctl": "schedule"}
 REFUSED_START = 3
+# Long enough for what a test's last signal ended to finish going: a tool's server, say, or a child being reaped.
+LEFT_RUNNING_SECONDS = 10
 
 # A session must not be able to pick another provider, sign in by a token, or find a real binary, from the shell that ran pytest.
 DROPPED_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "AWS_BEARER_")
@@ -138,11 +144,41 @@ def pytest_runtest_call(item):
             pytest.fail("the suite's guard caught this, in this test or just before it: " + "; ".join(new), pytrace=False)
 
 
+def _still_running():
+    """Each process but this one with the suite's scratch directory in its environment, as all it started have."""
+    root = str(_suite.root).encode()
+    found = []
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit() and int(entry.name) != os.getpid():
+            with contextlib.suppress(OSError):
+                if root in (entry / "environ").read_bytes():
+                    found.append(int(entry.name))
+    return found
+
+
+def _left_running():
+    """What is still running once it has had time to go. Each is ended, and is the suite's own by its environment."""
+    deadline = time.monotonic() + LEFT_RUNNING_SECONDS
+    found = _still_running()
+    while found and time.monotonic() < deadline:
+        time.sleep(0.05)
+        found = _still_running()
+    described = []
+    for pid in found:
+        with contextlib.suppress(OSError):
+            described.append(f"{pid} ({Path(f'/proc/{pid}/cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace').strip()})")
+            os.kill(pid, signal.SIGKILL)
+    return described
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session):
     new = _new_violations()
     if new:
         pytest.exit("the suite's guard caught something outside a test: " + "; ".join(new), returncode=1)
+    left = _left_running()
+    if left:
+        pytest.exit("the suite left these running: " + "; ".join(left), returncode=1)
 
 
 @pytest.hookimpl(trylast=True)

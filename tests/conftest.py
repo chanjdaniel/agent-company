@@ -1,7 +1,9 @@
 """Fixtures for the whole suite, whose guards live in `harness/suite_guard.py`."""
 
+import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -19,6 +21,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "harness"))
 pytest_plugins = ["suite_guard"]
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+def stop_what_is_left():
+    """End every session a test left running, passing or failing: its launcher first, which would otherwise stop nothing once killed."""
+    for found in launcher.running_sessions():
+        if found.launcher is not None:
+            with contextlib.suppress(OSError):
+                os.kill(found.launcher, signal.SIGKILL)
+        if found.group is not None:
+            with contextlib.suppress(OSError):
+                os.killpg(found.group, signal.SIGKILL)
 
 
 @pytest.fixture
@@ -54,7 +67,8 @@ def stub(tmp_path, monkeypatch, transcripts):
 
     chosen = stub_session.Stub(tmp_path / "stub")
     monkeypatch.setenv(launcher.BINARY_VARIABLE, str(chosen.binary))
-    return chosen
+    yield chosen
+    stop_what_is_left()
 
 
 @pytest.fixture

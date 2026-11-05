@@ -1,7 +1,10 @@
 """The suite's own guards, shown failing: each case runs a small pytest of its own and reads how it ended."""
 
+import contextlib
+import json
 import os
 import pwd
+import signal
 import stat
 import subprocess
 import sys
@@ -9,6 +12,7 @@ from pathlib import Path
 from textwrap import dedent
 
 import pytest
+from session_checks import pid_is_running
 
 REAL_HOME = pwd.getpwuid(os.getuid()).pw_dir
 PASSED = 0
@@ -338,3 +342,71 @@ def test_a_model_provider_variable_in_the_shell_does_not_reach_a_test(tmp_path, 
     source = bare_test(f"import os\nassert {name!r} not in os.environ")
     result = run_child_suite(tmp_path, source, env={name: "planted"})
     assert result.returncode == PASSED, result.stdout + result.stderr
+
+
+# What a test leaves running: review finding 47
+
+LEFT_RUNNING_CONFTEST = f"""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("suite_conftest", {str(Path(__file__).resolve().parent / "conftest.py")!r})
+    suite_conftest = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(suite_conftest)
+    company_home = suite_conftest.company_home
+    company = suite_conftest.company
+    stub = suite_conftest.stub
+    systemctl = suite_conftest.systemctl
+    board = suite_conftest.board
+    transcripts = suite_conftest.transcripts
+"""
+
+
+def test_a_test_that_fails_leaves_nothing_of_its_session_running(tmp_path):
+    pids = tmp_path / "pids"
+    source = f"""
+        import json
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        from session_checks import wait_for
+
+        def test_it_fails_with_its_session_hung(stub, board, systemctl):
+            stub.play({{"do": "children", "count": 2}}, {{"do": "hang"}})
+            launch = subprocess.Popen([Path(sys.executable).parent / "company", "session", "start", "probe"])
+            wait_for(lambda: any("hanging" in line for line in stub.progress()))
+            lines = stub.progress()
+            found = [launch.pid] + [pid for line in lines for pid in line.get("children", [])] + [line["hanging"] for line in lines if "hanging" in line]
+            Path({str(pids)!r}).write_text(json.dumps(found))
+            launch.kill()
+            assert False
+    """
+
+    done = run_child_suite(tmp_path, source, conftest=LEFT_RUNNING_CONFTEST, env={"PYTHONPATH": f"{os.environ['PYTHONPATH']}{os.pathsep}{Path(__file__).resolve().parent}"})
+
+    assert "1 failed" in done.stdout, done.stdout + done.stderr
+    found = json.loads(pids.read_text())
+    assert len(found) == 4
+    left = [pid for pid in found if pid_is_running(pid)]
+    for pid in left:
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGKILL)
+    assert left == []
+
+
+def test_a_passing_test_that_leaves_a_process_running_fails_the_suite(tmp_path):
+    pids = tmp_path / "pids"
+    source = f"""
+        import subprocess
+        from pathlib import Path
+
+        def test_it_passes_and_leaves_a_child():
+            Path({str(pids)!r}).write_text(str(subprocess.Popen(["/bin/sleep", "600"]).pid))
+    """
+
+    done = run_child_suite(tmp_path, source)
+
+    assert done.returncode == TEST_FAILED, done.stdout + done.stderr
+    assert "left these running" in done.stdout + done.stderr
+    assert "/bin/sleep 600" in done.stdout + done.stderr
+    assert not pid_is_running(int(pids.read_text()))
