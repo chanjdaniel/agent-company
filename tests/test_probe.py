@@ -658,7 +658,7 @@ def test_a_session_that_ended_by_itself_and_left_a_process_behind_still_holds(ki
 
 def test_a_process_with_the_number_as_no_more_than_part_of_its_arguments_is_left_alone(tmp_path):
     """The kill test kills what this finds, so a number that means something else in another process must not match."""
-    bystander = subprocess.Popen(["/bin/sh", "-c", "sleep 600 # 123456789x", "123456789x"])
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)", "123456789x"])
     try:
         found = launcher.session_processes("no-such-session", None, "123456789")
         assert bystander.pid not in [process.pid for process in found]

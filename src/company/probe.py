@@ -297,12 +297,11 @@ class _ToolCalls:
 
 
 def _was_written(path: Path) -> bool:
-    """Whether this holds what a write put there: a refused write may leave an empty file on the host, as the mount point of a read-only bind."""
+    """Whether this holds what a write put there: a refused write may leave an empty file on the host, as the mount point of a read-only bind. A link has its target's name for its size."""
     try:
-        found = os.lstat(path)
+        return os.lstat(path).st_size > 0
     except OSError:
         return False
-    return stat.S_ISLNK(found.st_mode) or found.st_size > 0
 
 
 def _worked(action: _Action, calls: _ToolCalls, text: str) -> bool:
