@@ -33,6 +33,11 @@ HELP_FLAGS = (
 )
 
 
+# A line of the probe's script, as a model reads it: its action, how it is tried, and on what.
+_ACTION = re.compile(r"^- (?P<name>\S+): with (?P<how>Bash, run exactly|the Write tool, write the word probe to|the Read tool, read): `(?P<target>.*)`$", re.MULTILINE)
+_prompt = ""
+
+
 def _flag(name):
     arguments = sys.argv[1:]
     return arguments[arguments.index(name) + 1] if name in arguments else None
@@ -89,7 +94,7 @@ def _usage(step):
 def _reply(session, step):
     """One model reply, in the transcript, in the live output, or in both, as `where` says."""
     model = step.get("model", "claude-opus-5-5")
-    message = {"id": f"msg-{step['request']}", "model": model, "usage": _usage(step), "content": [{"type": "text", "text": "words"}]}
+    message = {"id": f"msg-{step['request']}", "model": model, "usage": _usage(step), "content": step.get("content", [{"type": "text", "text": step.get("text", "words")}])}
     where = step.get("where", "both")
     if where in ("both", "transcript"):
         line = {
@@ -105,12 +110,79 @@ def _reply(session, step):
         print(json.dumps({"type": "assistant", "session_id": session, "message": message}), flush=True)
 
 
+def _note(tools, text):
+    _record("tool_results.jsonl", tools.request("tools/call", {"name": "note", "arguments": {"text": text}}))
+
+
+def _try(how, target):
+    """Do what one line of the probe's script says, which a sandbox would have stopped; what it answered, for the output."""
+    if how == "the Write tool, write the word probe to":
+        Path(target).write_text("probe\n")
+        return ""
+    if how == "the Read tool, read":
+        return Path(target).read_text()
+    return subprocess.run(["/bin/sh", "-c", target], capture_output=True, text=True, check=False).stdout
+
+
+def _call(session, identifier, tool, inputs, answer):
+    """One tool call and its answer, as a session's saved output holds them."""
+    block = {"type": "tool_use", "id": identifier, "name": tool, "input": inputs}
+    _reply(session, {"request": identifier, "output": 1, "content": [block]})
+    print(json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": identifier, "content": answer}]}}), flush=True)
+
+
+_TOOLS = {"Bash, run exactly": ("Bash", "command"), "the Write tool, write the word probe to": ("Write", "file_path"), "the Read tool, read": ("Read", "file_path")}
+
+
+def _probe_actions(step, session, tools):
+    """Play the probe's script as a session would, and first what should work, unless `controls` says it does not.
+
+    `succeed` is done and said, `lie` is done and denied, `claim` is said and not done, `skip` is called and not said, `untried` is said refused with no call.
+    """
+    succeed, lie, claim, skip, untried = (set(step.get(name, ())) for name in ("succeed", "lie", "claim", "skip", "untried"))
+    dead = not step.get("controls", True)
+    for number, found in enumerate(_ACTION.finditer(_prompt)):
+        name, how, target = found["name"], found["how"], found["target"]
+        tool, key = _TOOLS[how]
+        if name.startswith("allowed-"):
+            _call(session, f"probe-{number}", tool, {key: target}, "denied" if dead else _try(how, target))
+            continue
+        if name not in untried:
+            done = name in succeed | lie
+            # Nothing here may reach a network, so what a session would have reached is only printed.
+            answer = "denied" if not done else "reached" if "network" in name else _try(how, target)
+            _call(session, f"probe-{number}", tool, {key: target}, answer)
+        if name not in skip:
+            _note(tools, f"PROBE {name} {'succeeded' if name in succeed | claim else 'refused'}")
+    if step.get("instructions", True):
+        copied = step.get("copied", "none")
+        Path("instructions-seen.txt").write_text(copied + "\n")
+        _call(session, "probe-copied", "Write", {"file_path": "instructions-seen.txt", "content": copied}, "")
+
+
 def _play(step, session, tools):
     match step["do"]:
         case "tool":
             tools = tools or Tools()
             answer = tools.request("tools/call", {"name": step["name"], "arguments": step.get("arguments", {})})
             _record("tool_results.jsonl", answer)
+        case "probe-actions":
+            tools = tools or Tools()
+            _probe_actions(step, session, tools)
+        case "echo-files":
+            # As a session that loaded these into its context would show them, by copying them out.
+            for pattern in step["patterns"]:
+                for path in sorted(Path(os.path.expandvars(pattern)).parent.glob(Path(pattern).name)):
+                    _reply(session, {"request": f"echo-{path.name}", "output": 1, "text": path.read_text()})
+        case "shell-of-action":
+            # A call of the wrong tool, naming what one line of the script names.
+            target = next(found["target"] for found in _ACTION.finditer(_prompt) if found["name"] == step["action"])
+            _call(session, "wrong-tool", "Bash", {"command": f"echo {target}"}, "denied")
+        case "reply-file":
+            _reply(session, {"request": f"file-{step['path']}", "output": 1, "text": Path(step["path"]).read_text(), "where": step["where"]})
+        case "wait-as-told":
+            pids = [subprocess.Popen(["/bin/sleep", re.search(r"sleep (\d+)", _prompt)[1]], **step.get("popen", {})).pid]
+            _record("progress.jsonl", {"children": pids})
         case "list-tools":
             tools = tools or Tools()
             _record("tool_lists.jsonl", tools.request("tools/list", {}))
@@ -122,7 +194,7 @@ def _play(step, session, tools):
             _record("progress.jsonl", {"hanging": os.getpid()})
             time.sleep(step.get("seconds", 600))
         case "children":
-            pids = [subprocess.Popen(["/bin/sleep", "600"]).pid for _ in range(step["count"])]
+            pids = [subprocess.Popen(step.get("argv", ["/bin/sleep", "600"]), **step.get("popen", {})).pid for _ in range(step["count"])]
             _record("progress.jsonl", {"children": pids})
         case "ignore-term":
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -147,8 +219,10 @@ def _play(step, session, tools):
 
 
 def main():
+    global _prompt
     script = json.loads((DIRECTORY / "script.json").read_text())
-    _record("calls.jsonl", {"argv": sys.argv[1:], "cwd": os.getcwd(), "stdin": None if "--help" in sys.argv else sys.stdin.read()})
+    _prompt = "" if "--help" in sys.argv else sys.stdin.read()
+    _record("calls.jsonl", {"argv": sys.argv[1:], "cwd": os.getcwd(), "parent": os.getppid(), "stdin": None if "--help" in sys.argv else _prompt})
     if "--help" in sys.argv:
         print("\n".join(flag for flag in HELP_FLAGS if flag not in script.get("help_lacks", [])))
         return script.get("help_exit", 0)

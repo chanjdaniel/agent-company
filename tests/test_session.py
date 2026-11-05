@@ -16,7 +16,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from session_checks import events, pid_is_running, wait_for
+from session_checks import (
+    events,
+    patch_every_company,
+    pid_is_running,
+    run_file_fails,
+    wait_for,
+)
 from test_suite_guard import run_child_suite
 from usage_records import (
     SETTINGS_INIT,
@@ -543,6 +549,105 @@ def test_a_goal_that_fails_the_scan_starts_nothing(stub, board, monkeypatch):
 # The workspace
 
 
+@pytest.mark.parametrize("name", ["mcp.json", "session.json"])
+def test_a_launch_whose_run_files_cannot_be_written_is_refused_and_starts_nothing(session, stub, tmp_path, monkeypatch, name):
+    patch_every_company(tmp_path, monkeypatch, *run_file_fails(f"path.name == {name!r}"))
+
+    done = session()
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "Traceback" not in done.stderr
+    assert "the disk is full" in only("launch-refused")["reason"]
+    assert stub.session_calls() == []
+    assert "session-started" not in kinds()
+
+
+def test_a_session_whose_group_cannot_be_recorded_is_stopped_with_its_children(session, stub, tmp_path, monkeypatch):
+    """A later launcher finds a session's group only by this record, so with none the session must not run on its launcher's life alone."""
+    stub.play({"do": "children", "count": 1}, {"do": "hang"})
+    # The stop comes at once on this path, so the failing write waits for the child that the stop must then reach.
+    until_a_child = [
+        "        import pathlib, time",
+        f"        progress = pathlib.Path({str(stub.directory / 'progress.jsonl')!r})",
+        "        for _ in range(400):",
+        "            if progress.exists() and 'children' in progress.read_text():",
+        "                break",
+        "            time.sleep(0.05)",
+    ]
+    patch_every_company(tmp_path, monkeypatch, *run_file_fails("path.name == 'session.json' and value.get('group')", until_a_child))
+
+    done = session()
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "Traceback" not in done.stderr
+    assert "the disk is full" in done.stderr
+    assert only("session-stopped")["reason"] == "not-recorded"
+    assert only("session-ended")
+    pids = next(line["children"] for line in stub.progress() if "children" in line)
+    assert pids
+    wait_for(lambda: not any(pid_is_running(pid) for pid in pids))
+
+
+def test_a_workspace_that_cannot_be_made_is_refused_at_the_workspace_check(session, stub):
+    paths.workspaces().parent.mkdir(parents=True, exist_ok=True)
+    paths.workspaces().write_text("a file where the workspaces go")
+
+    done = session()
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "Traceback" not in done.stderr
+    assert only("launch-refused")["check"] == "workspace"
+    assert "own record" not in done.stdout
+    assert stub.session_calls() == []
+
+
+def test_a_run_directory_that_cannot_be_made_is_refused_at_the_run_files_check(session, stub):
+    paths.runs().parent.mkdir(parents=True, exist_ok=True)
+    paths.runs().write_text("a file where the runs go")
+
+    done = session()
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "Traceback" not in done.stderr
+    assert only("launch-refused")["check"] == "run-files"
+    assert stub.session_calls() == []
+
+
+@pytest.mark.parametrize(
+    ("check", "patch"),
+    [
+        ("goal", ["import company.goals", "def every_goal_file():", "    raise OSError('the package cannot be read')", "company.goals.every_goal_file = every_goal_file"]),
+        ("settings", ["import company.launcher", "def model(*given):", "    raise OSError('the settings cannot be read')", "company.launcher._model = model"]),
+    ],
+    ids=["goal", "settings"],
+)
+def test_an_unreadable_input_is_refused_at_its_own_check_and_not_as_a_run_file(session, stub, tmp_path, monkeypatch, check, patch):
+    patch_every_company(tmp_path, monkeypatch, *patch)
+
+    done = session()
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "Traceback" not in done.stderr
+    refused = only("launch-refused")
+    assert refused["check"] == check
+    assert "cannot be read" in refused["reason"]
+    assert stub.session_calls() == []
+
+
+def test_a_folder_name_in_a_workspace_cannot_forge_a_line_of_a_refusal(session, stub):
+    forged = "Launches may start again."
+    held = workspace() / f"a\n{forged}\nb"
+    held.mkdir(parents=True)
+    (held / "CLAUDE.md").write_text("planted")
+
+    done = session("probe", "--workspace", str(paths.workspaces() / "ws"))
+
+    assert done.returncode == 1
+    assert "Refused at the workspace check" in done.stdout
+    assert forged in done.stdout
+    assert forged not in done.stdout.splitlines()
+
+
 @pytest.mark.parametrize("depth", [("",), ("a",), ("a", "b", "c")], ids=["top", "one-down", "three-down"])
 @pytest.mark.parametrize("name", CONFIG_NAMES)
 def test_a_workspace_holding_configuration_starts_nothing(session, stub, name, depth):
@@ -1021,8 +1126,8 @@ SPAWNING = {
     "asyncio": {"create_subprocess_exec", "create_subprocess_shell"},
     "pty": {"spawn"},
 }  # fmt: skip
-# Each of these starts a process of its own for a reason: `schedule.py` runs `systemctl`, and `killswitch.py` its self-test.
-SPAWNING_MODULES = frozenset({"launcher.py", "killswitch.py", "schedule.py"})
+# Each of these starts a process of its own for a reason: `schedule.py` runs `systemctl`, `killswitch.py` its self-test, and `quant.py` the `bwrap` a strategy runs in.
+SPAWNING_MODULES = frozenset({"launcher.py", "killswitch.py", "schedule.py", "quant.py"})
 CLAUDE_MODULES = frozenset({"launcher.py"})
 
 

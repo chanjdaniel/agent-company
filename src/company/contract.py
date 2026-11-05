@@ -12,10 +12,18 @@ _NAME = re.compile(r"[a-z0-9][a-z0-9_:-]{0,63}")
 _BET = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 _CELL_WRITER = "cell:<bet>"
 CELL_PREFIX = "cell:"
+
+
+def cell_writer(bet: str) -> str:
+    """The writer a cell of this bet writes as."""
+    return f"{CELL_PREFIX}{bet}"
+
+OUTSIDE_ACTIONS_SCOPE = "outside-actions"
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _DISCORD_ID = re.compile(r"[0-9]{1,32}")
 # From zero up: a refund written as -5.00 would add to net revenue, since refunds are subtracted.
 _DECIMAL = re.compile(r"[0-9]+(\.[0-9]+)?")
+_SIGNED_DECIMAL = re.compile(r"-?[0-9]+(\.[0-9]+)?")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
@@ -36,7 +44,7 @@ def _is_seq(value, next_seq: int) -> bool:
     return _whole(value) and 1 <= value < next_seq
 
 
-def _is_date(value) -> bool:
+def is_date(value) -> bool:
     if not _matches(_DATE, value):
         return False
     try:
@@ -59,7 +67,7 @@ def _type_holds(type_name: str, value, next_seq: int) -> bool:
         case "timestamp":
             return isinstance(value, str) and times.parse_stamp(value) is not None
         case "date":
-            return _is_date(value)
+            return is_date(value)
         case "uuid":
             return _matches(UUID, value)
         case "bet":
@@ -68,6 +76,8 @@ def _type_holds(type_name: str, value, next_seq: int) -> bool:
             return _matches(_DISCORD_ID, value)
         case "decimal":
             return _matches(_DECIMAL, value)
+        case "signed-decimal":
+            return _matches(_SIGNED_DECIMAL, value)
         case "number":
             return _is_number(value)
         case "count":
@@ -84,11 +94,12 @@ class Contract:
     kinds: dict
     writers: dict
     field_types: dict
+    outside_actions: tuple[str, ...]
 
     @classmethod
     def load(cls) -> "Contract":
         data = json.loads(resources.files("company").joinpath("ledger_contract.json").read_text())
-        return cls(data["kinds"], data["writers"], data["field_types"])
+        return cls(data["kinds"], data["writers"], data["field_types"], tuple(data["outside_actions"]))
 
     def refusal(self, kind, fields, writer, next_seq: int) -> str | None:
         """Why this event may not be appended, as a short reason code naming no rejected value; or None."""

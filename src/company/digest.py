@@ -3,7 +3,7 @@
 from datetime import datetime
 from fractions import Fraction
 
-from company import reading, times, treasurer
+from company import honesty, reading, schedule, times, treasurer
 
 NONE = "none"
 _SECTIONS = ("Bar", "Bets", "Resources", "Incidents", "Honesty", "Pending approvals")
@@ -26,7 +26,7 @@ def page(events: list[dict], share: treasurer.Share | str, terms: treasurer.Term
         now,
         {
             "Bar": _bar(ladder),
-            "Bets": _bets(events, ladder),
+            "Bets": [*_bets(events, ladder), *map(_paper_line, treasurer.paper_results(events))],
             "Resources": _resources(events, share, terms, week),
             "Incidents": _incidents(events, week),
             "Honesty": _honesty(events, week),
@@ -107,6 +107,20 @@ def _bets(events: list[dict], ladder: treasurer.Ladder) -> list[str]:
     return lines if overhead.is_zero else [*lines, _bet_line(treasurer.OVERHEAD, overhead, at_most)]
 
 
+def _paper_line(result: treasurer.PaperResult) -> str:
+    """A period's results, which are the cell's metric and no money, and say so."""
+    period = result.period
+    name = f"PAPER results, no real money: {result.bet}, strategy {result.strategy}"
+    if result.reading is None:
+        figures = "no reading yet"
+    else:
+        pnl, equity = Fraction(result.reading["pnl"]), Fraction(result.reading["equity"])
+        figures = f"profit and loss {_dollars(pnl)} on equity {_dollars(equity)} at {result.reading['taken_at']}"
+    if result.closed is not None:
+        return f"{name}: {figures}; closed: {result.closed['reason']}"
+    return f"{name}: {figures}; open until {period['end_date']}, drawdown kill {float(period['drawdown_kill']) * 100:g}%"
+
+
 def _token_line(name: str, found, terms: treasurer.Terms) -> str:
     if isinstance(found, reading.Unreadable):
         return f"Tokens, {name}: cannot be read: {found.reason}: {found.detail}. Fix: `{reading.FIX}`."
@@ -153,6 +167,23 @@ def _incidents(events: list[dict], week: treasurer.Span) -> list[str]:
     for event in events:
         if event["kind"] == "incident" and week.holds(event):
             lines.append(f"Event {event['seq']}: {event['class']}{_bet_note(event)}, caused by event {event['cause_seq']}")
+    return [*lines, *_failed_job_lines(events, week)]
+
+
+def _failed_job_lines(events: list[dict], week: treasurer.Span) -> list[str]:
+    """One line for each job that failed on the schedule this week, however many times, since a timer may fail every few minutes."""
+    failures: dict[str, list[dict]] = {}
+    for event in events:
+        if event["kind"] == "job-failed" and week.holds(event):
+            failures.setdefault(event["job"], []).append(event)
+    lines = []
+    for job, failed in failures.items():
+        times_failed = "1 time" if len(failed) == 1 else f"{len(failed)} times"
+        newest = failed[-1]
+        lines.append(
+            f"Scheduled job {job} failed {times_failed} in the last seven days, last at {newest['ts']} with exit {newest['exit']}: "
+            f"a timer's output is in `{schedule.journal_command(job)}`"
+        )
     return lines
 
 
@@ -162,9 +193,32 @@ def _promises_line(events: list[dict]) -> str | None:
     if not made:
         return None
     results = {e["promise_seq"]: e["result"] for e in events if e["kind"] == "promise-checked" and e["promise_seq"] in made}
-    kept = sum(result == "kept" for result in results.values())
-    failed = sum(result == "broken" for result in results.values())
-    return f"Cells' promises: {len(made)} made, {kept} kept, {failed} broken, {len(made) - len(results)} open"
+    kept = sum(result == honesty.KEPT for result in results.values())
+    said_kept = {e["promise_seq"] for e in events if e["kind"] == "promise-kept"}
+    broken = [seq for seq, result in results.items() if result == honesty.BROKEN]
+    later = sum(seq in said_kept for seq in broken)
+    corrected = f"{later} broken then said kept, " if later else ""
+    return f"Cells' promises: {len(made)} made, {kept} kept, {len(broken) - later} broken, {corrected}{len(made) - len(results)} open"
+
+
+def _open_lines(events: list[dict]) -> list[str]:
+    """Each cell's promise with no result yet, since silence past its date reads as broken and only Daniel's word keeps it."""
+    checked = {e["promise_seq"] for e in events if e["kind"] == "promise-checked"}
+    lines = []
+    for e in events:
+        if e["kind"] == "promise-recorded" and e["writer"].startswith(treasurer.CELL_PREFIX) and e["seq"] not in checked:
+            lines.append(f"Open: event {e['seq']}, bet {treasurer.bet_of(e)}, due {e['due_date']}, kept only if you say so with `company promise kept {e['seq']}`: {' '.join(e['promise'].split())}")
+    return lines
+
+
+def _not_run_lines(events: list[dict]) -> list[str]:
+    """A runner's promises that nothing ran by their dates, listed apart: they are Daniel's to know, and count against no cell."""
+    results = {e["promise_seq"]: e["result"] for e in events if e["kind"] == "promise-checked"}
+    return [
+        f"The code's promise, not run and no cell's doing: event {e['seq']}, bet {e.get('bet', 'unknown')}, due {e['due_date']}: {e['promise']}"
+        for e in events
+        if e["kind"] == "promise-recorded" and results.get(e["seq"]) == honesty.NOT_RUN
+    ]
 
 
 def _findings_line(events: list[dict], week: treasurer.Span) -> str | None:
@@ -175,6 +229,24 @@ def _findings_line(events: list[dict], week: treasurer.Span) -> str | None:
     recent = sum(week.holds(e) for e in findings)
     unconfirmed = sum(e["seq"] not in confirmed for e in findings)
     return f"Findings: {recent} in the last seven days, {unconfirmed} unconfirmed in all"
+
+
+def _finding_lines(events: list[dict], week: treasurer.Span) -> list[str]:
+    """Each finding this week and each still waiting, since a count gives Daniel nothing to decide on."""
+    confirmed = {e["finding_seq"]: e["writer"] for e in events if e["kind"] == "finding-confirmed"}
+    said_kept = {e["promise_seq"]: e["kept_date"] for e in events if e["kind"] == "promise-kept"}
+    lines = []
+    for e in events:
+        if e["kind"] != "finding" or (e["seq"] in confirmed and not week.holds(e)):
+            continue
+        if e["seq"] in confirmed:
+            word = "confirmed by you" if confirmed[e["seq"]] == "board" else "confirmed by code"
+        else:
+            word = f"waiting for your word: `company finding confirm {e['seq']}`" + (" pauses the cell" if "bet" in e else " records it")
+        if e.get("promise_seq") in said_kept:
+            word += f", and you later said event {e['promise_seq']} was kept on {said_kept[e['promise_seq']]}"
+        lines.append(f"Finding {e['seq']}, {e['rubric']}{_bet_note(e)}, {word}: {' '.join(e['summary'].split())} Evidence: {' '.join(e['evidence'].split())}")
+    return lines
 
 
 def _count_line(events: list[dict], week: treasurer.Span, kind: str, name: str) -> str | None:
@@ -196,7 +268,10 @@ def _paused_line(events: list[dict]) -> str | None:
 def _honesty(events: list[dict], week: treasurer.Span) -> list[str]:
     lines = [
         _promises_line(events),
+        *_open_lines(events),
+        *_not_run_lines(events),
         _findings_line(events, week),
+        *_finding_lines(events, week),
         _count_line(events, week, "complaint", "Complaints"),
         _count_line(events, week, "spam-flag", "Spam flags"),
         _count_line(events, week, "refund", "Refunds"),

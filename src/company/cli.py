@@ -5,15 +5,26 @@ import contextlib
 import json
 import os
 import sys
+import traceback
+import unicodedata
 import uuid
-from datetime import UTC, datetime, timedelta
+from collections.abc import Iterator
+from datetime import UTC, date, datetime, timedelta
+from typing import TextIO, cast
 
 from company import (
+    audit,
     contract,
     digest,
     governor,
+    honesty,
+    kill_state,
     killswitch,
     launcher,
+    paper,
+    paper_period,
+    preflight,
+    probe,
     reading,
     schedule,
     settings,
@@ -36,7 +47,7 @@ def _refused_inside_a_session(ledger: Ledger, kind: str, writer: str) -> bool:
     context = {"tool": "ledger-append", **({"session": session} if contract.UUID.fullmatch(session) else {})}
     with contextlib.suppress(LedgerBroken, OSError):
         ledger.refuse(kind, writer, "inside-a-session", context)
-    print("company: refused: an agent reaches the ledger only through its company tools. Nothing was appended.", file=sys.stderr)
+    print("company: refused: an agent reaches the ledger only through its company tools. Nothing was done.", file=sys.stderr)
     return True
 
 
@@ -66,6 +77,8 @@ def _broken_report(verification) -> str:
 
 def _ledger_show(args) -> int:
     ledger = Ledger()
+    if _refused_inside_a_session(ledger, "ledger-show", "board"):
+        return EXIT_REFUSED
     verification = ledger.verify()
     if ledger.path.exists():
         sys.stdout.write(ledger.path.read_text(errors="replace"))
@@ -207,6 +220,153 @@ def _treasurer_charge(args) -> int:
     return EXIT_REFUSED if due.problems or isinstance(week, reading.Unreadable) else EXIT_OK
 
 
+def _checked_line(checked: honesty.Checked) -> str:
+    seq, promise = checked.promise["seq"], checked.promise
+    if checked.result == honesty.KEPT:
+        return f"Event {seq}, due {promise['due_date']}: kept."
+    if checked.result == honesty.NOT_RUN:
+        return f"Event {seq}, due {promise['due_date']}: not run, so no tick closed its paper period by then. It is the code's promise, so nothing goes against the cell, and the digest says so."
+    bet = treasurer.bet_of(promise)
+    return f"Event {seq}, due {promise['due_date']}: broken, which is finding {checked.finding}. The cell {bet} is paused until `{honesty.resume_command(bet)}`."
+
+
+def _weigh_complaints() -> int:
+    """Weigh the flags since Daniel's last review against the threshold and say what came of it; the exit is non-zero only if that could not be done."""
+    try:
+        review = honesty.review_complaints()
+    except settings.SettingsRefused as refused:
+        print(f"company: the complaint threshold was not weighed: {refused}. Fix: `{refused.fix}`.", file=sys.stderr)
+        return EXIT_REFUSED
+    except (AppendRefused, LedgerBroken, OSError) as refused:
+        print(f"company: the complaint threshold was not weighed: {refused}. See `company ledger verify`.", file=sys.stderr)
+        return EXIT_REFUSED
+    if review is not None:
+        counted = f"Complaints and spam flags since your last review, in the last {review.days:g} days: {review.flagged}, and {float(review.needed):g} pause new outside actions."
+        print(counted)
+        if review.holding:
+            print(f"New outside actions are refused company-wide until `{honesty.RESUME_OUTSIDE}`.")
+        if review.pause is not None:
+            print(f"Event {review.pause['seq']} in the ledger records the pause.")
+    return EXIT_OK
+
+
+def _treasurer_check(args) -> int:
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, "promise-checked", "treasurer") or _is_broken(ledger):
+        return EXIT_REFUSED
+    try:
+        results = honesty.check_promises()
+    except (AppendRefused, LedgerBroken, OSError) as refused:
+        print(f"company: the check stopped here: {refused}. What it wrote stands, and running it again once `company ledger verify` is clean finishes it, with nothing twice.", file=sys.stderr)
+        return EXIT_REFUSED
+    for checked in results:
+        print(_checked_line(checked))
+    if not results:
+        print("No promise is due a check.")
+    return max(_confirm_by_code(), _weigh_complaints())
+
+
+def _confirm_by_code() -> int:
+    """Confirm what code can check of the Auditor's findings, and say so; the exit is non-zero only if that could not be done."""
+    try:
+        confirmed = honesty.confirm_by_code()
+    except (AppendRefused, LedgerBroken, OSError) as refused:
+        print(f"company: the findings were not all checked: {refused}. What was written stands, and `company treasurer check` finishes it once `company ledger verify` is clean.", file=sys.stderr)
+        return EXIT_REFUSED
+    for finding in confirmed:
+        print(f"Finding {finding['seq']}: confirmed by code, since no record shows the result its transcript reports. {_paused_words(finding)}")
+    return EXIT_OK
+
+
+def _paused_words(finding: dict) -> str:
+    bet = finding.get("bet")
+    return f"The cell {bet} is paused until `{honesty.resume_command(bet)}`." if bet else "It is on no bet, so no cell is paused."
+
+
+def _finding_confirm(args) -> int:
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, "finding-confirmed", "board") or _is_broken(ledger):
+        return EXIT_REFUSED
+    try:
+        finding = honesty.confirm_finding(args.finding, args.message)
+    except honesty.Refused as refused:
+        print(f"company: refused: {refused}. Nothing was confirmed; event {refused.seq} in the ledger records the refusal.", file=sys.stderr)
+        return EXIT_REFUSED
+    except (AppendRefused, LedgerBroken, OSError) as refused:
+        print(f"company: refused: {refused}. See `company ledger verify`; saying it again finishes what was started.", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"Finding {args.finding} is confirmed. {_paused_words(finding)}")
+    return EXIT_OK
+
+
+def _promise_kept(args) -> int:
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, "promise-kept", "board") or _is_broken(ledger):
+        return EXIT_REFUSED
+    today = times.now().date()
+    try:
+        on = date.fromisoformat(args.on) if args.on else today
+    except ValueError:
+        on = None
+    if on is None or on > today:
+        print("company: --on must be a day like 2026-11-05, and no later than today. Nothing was recorded.", file=sys.stderr)
+        return EXIT_USAGE
+    try:
+        kept = honesty.keep_promise(args.promise, on, args.note)
+    except honesty.Refused as refused:
+        print(f"company: refused: {refused}. Nothing was recorded; event {refused.seq} in the ledger records the refusal.", file=sys.stderr)
+        return EXIT_REFUSED
+    except (AppendRefused, LedgerBroken, OSError) as refused:
+        print(f"company: refused: {refused}. Nothing was recorded; see `company ledger verify`.", file=sys.stderr)
+        return EXIT_REFUSED
+    said = f"Recorded event {kept.event['seq']}: the promise in event {args.promise} was kept on {kept.event['kept_date']}."
+    if kept.finding is None:
+        print(f"{said} The next `company treasurer check` logs it.")
+    else:
+        print(f"{said} A check already read it as broken, in finding {kept.finding}, and that stays in the ledger beside your word; the digest counts it as broken then said kept. `{honesty.resume_command(kept.bet)}` lifts any pause.")
+    return EXIT_OK
+
+
+def _cell_resume(args) -> int:
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, "cell-resumed", "board") or _is_broken(ledger):
+        return EXIT_REFUSED
+    scope = contract.OUTSIDE_ACTIONS_SCOPE if args.outside_actions else honesty.CELL_SCOPE
+    try:
+        event = honesty.resume(scope, args.bet, args.message)
+    except honesty.Refused as refused:
+        print(f"company: refused: {refused}. Nothing was resumed; event {refused.seq} in the ledger records the refusal.", file=sys.stderr)
+        return EXIT_REFUSED
+    except (AppendRefused, LedgerBroken, OSError) as refused:
+        print(f"company: refused: {refused}. Nothing was resumed; see `company ledger verify`.", file=sys.stderr)
+        return EXIT_REFUSED
+    what = f"the cell {args.bet} may launch again" if args.bet else "new outside actions may start again"
+    print(f"Recorded event {event['seq']}: {what}.")
+    return EXIT_OK
+
+
+def _record_flag(kind: str, fields: dict) -> int:
+    """Daniel's record of what reached them, which stands whether or not the threshold can then be weighed."""
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, kind, "board") or _is_broken(ledger):
+        return EXIT_REFUSED
+    try:
+        event = ledger.append(kind, {name: value for name, value in fields.items() if value is not None}, "board")
+    except (AppendRefused, LedgerBroken, OSError) as refused:
+        print(f"company: refused: {refused}. Nothing was recorded; see `company ledger verify`.", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"Recorded event {event['seq']}: a {kind.replace('-', ' ')}.")
+    return _weigh_complaints()
+
+
+def _complaint_record(args) -> int:
+    return _record_flag("complaint", {"source": args.source, "summary": args.summary, "bet": args.bet, "contact": args.contact})
+
+
+def _spam_flag_record(args) -> int:
+    return _record_flag("spam-flag", {"source": args.source, "bet": args.bet, "contact": args.contact})
+
+
 def _minutes_correct(args) -> int:
     ledger = Ledger()
     if _is_broken(ledger):
@@ -241,6 +401,8 @@ def _digest(args) -> int:
     if now is None:
         return _bad_now()
     ledger = Ledger()
+    if _refused_inside_a_session(ledger, "digest", "board"):
+        return EXIT_REFUSED
     if not ledger.verify().ok:
         sys.stdout.write(digest.broken())
         return EXIT_REFUSED
@@ -304,7 +466,19 @@ def _go(args) -> int:
         print(f"company: refused: {refused}. No launch was granted.", file=sys.stderr)
         return EXIT_REFUSED
     print(f"Recorded event {event['seq']}: a go for {_launches(args.sessions)}, on message {args.message}.")
+    _say_if_the_check_does_not_stand(ledger)
     return EXIT_OK
+
+
+def _say_if_the_check_does_not_stand(ledger: Ledger) -> None:
+    """A go is Daniel's word and is never refused for this, but extra usage is what would bill a long session for real, and nothing else sends them back to look."""
+    try:
+        stands = preflight.account_check_stands(ledger.read())
+    except (LedgerBroken, OSError) as error:
+        print(f"company: whether your account check stands could not be read: {error}. `company preflight` says.", file=sys.stderr)
+        return
+    if not stands:
+        print(f"Your account check does not stand: you have not said, since the go before this one, that extra usage is off and that the design's dependencies still hold. This go is recorded all the same. Check both, then `{preflight.ACCOUNT_CHECKED}`.")
 
 
 def _print_refusal(answer: governor.Refused) -> None:
@@ -317,7 +491,10 @@ def _print_refusal(answer: governor.Refused) -> None:
 
 
 def _session_start(args) -> int:
-    answer = launcher.start(args.role, args.bet, args.prompt or "", args.workspace, args.scheduled)
+    return _session_exit(launcher.start(args.role, args.bet, args.prompt or "", args.workspace, args.scheduled))
+
+
+def _session_exit(answer: launcher.Finished | governor.Refused) -> int:
     if isinstance(answer, governor.Refused):
         _print_refusal(answer)
         return EXIT_REFUSED
@@ -326,6 +503,112 @@ def _session_start(args) -> int:
     if answer.unlogged:
         print(f"company: {answer.unlogged}.", file=sys.stderr)
     return EXIT_OK if answer.exit == 0 and not answer.stopped and not answer.unlogged else EXIT_REFUSED
+
+
+def _session_probe(args) -> int:
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, "session-started", "launcher") or _is_broken(ledger):
+        return EXIT_REFUSED
+    try:
+        return _kill_test() if args.kill_test else _guardrail_probe()
+    except probe.ProbeRefused as refused:
+        logged = f"event {refused.seq} in the ledger records the refusal" if refused.seq else "the ledger could not record the refusal"
+        print(f"company: refused: {refused}. No session started; {logged}.", file=sys.stderr)
+        return EXIT_REFUSED
+
+
+def _probe_exit(result: str, unlogged: str | None) -> int:
+    if unlogged:
+        print(f"company: {unlogged}.", file=sys.stderr)
+    return EXIT_OK if result == probe.PASSED and not unlogged else EXIT_REFUSED
+
+
+def _guardrail_probe() -> int:
+    report, pulled, unlogged = probe.guardrails()
+    if isinstance(report, governor.Refused):
+        _print_refusal(report)
+        return EXIT_REFUSED
+    print("\n".join(probe.probe_lines(report)))
+    if pulled is not None:
+        _print_pull(pulled, report.pull_reason)
+    return _probe_exit(report.result, unlogged)
+
+
+def _kill_test() -> int:
+    report, unlogged = probe.kill_test()
+    if isinstance(report, governor.Refused):
+        _print_refusal(report)
+        return EXIT_REFUSED
+    print("\n".join(probe.kill_lines(report)))
+    return _probe_exit(report.result, unlogged)
+
+
+def _scan_reading(args) -> int:
+    try:
+        scan = probe.scan_reading(args.saved_run)
+    except probe.ScanRefused as refused:
+        print(f"company: refused: {refused}", file=sys.stderr)
+        return EXIT_REFUSED
+    if scan.fields:
+        print(f"The saved output of run {scan.run} holds account-window fields: {', '.join(scan.fields)}.")
+        print(f"A window's use itself, a used percent, is {'among them' if scan.holds_use else 'not among them'}.")
+    else:
+        print(f"The saved output of run {scan.run} holds no account-window fields.")
+    return EXIT_OK
+
+
+def _preflight(args) -> int:
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, "preflight", "board") or _is_broken(ledger):
+        return EXIT_REFUSED
+    found = preflight.steps(ledger.read())
+    print("\n".join(preflight.report(found)))
+    return EXIT_OK if all(step.passed for step in found) else EXIT_REFUSED
+
+
+def _account_checked(args) -> int:
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, "account-checked", "board") or _is_broken(ledger):
+        return EXIT_REFUSED
+    try:
+        event = ledger.append("account-checked", {"message": args.message} if args.message else {}, "board")
+    except (AppendRefused, LedgerBroken) as refused:
+        print(f"company: refused: {refused}. Nothing was recorded.", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"Recorded event {event['seq']}: you checked that extra usage is off and that the design's dependencies still hold. Say it again before each go.")
+    return EXIT_OK
+
+
+def _audit_runs(args, events: list[dict]) -> list[str]:
+    if args.audited_run:
+        return [args.audited_run]
+    return (audit.sample if args.sample else audit.full_pass)(events, times.now())
+
+
+def _audit(args) -> int:
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, "session-started", "launcher") or _is_broken(ledger):
+        return EXIT_REFUSED
+    runs = _audit_runs(args, ledger.read())
+    if not runs:
+        print("Nothing to audit: no cell's session with a transcript ended in that time.")
+        return EXIT_OK
+    answer = launcher.start("auditor", scheduled=args.scheduled, audited_runs=tuple(runs))
+    code = _session_exit(answer)
+    if isinstance(answer, governor.Refused):
+        return code
+    _report_findings(answer.session)
+    return max(code, _confirm_by_code())
+
+
+def _report_findings(session: str) -> None:
+    """How many this session wrote, which a ledger gone bad cannot make a failure of the audit that ran."""
+    try:
+        events = Ledger().read()
+    except (LedgerBroken, OSError) as error:
+        print(f"company: this audit's findings cannot be counted: {error}. See `company ledger verify`.", file=sys.stderr)
+        return
+    print(f"Findings from this audit: {audit.findings_of(events, session)}. `company digest` shows each.")
 
 
 def _governor_check(args) -> int:
@@ -365,7 +648,11 @@ def _kill(args) -> int:
     except killswitch.PullRefused as refused:
         print(f"company: refused: {refused}.", file=sys.stderr)
         return EXIT_REFUSED
-    print(f"The kill switch is pulled: {args.reason}.")
+    return _print_pull(pulled, args.reason)
+
+
+def _print_pull(pulled: killswitch.Pulled, reason: str) -> int:
+    print(f"The kill switch is pulled: {reason}.")
     for step in pulled.steps:
         print(f"{step.step} {step.target}: {step.result}" + (f" ({step.detail})" if step.detail else ""))
     if pulled.unlogged:
@@ -399,11 +686,19 @@ def _resume(args) -> int:
     return EXIT_OK
 
 
+def _unit_environment() -> dict[str, str]:
+    """What the units carry for a job that starts a session; with none of it, say what that job will do."""
+    found = launcher.unit_environment()
+    if not found:
+        print(f"company: {launcher.UNITS_HAVE_NO_BINARY}.", file=sys.stderr)
+    return found
+
+
 def _schedule_install(args) -> int:
     if _refused_inside_a_session(Ledger(), "schedule-install", "board"):
         return EXIT_REFUSED
     try:
-        schedule.install()
+        schedule.install(_unit_environment())
     except schedule.ScheduleFailed as failed:
         print(f"company: {failed}. Nothing was turned on.", file=sys.stderr)
         return EXIT_REFUSED
@@ -416,7 +711,7 @@ def _schedule_enable(args) -> int:
     if _refused_inside_a_session(ledger, "schedule-enabled", "board") or _is_broken(ledger):
         return EXIT_REFUSED
     try:
-        event = schedule.enable(args.message)
+        event = schedule.enable(args.message, _unit_environment())
     except schedule.ScheduleFailed as failed:
         print(f"company: {failed}. The ledger says the schedule is off, so no timer runs a job.", file=sys.stderr)
         return EXIT_REFUSED
@@ -455,18 +750,71 @@ def _schedule_list(args) -> int:
 def _schedule_run(args) -> int:
     """What a timer's service runs: the ledger decides again, so a timer left on still runs nothing."""
     ledger = Ledger()
-    if _is_broken(ledger):
+    if _refused_inside_a_session(ledger, "job-failed", "scheduler") or _is_broken(ledger):
         return EXIT_REFUSED
     events = ledger.read()
     refusal = schedule.run_refusal(events)
     if refusal:
         print(f"company: refused: {refusal}. The job {args.job} did not run.", file=sys.stderr)
         return EXIT_REFUSED
-    job = schedule.job(args.job)
-    if not job.is_due(events, times.now()):
-        print(f"The job {args.job} is not due.")
-        return EXIT_OK
-    return main(list(job.command))
+    code = _job_exit(schedule.job(args.job), events)
+    if code != EXIT_OK:
+        _record_failed_job(args.job, code)
+    return code
+
+
+def _job_exit(job: schedule.Job, events: list[dict]) -> int:
+    """How the job ended: one that raises has failed like one that refuses, and its traceback goes to its output."""
+    try:
+        if not job.is_due(events, times.now()):
+            print(f"The job {job.name} is not due.")
+            return EXIT_OK
+        return main(list(job.command))
+    except (Exception, SystemExit):  # noqa: BLE001 - whatever ended the job, Daniel must read that it failed.
+        traceback.print_exc()
+        return EXIT_REFUSED
+
+
+def _record_failed_job(name: str, code: int) -> None:
+    """In this home's ledger, whichever home the job ran in, since a job's own output reaches only a journal Daniel does not read."""
+    try:
+        Ledger().append("job-failed", {"job": name, "exit": code}, "scheduler")
+    except (AppendRefused, LedgerBroken, OSError) as refused:
+        print(f"company: the job {name} failed, and the ledger could not record it: {refused}. See `company ledger verify`.", file=sys.stderr)
+
+
+def _paper_check(args) -> int:
+    """One read-only call to the paper host, which writes nothing."""
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, "paper-reading", "runner") or _is_broken(ledger):
+        return EXIT_REFUSED
+    held = kill_state.refusal(ledger.read())
+    if held:
+        print(f"company: refused: {held}, so `{kill_state.RESUME}` comes first. The paper account was not called.", file=sys.stderr)
+        return EXIT_REFUSED
+    try:
+        state = paper.Account(paper.transport()).read()
+    except paper.PaperFailed as failed:
+        print(f"company: the paper account was not read: {failed}.", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"PAPER, no real money: the paper account's status is {state.status}, and its equity is {paper.money(state.equity)}.")
+    return EXIT_OK
+
+
+def _paper_tick(args) -> int:
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, "paper-order", "runner") or _is_broken(ledger):
+        return EXIT_REFUSED
+    try:
+        seconds = settings.positive_number(settings.load(), "backtest_max_seconds")
+        paper_period.tick(paper.Account(paper.transport()), paper.MarketData(paper.transport()), seconds, print)
+    except settings.SettingsRefused as refused:
+        print(f"company: refused: {refused}. The paper tick did not run.", file=sys.stderr)
+        return EXIT_REFUSED
+    except (paper_period.TickRefused, paper.PaperFailed, AppendRefused, LedgerBroken, OSError) as stopped:
+        print(f"company: the paper tick stopped here, with no real money involved: {str(stopped).rstrip('.')}. What it wrote stands.", file=sys.stderr)
+        return EXIT_REFUSED
+    return EXIT_OK
 
 
 # `settings init`'s flags: every one is the setting of the same name, and those with no value in the design are required.
@@ -528,6 +876,47 @@ def _parser() -> argparse.ArgumentParser:
     )
     charge.set_defaults(run=_treasurer_charge)
 
+    check = actions.add_parser("check", help="Check each promise now settled, once, and weigh complaints against the threshold.")
+    check.set_defaults(run=_treasurer_check)
+
+    promises = commands.add_parser("promise", help="Daniel's word on a cell's promise.")
+    actions = promises.add_subparsers(dest="action", required=True)
+
+    kept = actions.add_parser("kept", help="Say a cell's promise was kept, which nothing else can.")
+    kept.add_argument("promise", type=int, help="The seq of its `promise-recorded` event.")
+    kept.add_argument("--on", help="The day it was kept, like 2026-11-05; today if left out.")
+    kept.add_argument("--note", help="What shows it, in your words.")
+    kept.set_defaults(run=_promise_kept)
+
+    cells = commands.add_parser("cell", help="Daniel's word on a pause, which nothing else lifts.")
+    actions = cells.add_subparsers(dest="action", required=True)
+
+    lift = actions.add_parser("resume", help="Lift a cell's pause, or the company-wide pause of new outside actions.")
+    which = lift.add_mutually_exclusive_group(required=True)
+    which.add_argument("--bet", help="The bet whose cell may launch again.")
+    which.add_argument("--outside-actions", action="store_true", help="Say you have reviewed the complaints, and new outside actions may start again.")
+    lift.add_argument("--message", help="The Discord id of Daniel's word, if there is one.")
+    lift.set_defaults(run=_cell_resume)
+
+    complaints = commands.add_parser("complaint", help="What reached Daniel about the company.")
+    actions = complaints.add_subparsers(dest="action", required=True)
+
+    grievance = actions.add_parser("record", help="Record a complaint, and weigh the threshold that pauses new outside actions.")
+    grievance.add_argument("--source", required=True, help="Where it reached you.")
+    grievance.add_argument("--summary", required=True)
+    grievance.add_argument("--bet", help="The bet it is about, if one.")
+    grievance.add_argument("--contact", help="Who it came from, if that matters.")
+    grievance.set_defaults(run=_complaint_record)
+
+    flags = commands.add_parser("spam-flag", help="What a platform or person flagged as spam.")
+    actions = flags.add_subparsers(dest="action", required=True)
+
+    flagged = actions.add_parser("record", help="Record a spam flag, and weigh the threshold that pauses new outside actions.")
+    flagged.add_argument("--source", required=True, help="Where it reached you.")
+    flagged.add_argument("--bet", help="The bet it is about, if one.")
+    flagged.add_argument("--contact", help="Who was flagged about, if that matters.")
+    flagged.set_defaults(run=_spam_flag_record)
+
     minutes = commands.add_parser("minutes", help="Daniel's own word on the minutes charged.")
     actions = minutes.add_subparsers(dest="action", required=True)
 
@@ -584,6 +973,40 @@ def _parser() -> argparse.ArgumentParser:
     begin.add_argument("--scheduled", action="store_true", help="Start as a scheduled session, which needs the schedule on and no word.")
     begin.set_defaults(run=_session_start)
 
+    tries = actions.add_parser("probe", help="Run the cheap session that tries each forbidden action on decoys; any that works pulls the kill switch.")
+    tries.add_argument("--kill-test", action="store_true", help="Instead, start a probe that waits, stop it with the kill switch's stop step, show nothing is left, and resume.")
+    tries.set_defaults(run=_session_probe)
+
+    scans = actions.add_parser("scan-reading", help="Say whether a run's saved output holds any account-window fields, and which; it reads that one file.")
+    scans.add_argument("saved_run", metavar="run", help="The run, as `session-started` names it.")
+    scans.set_defaults(run=_scan_reading)
+
+    ready = commands.add_parser("preflight", help="List each of Daniel's steps from S3 to S7 as passed or open, with what closes it. It adds nothing to the ledger, and never reads the key.")
+    ready.set_defaults(run=_preflight)
+
+    the_account = commands.add_parser("account", help="Daniel's word on what no code can see of the account.")
+    actions = the_account.add_subparsers(dest="action", required=True)
+
+    checked = actions.add_parser("checked", help="Say you have checked that extra usage is off and that the design's dependencies still hold; say it before each go.")
+    checked.add_argument("--message", help="The Discord id of Daniel's word, if there is one.")
+    checked.set_defaults(run=_account_checked)
+
+    audits = commands.add_parser("audit", help="Run the Auditor on a recorded session, on a different model from the cell's.")
+    which = audits.add_mutually_exclusive_group(required=True)
+    which.add_argument("audited_run", nargs="?", metavar="run", help="The run to audit, as `session-started` names it.")
+    which.add_argument("--sample", action="store_true", help="Audit one of the last day's cells' runs, chosen by code.")
+    which.add_argument("--full", action="store_true", help="Audit every cell's run of the last seven days.")
+    audits.add_argument("--scheduled", action="store_true", help="Start as a scheduled session, which needs the schedule on and no word.")
+    audits.set_defaults(run=_audit)
+
+    findings = commands.add_parser("finding", help="Daniel's word on the Auditor's findings.")
+    actions = findings.add_subparsers(dest="action", required=True)
+
+    confirm = actions.add_parser("confirm", help="Confirm a finding code could not check, which pauses its cell.")
+    confirm.add_argument("finding", type=int, help="The seq of its `finding` event.")
+    confirm.add_argument("--message", help="The Discord id of Daniel's word, if there is one.")
+    confirm.set_defaults(run=_finding_confirm)
+
     stop = commands.add_parser("kill", help="Stop every session, turn off the schedule, rotate each outside account, and hold every launch.")
     stop.add_argument("--reason", default="pulled by hand", help="Why, for the ledger.")
     stop.add_argument("--self-test", action="store_true", help="Run a whole pull in a temporary home of its own, on stubs, and touch nothing here.")
@@ -614,9 +1037,50 @@ def _parser() -> argparse.ArgumentParser:
     firing.add_argument("job", choices=[job.name for job in schedule.JOBS])
     firing.set_defaults(run=_schedule_run)
 
+    account = commands.add_parser("paper", help="The paper account, where no real money is: code alone trades it.")
+    actions = account.add_subparsers(dest="action", required=True)
+
+    probe = actions.add_parser("check", help="Make one read-only call to the paper host, and print the account's status and equity.")
+    probe.set_defaults(run=_paper_check)
+
+    trade = actions.add_parser("tick", help="Run the open paper period once: read the account, close it if due, or run its strategy and place its orders.")
+    trade.set_defaults(run=_paper_tick)
+
     return parser
 
 
+# Controls, formats such as the bidirectional overrides, lone surrogates, and the line and paragraph separators.
+_NOT_FOR_A_SCREEN = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
+
+
+class _Screen:
+    """An output stream that writes no character that could move a terminal's cursor, reorder its text, or fail to encode.
+
+    What a cell or a session wrote reaches Daniel's screen, on the page they read about it, so this holds for all that the command prints.
+    It keeps newlines, which the command's own lines need, so text an agent wrote is put on one line where it is read.
+    """
+
+    def __init__(self, stream: TextIO):
+        self._stream = stream
+
+    def write(self, text: str) -> int:
+        return self._stream.write("".join(character for character in text if character in "\n\t" or unicodedata.category(character) not in _NOT_FOR_A_SCREEN))
+
+    def __getattr__(self, name: str):
+        return getattr(self._stream, name)
+
+
+@contextlib.contextmanager
+def _printable_output() -> Iterator[None]:
+    stdout, stderr = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = cast(TextIO, _Screen(stdout)), cast(TextIO, _Screen(stderr))
+    try:
+        yield
+    finally:
+        sys.stdout, sys.stderr = stdout, stderr
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
-    return args.run(args)
+    with _printable_output():
+        args = _parser().parse_args(argv)
+        return args.run(args)

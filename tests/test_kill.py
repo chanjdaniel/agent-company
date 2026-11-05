@@ -17,7 +17,7 @@ from pathlib import Path
 
 import audit_guard
 import pytest
-from session_checks import events, pid_is_running, wait_for
+from session_checks import events, patch_every_company, pid_is_running, wait_for
 from usage_records import TEAM, start_session
 
 from company import cli, kill_state, killswitch, launcher, paths, settings
@@ -120,7 +120,8 @@ def test_with_nothing_running_it_still_holds_every_launch(company, board):
 
     assert done.returncode == 0, done.stdout + done.stderr
     assert company("governor", "check", "probe").returncode == 1
-    assert events("kill-step") == [event for event in events("kill-step") if event["step"] == "schedule"]
+    # Only what `settings init` lists by default, the paper key, which is not there.
+    assert [(event["step"], event["target"], event["result"]) for event in events("kill-step")] == [("schedule", "timers", "turned-off"), ("rotation", "paper", "no-key")]
 
 
 def test_a_finished_session_is_not_counted_as_stopped(company, stub, board):
@@ -836,16 +837,7 @@ def test_the_self_test_leaves_nothing_of_its_own_behind(company, monkeypatch, tm
 
 def test_a_self_test_that_finds_a_broken_stop_fails(tmp_path, monkeypatch):
     # Every `company` it starts has a stop that does nothing: it must say so, and still end what it started.
-    wrapper = tmp_path / "pythonpath" / "sitecustomize.py"
-    wrapper.parent.mkdir()
-    wrapper.write_text(
-        f"import sys\nsys.path.insert(0, {os.environ['PYTHONPATH']!r})\n"
-        "import audit_guard\naudit_guard.install_from_env()\n"
-        "from company import kill_state, launcher\n"
-        "launcher.running_sessions = lambda: []\n"
-        "kill_state.present = lambda: False\n"
-    )
-    monkeypatch.setenv("PYTHONPATH", str(wrapper.parent))
+    patch_every_company(tmp_path, monkeypatch, "from company import kill_state, launcher", "launcher.running_sessions = lambda: []", "kill_state.present = lambda: False")
     monkeypatch.setattr(killswitch, "_TEST_WAIT_SECONDS", 1)
 
     checks = killswitch.self_test()
@@ -900,7 +892,7 @@ def assert_each_pull_once_with_its_steps():
     assert sorted(event["reason"] for event in pulled) == ["first", "second"]
     for event in pulled:
         steps = [found for found in events("kill-step") if found.get("pull") == event.get("pull")]
-        assert [found["target"] for found in steps] == ["timers"], event["reason"]
+        assert [found["target"] for found in steps] == ["timers", "paper"], event["reason"]
 
 
 def test_two_pulls_that_overlap_on_a_whole_ledger_are_each_written_once(company, board, systemctl):
@@ -1177,7 +1169,7 @@ def test_a_resume_while_a_pull_is_still_running_is_refused_and_says_so(company, 
     assert "pulled by event" in company("governor", "check", "probe").stdout
     assert company("resume").returncode == 0
     assert company("governor", "check", "probe").returncode == 0
-    assert [event["target"] for event in events("kill-step")] == ["timers"]
+    assert [event["target"] for event in events("kill-step")] == ["timers", "paper"]
 
 
 def test_a_pull_that_died_part_way_does_not_stop_the_resume(company, board, systemctl):

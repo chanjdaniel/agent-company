@@ -19,7 +19,9 @@ from datetime import datetime
 from pathlib import Path
 
 from company import paths, times
-from company.contract import Contract
+from company.contract import OUTSIDE_ACTIONS_SCOPE, Contract
+
+OUTSIDE_ACTIONS_PAUSED = "outside-actions-paused"
 
 
 class AppendRefused(Exception):
@@ -84,13 +86,23 @@ class Ledger:
         self.home.mkdir(parents=True, exist_ok=True, mode=0o700)
         with self._locked(fcntl.LOCK_EX):
             tail = self._tail()
-            reason = self.contract.refusal(kind, fields, writer, tail.seq + 1)
+            reason = self.contract.refusal(kind, fields, writer, tail.seq + 1) or self._outside_actions_held(kind)
             if reason is None:
                 return self._write(kind, fields, writer, tail)
             refusal = self._write_refusal(kind, writer, reason, refusal_context, self.contract.refusal_writer(writer), tail)
             raise AppendRefused(
                 self.contract.safe_label(kind), self.contract.safe_label(writer), reason, refusal["seq"]
             )
+
+    def _outside_actions_held(self, kind: str) -> str | None:
+        """Why this kind is held by the company-wide pause, or None; every path to the ledger passes here, and only such a kind reads it."""
+        if kind not in self.contract.outside_actions:
+            return None
+        for line in reversed(self._lines()):
+            event = _parse(line) or {}
+            if event.get("kind") in ("cell-paused", "cell-resumed") and event.get("scope") == OUTSIDE_ACTIONS_SCOPE:
+                return OUTSIDE_ACTIONS_PAUSED if event["kind"] == "cell-paused" else None
+        return None
 
     def refuse(self, kind: str, writer: str, reason: str, refusal_context: dict | None = None) -> dict:
         """Log an agent's attempt refused before any append, such as a tool outside its role, and return the event.

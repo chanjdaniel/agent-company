@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from company import (
+    audit,
     banned,
     goals,
     governor,
@@ -35,6 +36,7 @@ from company import (
     times,
     tools,
     usage,
+    views,
 )
 from company.ledger import AppendRefused, Ledger, LedgerBroken
 
@@ -83,13 +85,13 @@ _MAX_WEIGHT = "max-weight"
 _SIGNALLED = "launcher-signalled"
 _GONE = "launcher-gone"
 _KILLED = "kill-switch"
-_NO_TRANSCRIPT = "none"
+_NOT_RECORDED = "not-recorded"
 _SESSION_ENDS = ("session-ended", "session-stopped")
 
 
 @dataclass(frozen=True)
 class Finished:
-    """A session that ran. `stopped` is why the launcher stopped it, and `unlogged` what the ledger could not take."""
+    """A session that ran. `stopped` is why the launcher stopped it, and `unlogged` what its end could not do."""
 
     session: str
     run: str
@@ -110,6 +112,19 @@ def binary() -> str | None:
     chosen = os.environ.get(BINARY_VARIABLE)
     found = chosen if chosen else shutil.which("claude")
     return os.path.abspath(found) if found else None
+
+
+# For a command that writes the units, and finds nothing for them to carry.
+UNITS_HAVE_NO_BINARY = (
+    f"no `claude` is on PATH here, so a job that starts a session will look on the user manager's own path, and be refused with no-binary if it is not there. "
+    f"Install it, or set {BINARY_VARIABLE}, and run this again"
+)
+
+
+def unit_environment() -> dict[str, str]:
+    """What a timer's service must be told, since the user manager's own path may not hold `claude`."""
+    found = binary()
+    return {BINARY_VARIABLE: found} if found else {}
 
 
 def child_environment(session: str | None = None) -> dict[str, str]:
@@ -136,7 +151,7 @@ def session_settings(workspace: Path) -> dict:
     ticket 13's probe tries. A deeper one gets past the shell, and the next launch in that workspace refuses it.
     """
     protected = (paths.config(), paths.claude_directory())
-    rules = [f"{_absolute(root)}/**" for root in (*protected, paths.runs())]
+    rules = [f"{_absolute(root)}/**" for root in (*protected, paths.runs(), paths.market_data(), paths.configurations())]
     rules += [_absolute(paths.home() / name) for name in ("ledger*", "*.lock", "*.state", "kill.state/**")]
     in_workspace = [f"{_absolute(workspace)}/**/{name}" for name in CONFIG_NAMES]
     deny = [f"{tool}({rule})" for tool in ("Read", "Edit") for rule in rules]
@@ -169,16 +184,24 @@ def session_settings(workspace: Path) -> dict:
     }
 
 
-def _mcp_config(role: str, bet: str | None, session: str) -> dict:
+def _mcp_config(role: str, bet: str | None, session: str, backtest_seconds: float | None = None, audited_sessions: tuple[str, ...] = ()) -> dict:
     # `-P`: this starts in the workspace, and with the working directory on its path a file there could run as this code.
     arguments = ["-P", "-m", "company.tools", "--role", role, "--session", session, *(("--bet", bet) if bet else ())]
+    # On the command line, as the role and bet are, so that the server needs no path to Daniel's settings.
+    # A cell's server reaches the broker's bars for a registration, so it is told where the key is, and of Daniel's directory nothing more.
+    arguments += ["--backtest-seconds", str(backtest_seconds), "--paper-key", str(paths.paper_key())] if backtest_seconds is not None else []
+    # On the command line too, so that a finding can name only a session this Auditor was given.
+    arguments += [argument for audited in audited_sessions for argument in ("--audited-session", audited)]
     server = {"type": "stdio", "command": sys.executable, "args": arguments, "env": {"COMPANY_HOME": str(paths.home()), SESSION_VARIABLE: session}}
     return {"mcpServers": {"company": server}}
 
 
+def _allowed_tools(role: str) -> tuple[str, ...]:
+    return (*ROLE_BUILT_INS[role], *(f"mcp__company__{name}" for name in tools.ROLE_TOOLS[role]))
+
+
 def _command(claude: str, role: str, session: str, model: str, mcp: Path, session_file: Path) -> list[str]:
     built_in = ROLE_BUILT_INS[role]
-    company_tools = [f"mcp__company__{name}" for name in tools.ROLE_TOOLS[role]]
     # The prompt goes on stdin, so that none of these flags that take many values can swallow it.
     return [
         claude, "-p",
@@ -191,7 +214,7 @@ def _command(claude: str, role: str, session: str, model: str, mcp: Path, sessio
         "--permission-mode", "dontAsk",
         "--model", model,
         "--tools", ",".join(built_in),
-        "--allowedTools", ",".join((*built_in, *company_tools)),
+        "--allowedTools", ",".join(_allowed_tools(role)),
     ]  # fmt: skip
 
 
@@ -201,15 +224,69 @@ def _model(loaded: dict, role: str) -> str:
     return settings.text(loaded, "auditor_model" if role == "auditor" else "cell_model")
 
 
+def _audited(runs: tuple[str, ...]) -> tuple[audit.Subject, ...]:
+    if not runs:
+        return ()
+    try:
+        return audit.subjects(Ledger().read(), runs)
+    except audit.NotAuditable as refused:
+        raise _Refuse("audit", str(refused), audit.FIX_RUN) from None
+    except (LedgerBroken, OSError) as error:
+        raise _Refuse("ledger", f"no-ledger: the ledger could not be read for this audit: {error}", governor.FIX_LEDGER) from None
+
+
+def _check_independent(loaded: dict, model: str, given: tuple[audit.Subject, ...]) -> None:
+    """The Auditor's independence is a different model and no more, so nothing short of that may start."""
+    if not any(audit.same_family(model, other) for other in (settings.text(loaded, "cell_model"), *(subject.model for subject in given))):
+        return
+    reason = (
+        f"same-model: the Auditor's model {model} is the audited cell's, by name or by family, and a different Claude model is the only independence it has: "
+        f'see "{audit.RECORDED_GAP}" in docs/design.md'
+    )
+    raise _Refuse("model", reason, f"{settings.SET} auditor_model <a Claude model of another family than {model}>")
+
+
+def _copies_stayed(workspace: Path) -> str | None:
+    """Remove an Auditor's copies; what stayed, for Daniel, who is then the one to remove it."""
+    try:
+        audit.remove_context(workspace)
+    except OSError as error:
+        return f"an Auditor's copies stayed in {workspace}: {error}. Remove them by hand"
+    return None
+
+
+def _take_copies_away(workspace: Path) -> None:
+    """Remove an Auditor's copies when no session's end will come to do it, saying what stayed."""
+    stayed = _copies_stayed(workspace)
+    if stayed:
+        print(f"company: {stayed}.", file=sys.stderr)
+
+
+def _give_context(role: str, bet: str | None, workspace: Path, given: tuple[audit.Subject, ...]) -> None:
+    """Put in the workspace what the role reads of the home, which it cannot reach for itself; of an Auditor's copies, all or none."""
+    try:
+        if role == "cell" and bet:
+            views.write(workspace / views.FILE, views.lines(views.cell_view(Ledger().read(), bet)))
+        elif given:
+            audit.give_context(workspace, given, Ledger().path)
+    except (LedgerBroken, OSError) as error:
+        if given:
+            _take_copies_away(workspace)
+        raise _Refuse("workspace", f"no-context: what this session reads could not be put in its workspace: {error}", f"look at {workspace}, after reading what wrote it") from None
+
+
 def _workspace(chosen: str | None, run: str) -> Path:
     """The session's workspace, which must lie under the company's; with none chosen, a fresh one."""
     root = paths.workspaces()
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    root = root.resolve()
-    if chosen is None:
-        fresh = root / run
-        fresh.mkdir(mode=0o700)
-        return fresh
+    try:
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        root = root.resolve()
+        if chosen is None:
+            fresh = root / run
+            fresh.mkdir(mode=0o700)
+            return fresh
+    except OSError as error:
+        raise _Refuse("workspace", f"no-workspace: a workspace for this session could not be made: {error}", f"make room under {paths.home()}, or mend what the error names") from None
     workspace = Path(chosen).resolve()
     if not workspace.is_dir() or not workspace.is_relative_to(root) or workspace == root:
         raise _Refuse("workspace", f"not-a-workspace: a session's workspace must be a directory under {root}", "start it with no --workspace, or one under that directory")
@@ -235,7 +312,8 @@ def _held_configuration(workspace: Path) -> str | None:
 def _check_workspace(workspace: Path) -> None:
     held = _held_configuration(workspace)
     if held is not None:
-        reason = f"workspace-configures: the workspace holds {held}, which a session must not load"
+        # A folder's name is an agent's to choose, and this reaches Daniel's screen.
+        reason = f"workspace-configures: the workspace holds {' '.join(held.split())}, which a session must not load"
         raise _Refuse("workspace", reason, f"remove it from {workspace}, after reading what wrote it")
 
 
@@ -256,6 +334,18 @@ def _check_form(claude: str, role: str, environment: dict[str, str]) -> None:
     missing = [flag for flag in flags_passed(role) if not re.search(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", done.stdout)]
     if missing:
         raise _Refuse("load-form", "no-load-form: its help does not list " + ", ".join(missing), _FIX_LOAD_FORM)
+
+
+def form_problem(role: str) -> str | None:
+    """What keeps a launch of this role from starting on the `claude` here, by its help alone; it starts no session."""
+    claude = binary()
+    if claude is None:
+        return "no-binary: no `claude` is on PATH"
+    try:
+        _check_form(claude, role, child_environment())
+    except _Refuse as refused:
+        return refused.reason
+    return None
 
 
 def _write_json(path: Path, value: dict) -> None:
@@ -335,6 +425,49 @@ def stop_group(group: int) -> bool:
     return _ends_within(_KILLED_GONE_SECONDS, lambda: group_alive(group))
 
 
+def _proc_fields(pid: int, name: str) -> list[bytes]:
+    """A process's NUL-separated `cmdline` or `environ`; nothing if it has gone or is not ours to read."""
+    try:
+        return Path(f"/proc/{pid}/{name}").read_bytes().split(b"\0")
+    except OSError:
+        return []
+
+
+@dataclass(frozen=True)
+class SessionProcess:
+    """A process still running on a session's behalf, and enough of it to name it to Daniel."""
+
+    pid: int
+    started: int
+    command: str
+
+
+def session_processes(session: str, group: int | None = None, mark: str | None = None) -> list[SessionProcess]:
+    """Everything running that is this session's, wherever it went: in its group, holding the variable the launcher set, or running `sleep` for the number `mark`.
+
+    A process that left the group with `setsid` is out of a signal's reach, and this is what finds it.
+    Each command is on one line, since its arguments are the session's to write and it reaches Daniel's screen.
+    """
+    wanted = f"{SESSION_VARIABLE}={session}".encode()
+    found = []
+    for pid, stat in _Processes().stats.items():
+        if pid == os.getpid() or stat.state == "Z":
+            continue
+        command = _proc_fields(pid, "cmdline")
+        marked = mark is not None and any(part == mark.encode() or f"sleep {mark}".encode() in part for part in command)
+        if stat.group == group or marked or wanted in _proc_fields(pid, "environ"):
+            found.append(SessionProcess(pid, stat.started, " ".join(b" ".join(command).decode("utf-8", "replace").split())[:200]))
+    return sorted(found, key=lambda process: process.pid)
+
+
+def end_processes(processes: list[SessionProcess]) -> None:
+    """Kill these, each only if it is still the process that was found."""
+    for process in processes:
+        if _alive(process.pid, process.started):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(process.pid, signal.SIGKILL)
+
+
 def _transcript_source(session: str) -> Path | None:
     """Where Claude Code keeps this session's transcript, in whichever project directory it chose."""
     found = sorted(paths.claude_projects().glob(f"*/{session}.jsonl"), key=lambda path: path.stat().st_mtime)
@@ -358,8 +491,8 @@ def _keep_transcript(session: str, run_dir: Path) -> tuple[str, str]:
     """Copy the transcript into the company home, where it outlives Claude Code's clean-up; its path and hash."""
     source = _transcript_source(session)
     if source is None:
-        return _NO_TRANSCRIPT, _NO_TRANSCRIPT
-    copy = run_dir / "transcript.jsonl"
+        return audit.NO_TRANSCRIPT, audit.NO_TRANSCRIPT
+    copy = run_dir / audit.TRANSCRIPT_FILE
     shutil.copyfile(source, copy)
     return str(copy), hashlib.sha256(copy.read_bytes()).hexdigest()
 
@@ -480,6 +613,14 @@ def stop_session(found: Running) -> bool:
     return stopped
 
 
+def _log_tools_outside(ledger: Ledger, session: str, run_dir: Path) -> None:
+    """Log what an Auditor tried outside its tools."""
+    lines = _lines(run_dir / "output.jsonl") + _lines(run_dir / audit.TRANSCRIPT_FILE)
+    context = {"session": session}
+    for name in audit.tools_outside(lines, _allowed_tools("auditor")):
+        ledger.refuse("tool-call", audit.AUDITOR, "tool-not-in-role", {**context, "tool": name.lower()})
+
+
 def _close_if_gone(ledger: Ledger, started: dict) -> None:
     run_dir = paths.runs() / Path(started["run"]).name
     state = _session_state(run_dir / "session.json")
@@ -498,6 +639,11 @@ def _close_if_gone(ledger: Ledger, started: dict) -> None:
     elapsed = _elapsed_minutes(started["ts"])
     if elapsed is not None:
         fields["elapsed_minutes"] = elapsed
+    if started["role"] == audit.AUDITOR:
+        # A session given nothing to audit leaves its workspace as it was.
+        if started.get("audited_runs"):
+            _take_copies_away(paths.workspaces() / Path(started["run"]).name)
+        _log_tools_outside(ledger, started["session"], run_dir)
     ledger.append("session-stopped", fields, "launcher")
 
 
@@ -539,22 +685,31 @@ class _Launch:
     command: list[str]
     max_minutes: Fraction
     max_weight: Fraction
+    audited_runs: tuple[str, ...]
 
 
-def _prepare(admitted: governor.Admitted, prompt: str, chosen: str | None) -> _Launch:
+def _prepare(admitted: governor.Admitted, prompt: str, chosen: str | None, audited_runs: tuple[str, ...]) -> _Launch:
     """Everything a launch needs short of starting it, where each thing wrong refuses and nothing has started."""
     role, bet = admitted.role, admitted.bet
     try:
         goal = goals.load(role)
     except goals.GoalRefused as refused:
         raise _Refuse("goal", str(refused), "fix the goal text in the package") from None
+    except OSError as error:
+        raise _Refuse("goal", f"no-goal: the goal text could not be read: {error}", "fix the goal text in the package") from None
+    given = _audited(audited_runs)
     try:
         loaded = settings.load()
         model = _model(loaded, role)
+        if role == "auditor":
+            _check_independent(loaded, model, given)
         max_minutes = Fraction(str(settings.positive_number(loaded, "session_max_minutes")))
         max_weight = Fraction(str(settings.positive_number(loaded, "session_max_weight")))
+        backtest_seconds = settings.positive_number(loaded, "backtest_max_seconds") if role == "cell" else None
     except settings.SettingsRefused as refused:
         raise _Refuse("settings", f"{refused.code}: {refused}", refused.fix) from None
+    except (LedgerBroken, OSError) as error:
+        raise _Refuse("settings", f"no-settings: the settings could not be read: {error}", governor.FIX_LEDGER) from None
     claude = binary()
     if claude is None:
         raise _Refuse("binary", "no-binary: no `claude` is on PATH", f"install Claude Code, or set {BINARY_VARIABLE}")
@@ -564,13 +719,19 @@ def _prepare(admitted: governor.Admitted, prompt: str, chosen: str | None) -> _L
     workspace = _workspace(chosen, run)
     _check_workspace(workspace)
     run_dir = paths.runs() / run
-    run_dir.mkdir(parents=True, mode=0o700)
     mcp, session_file = run_dir / "mcp.json", run_dir / "settings.json"
-    _write_json(mcp, _mcp_config(role, bet, session))
-    _write_json(session_file, session_settings(workspace))
-    (run_dir / "prompt.txt").write_text(goal.text + (f"\n{prompt}\n" if prompt else ""))
+    task = "".join(f"\n{part}\n" for part in (audit.prompt(given) if given else "", prompt) if part)
+    try:
+        run_dir.mkdir(parents=True, mode=0o700)
+        _write_json(mcp, _mcp_config(role, bet, session, backtest_seconds, tuple(subject.session for subject in given)))
+        _write_json(session_file, session_settings(workspace))
+        (run_dir / "prompt.txt").write_text(goal.text + task)
+    except OSError as error:
+        raise _no_run_files(error) from None
     command = _command(claude, role, session, model, mcp, session_file)
-    return _Launch(role, bet, session, run, run_dir, workspace, model, command, max_minutes, max_weight)
+    # Last, so that nothing above can leave what this copies behind.
+    _give_context(role, bet, workspace, given)
+    return _Launch(role, bet, session, run, run_dir, workspace, model, command, max_minutes, max_weight, audited_runs)
 
 
 def _log_start(launch: _Launch, admitted: governor.Admitted) -> None:
@@ -586,6 +747,8 @@ def _log_start(launch: _Launch, admitted: governor.Admitted) -> None:
     }
     if launch.bet:
         fields["bet"] = launch.bet
+    if launch.audited_runs:
+        fields["audited_runs"] = list(launch.audited_runs)
     Ledger().append("session-started", fields, "launcher")
 
 
@@ -647,32 +810,38 @@ def _watch(process: subprocess.Popen, launch: _Launch, signalled: list[int]) -> 
 
 
 def _finish(launch: _Launch, process: subprocess.Popen, stopped: str | None, began: float) -> Finished:
-    transcript_path, transcript_hash = _NO_TRANSCRIPT, _NO_TRANSCRIPT
-    unlogged = None
+    transcript_path, transcript_hash = audit.NO_TRANSCRIPT, audit.NO_TRANSCRIPT
+    unlogged = []
     try:
         transcript_path, transcript_hash = _keep_transcript(launch.session, launch.run_dir)
     except OSError as error:
-        unlogged = f"the transcript could not be copied: {error}"
+        unlogged.append(f"the transcript could not be copied: {error}")
+    # Before the ledger is asked for anything, so that nothing it refuses can leave the copies there; a session given nothing to audit leaves its workspace as it was.
+    stayed = _copies_stayed(launch.workspace) if launch.audited_runs else None
+    if stayed:
+        unlogged.append(stayed)
     weight = float(_weight(launch.session, launch.run_dir))
     ledger = Ledger()
     try:
+        if launch.role == audit.AUDITOR:
+            _log_tools_outside(ledger, launch.session, launch.run_dir)
         if stopped:
             elapsed = round((time.monotonic() - began) / 60, 3)
             ledger.append("session-stopped", {"session": launch.session, "reason": stopped, "elapsed_minutes": elapsed, "weight": weight}, "launcher")
         fields = {"session": launch.session, "exit": process.returncode, "transcript_path": transcript_path, "transcript_hash": transcript_hash, "weight": weight}
         ledger.append("session-ended", fields, "launcher")
     except (AppendRefused, LedgerBroken, OSError) as error:
-        unlogged = f"the ledger could not take the session's end: {error}"
+        unlogged.append(f"the ledger could not take the session's end: {error}")
     _forget_processes(launch)
-    return Finished(launch.session, launch.run, process.returncode, weight, stopped, unlogged)
+    return Finished(launch.session, launch.run, process.returncode, weight, stopped, "; ".join(unlogged) or None)
 
 
-def _run(launch: _Launch, process: subprocess.Popen) -> Finished:
+def _run(launch: _Launch, process: subprocess.Popen, must_stop: str | None) -> Finished:
     signalled: list[int] = []
     previous = {name: signal.signal(name, lambda number, _: signalled.append(number)) for name in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
     began = time.monotonic()
     try:
-        stopped = _watch(process, launch, signalled)
+        stopped = must_stop or _watch(process, launch, signalled)
         # The session's own leader may be gone with children left behind, so the group is stopped either way.
         stop_group(process.pid)
         process.wait()
@@ -694,26 +863,40 @@ def _charge_at_the_end() -> None:
         print(f"company: the charge at this session's end did not run: {error}", file=sys.stderr)
 
 
-def start(role: str, bet: str | None = None, prompt: str = "", workspace: str | None = None, scheduled: bool = False) -> Finished | governor.Refused:
-    """Run one session from admission to its end; a refused launch starts nothing."""
+def _refuse_prepared(launch: _Launch, refusal: _Refuse) -> governor.Refused:
+    """Refuse a launch whose workspace is filled, taking an Auditor's copies away, since no session's end will come to do it."""
+    if launch.audited_runs:
+        _take_copies_away(launch.workspace)
+    return _refuse(launch.role, launch.bet, refusal)
+
+
+def _no_run_files(error: OSError) -> _Refuse:
+    return _Refuse("run-files", f"no-run-files: this session's own record could not be written: {error}", f"make room under {paths.home()}, or mend what the error names")
+
+
+def start(role: str, bet: str | None = None, prompt: str = "", workspace: str | None = None, scheduled: bool = False, audited_runs: tuple[str, ...] = ()) -> Finished | governor.Refused:
+    """Run one session from admission to its end; a refused launch starts nothing. `audited_runs` names the runs an Auditor is given."""
     with _launch_lock():
         close_gone_sessions()
         admitted = governor.admit(role, bet, scheduled)
         if isinstance(admitted, governor.Refused):
             return admitted
         try:
-            launch = _prepare(admitted, prompt, workspace)
+            launch = _prepare(admitted, prompt, workspace, audited_runs)
         except _Refuse as refusal:
             return _refuse(role, bet, refusal)
         # Preparing takes seconds, and the kill switch may have been pulled since the governor looked.
         if kill_state.present():
-            return _refuse(role, bet, _Refuse("kill", "killed: the kill switch was pulled during this launch", governor.FIX_KILL))
-        _record_processes(launch, None)
+            return _refuse_prepared(launch, _Refuse("kill", "killed: the kill switch was pulled during this launch", governor.FIX_KILL))
+        try:
+            _record_processes(launch, None)
+        except OSError as error:
+            return _refuse_prepared(launch, _no_run_files(error))
         try:
             _log_start(launch, admitted)
         except (AppendRefused, LedgerBroken, OSError) as error:
             _forget_processes(launch)
-            return _refuse(role, bet, _Refuse("ledger", f"unlogged: the session's start could not be logged: {error}", governor.FIX_LEDGER))
+            return _refuse_prepared(launch, _Refuse("ledger", f"unlogged: the session's start could not be logged: {error}", governor.FIX_LEDGER))
         try:
             process = _spawn(launch)
         except OSError as error:
@@ -721,8 +904,14 @@ def start(role: str, bet: str | None = None, prompt: str = "", workspace: str | 
             # If the ledger will not take this either, the next launch closes the session, since it has no group.
             with contextlib.suppress(AppendRefused, LedgerBroken, OSError):
                 Ledger().append("session-stopped", {"session": launch.session, "reason": "not-started"}, "launcher")
-            return _refuse(role, bet, _Refuse("binary", f"no-start: `claude` could not start: {error.strerror}", f"check {launch.command[0]}"))
-        _record_processes(launch, process.pid)
-    finished = _run(launch, process)
+            return _refuse_prepared(launch, _Refuse("binary", f"no-start: `claude` could not start: {error.strerror}", f"check {launch.command[0]}"))
+        must_stop = None
+        try:
+            _record_processes(launch, process.pid)
+        except OSError as error:
+            # A later launcher finds a session's group only by this record, so with none it must not outlive this launcher.
+            must_stop = _NOT_RECORDED
+            print(f"company: this session is being stopped, since its group could not be recorded: {error}.", file=sys.stderr)
+    finished = _run(launch, process, must_stop)
     _charge_at_the_end()
     return finished

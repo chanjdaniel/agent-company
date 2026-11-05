@@ -12,6 +12,7 @@ from fractions import Fraction
 
 from company import (
     contract,
+    honesty,
     kill_state,
     reading,
     schedule,
@@ -26,7 +27,7 @@ ROLES = ("probe", "cell", "strategy", "auditor", "retro")
 GO_SCOPE = "real-sessions"
 FIX_GO = f"company go {GO_SCOPE} --message <Discord id> --sessions <n>"
 FIX_LEDGER = "company ledger verify"
-FIX_PAUSE = "company cell resume"
+FIX_NAME_BET = "name the cell's bet with --bet"
 FIX_KILL = kill_state.RESUME
 SCHEDULE_GATE = "schedule"
 
@@ -82,10 +83,10 @@ def _not_killed(events: list[dict]) -> None:
         raise _Stop("kill", f"killed: {held}", FIX_KILL)
 
 
-def _settings() -> tuple[dict, Fraction, Fraction]:
+def _settings(log_tamper: bool = True) -> tuple[dict, Fraction, Fraction]:
     """The file, with the share as a percent and the floor; every number the later checks read is checked here."""
     try:
-        loaded = settings.load()
+        loaded = settings.load(log_tamper)
         share = Fraction(str(settings.fraction(loaded, "company_share"))) * 100
         floor = Fraction(str(settings.percent(loaded, "team_floor")))
         settings.positive_number(loaded, "monthly_price")
@@ -98,18 +99,29 @@ def _settings() -> tuple[dict, Fraction, Fraction]:
     return loaded, share, floor
 
 
-def _go(events: list[dict]) -> tuple[str, int]:
+def go_words(events: list[dict]) -> list[dict]:
+    """Daniel's words for real launches, oldest first."""
+    return [e for e in events if e["kind"] == "go-given" and e["scope"] == GO_SCOPE]
+
+
+def open_word(events: list[dict]) -> tuple[str, int] | None:
     """The oldest word with launches left, and how many; a launch uses one by citing it in `session-started`."""
-    words = [e for e in events if e["kind"] == "go-given" and e["scope"] == GO_SCOPE]
-    if not words:
-        raise _Stop("go", "no-go: no go-given word is on record", FIX_GO)
     used = Counter(e["gate"] for e in events if e["kind"] == "session-started")
-    for word in words:
+    for word in go_words(events):
         gate = f"go:{word['seq']}"
         left = word["sessions"] - used[gate]
         if left > 0:
             return gate, left
-    raise _Stop("go", "go-used-up: every go-given word's launches are used", FIX_GO)
+    return None
+
+
+def _go(events: list[dict]) -> tuple[str, int]:
+    if not go_words(events):
+        raise _Stop("go", "no-go: no go-given word is on record", FIX_GO)
+    found = open_word(events)
+    if found is None:
+        raise _Stop("go", "go-used-up: every go-given word's launches are used", FIX_GO)
+    return found
 
 
 def _schedule_open(events: list[dict]) -> tuple[str, None]:
@@ -122,18 +134,13 @@ def _schedule_open(events: list[dict]) -> tuple[str, None]:
 def _not_paused(events: list[dict], role: str, bet: str | None) -> None:
     if bet is None:
         if role == "cell":
-            raise _Stop("pause", "no-bet: a cell runs one bet, and with none named its pause cannot be read", FIX_PAUSE)
+            raise _Stop("pause", "no-bet: a cell runs one bet, and with none named its pause cannot be read", FIX_NAME_BET)
         return
     if not contract.is_bet(bet):
-        raise _Stop("pause", "bad-bet: the bet named is no bet's id, so its pause cannot be read", FIX_PAUSE)
-    pauses = (
-        e
-        for e in reversed(events)
-        if e["kind"] in ("cell-paused", "cell-resumed") and e["scope"] == "cell" and e.get("bet", bet) == bet
-    )
-    newest = next(pauses, None)
-    if newest is not None and newest["kind"] == "cell-paused":
-        raise _Stop("pause", f"paused: the bet {bet} was paused by event {newest['seq']}", FIX_PAUSE)
+        raise _Stop("pause", "bad-bet: the bet named is no bet's id, so its pause cannot be read", FIX_NAME_BET)
+    pause = honesty.pause_in_effect(events, honesty.CELL_SCOPE, bet)
+    if pause is not None:
+        raise _Stop("pause", f"paused: the bet {bet} was paused by event {pause['seq']}", honesty.resume_command(bet))
 
 
 def _unreadable(found: reading.Unreadable) -> _Stop:
@@ -182,6 +189,35 @@ def _under_share(windows: tuple[treasurer.WindowShare, ...], share: Fraction) ->
             reason = f"share-used: the company has used {float(window.company_used):.2f}% of {seen.window}, at or past its share of {float(share):g}%"
             fix = f"wait for the reset at {times.stamp(seen.resets_at)}; only `{settings.SET} company_share` moves the share"
             raise _Stop("share", reason, fix, _numbers(window))
+
+
+@dataclass(frozen=True)
+class Blocked:
+    """What would refuse a launch, for a report that promises to write nothing."""
+
+    reason: str
+    fix: str
+
+
+def settings_blocked() -> Blocked | None:
+    """What step 3 would say of the settings, with nothing logged."""
+    try:
+        _settings(log_tamper=False)
+    except _Stop as stop:
+        return Blocked(stop.reason, stop.fix)
+    return None
+
+
+def room_blocked(events: list[dict]) -> Blocked | None:
+    """What steps 6 to 8 would say of the reading, the floor and the share, with nothing logged."""
+    try:
+        loaded, share, floor = _settings(log_tamper=False)
+        windows = _windows(events, loaded, times.now().replace(microsecond=0))
+        _under_floor(windows, floor)
+        _under_share(windows, share)
+    except _Stop as stop:
+        return Blocked(stop.reason, stop.fix)
+    return None
 
 
 def _log(role: str, bet: str | None, stop: _Stop) -> int | None:

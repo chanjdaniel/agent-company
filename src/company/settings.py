@@ -259,16 +259,28 @@ def _portfolio(settings: dict, key: str) -> None:
         portfolio_number(settings, name)
 
 
+# Far past any trailing window worth having, and short of a date that would overflow.
+_MAX_THRESHOLD_DAYS = 3650
+
+
 def _complaint_threshold(settings: dict, key: str) -> None:
     value = settings.get(key)
     if (
         not isinstance(value, dict)
         or not _is_amount(value.get("count"))
+        or not value["count"] > 0
         or not _is_amount(value.get("days"))
+        or not 0 < value["days"] <= _MAX_THRESHOLD_DAYS
         or not _is_amount(value.get("outside_action_fraction"))
         or value["outside_action_fraction"] > 1
     ):
         raise SettingsRefused(f"the setting {key} is not a count, a number of days and a fraction of outside actions")
+
+
+def complaint_threshold(settings: dict) -> dict:
+    """The flags that pause new outside actions: a `count`, over `days`, or an `outside_action_fraction` of those actions if that is higher."""
+    _complaint_threshold(settings, "complaint_threshold")
+    return settings["complaint_threshold"]
 
 
 def minutes_table(settings: dict) -> dict[str, int | float]:
@@ -334,6 +346,9 @@ def accounts_for_kill() -> tuple[list, str | None]:
     return (value, None) if isinstance(value, list) else ([], "the settings hold no list of outside accounts, so none was rotated")
 
 
+# What `init` writes for `outside_accounts`, so that a pull moves the paper key with no step of Daniel's.
+PAPER_ACCOUNTS = [{"name": "paper", "rotation": MOVE_KEY, "key_file": paths.PAPER_KEY}]
+
 # Every setting the file may hold, with what `init` and `set` check it by.
 KEYS: dict[str, Callable[[dict, str], object]] = {
     "company_share": fraction,
@@ -345,6 +360,7 @@ KEYS: dict[str, Callable[[dict, str], object]] = {
     "reading_max_age_minutes": positive_number,
     "session_max_minutes": positive_number,
     "session_max_weight": positive_number,
+    "backtest_max_seconds": positive_number,
     "daily_minutes": positive_number,
     "weekly_send_cap": _whole_number,
     "minutes_table": lambda settings, key: minutes_table(settings),
@@ -360,6 +376,7 @@ _OPTIONAL = {"weekly_send_cap"}
 _DESIGN_VALUES = {
     "cell_model": "claude-opus-5-5",
     "auditor_model": "claude-sonnet-5-5",
+    "backtest_max_seconds": 60,
     "daily_minutes": 15,
     "minutes_table": {"templated-approval": 0.5, "message-review": 2, "message-send": 0.5, "new-public-artifact": 5},
     "complaint_threshold": {"count": 2, "days": 30, "outside_action_fraction": 0.02},
@@ -373,6 +390,6 @@ _DESIGN_VALUES = {
         "closure_kills": 2,
         "margin_lookback_weeks": 4,
     },
-    "outside_accounts": [],
+    "outside_accounts": PAPER_ACCOUNTS,
     "usage_day_dirs": [],
 }

@@ -3,12 +3,14 @@
 Each test runs the installed command with a stub `systemctl`; the suite's blocker fails any test that reaches a real one.
 """
 
+import os
 import shlex
 import subprocess
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from session_checks import events
+from ledger_history import ledger_at, section
+from session_checks import events, patch_every_company
 from usage_records import (
     ALPHA,
     record_reading,
@@ -17,7 +19,7 @@ from usage_records import (
     week_reading,
 )
 
-from company import paths, schedule
+from company import launcher, paths, schedule
 from company.ledger import Ledger
 
 
@@ -92,14 +94,18 @@ def test_with_no_systemctl_it_says_so(company, monkeypatch, tmp_path):
 # The job list
 
 
-def test_the_self_test_and_the_charge_are_jobs(company, systemctl):
+def test_the_self_test_the_charge_the_paper_tick_and_the_check_are_jobs(company, systemctl):
     assert ("kill", "--self-test") in [job.command for job in schedule.JOBS]
     assert ("treasurer", "charge") in [job.command for job in schedule.JOBS]
+    assert ("paper", "tick") in [job.command for job in schedule.JOBS]
+    assert ("treasurer", "check") in [job.command for job in schedule.JOBS]
     done = company("schedule", "list")
     assert done.returncode == 0, done.stderr
     assert "The schedule is off." in done.stdout
     assert "kill-self-test: `company kill --self-test`" in done.stdout
     assert "treasurer-charge: `company treasurer charge`" in done.stdout
+    assert "paper-tick: `company paper tick`" in done.stdout
+    assert "treasurer-check: `company treasurer check`" in done.stdout
 
 
 @pytest.mark.parametrize("name", JOB_NAMES)
@@ -472,3 +478,124 @@ def test_a_session_from_before_the_window_does_not_keep_the_charge_due(company, 
     done = company("schedule", "run", "treasurer-charge")
 
     assert "not due" in done.stdout
+
+
+# A job that fails
+
+
+def broken_stop(tmp_path, monkeypatch):
+    """Every `company` from here on has a stop that does nothing, so that the kill switch's real self-test fails, and soon."""
+    patch_every_company(
+        tmp_path,
+        monkeypatch,
+        "from company import kill_state, killswitch, launcher",
+        "launcher.running_sessions = lambda: []",
+        "kill_state.present = lambda: False",
+        "killswitch._TEST_WAIT_SECONDS = 1",
+    )
+
+
+def digest_incidents(company):
+    done = company("digest")
+    assert done.returncode == 0, done.stderr
+    return section(done.stdout, "Incidents")
+
+
+def test_a_failed_self_test_on_the_schedule_is_in_the_real_ledger_and_the_digest(company, board, systemctl, tmp_path, monkeypatch):
+    assert company("schedule", "enable", "--message", "1234").returncode == 0
+    broken_stop(tmp_path, monkeypatch)
+
+    done = company("schedule", "run", "kill-self-test")
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "FAILED" in done.stdout
+    failed = events("job-failed")
+    assert [(found["writer"], found["job"], found["exit"]) for found in failed] == [("scheduler", "kill-self-test", 1)]
+    incidents = digest_incidents(company).splitlines()
+    assert len(incidents) == 1
+    assert "kill-self-test" in incidents[0]
+    assert "1 time " in incidents[0]
+    assert "journalctl --user -u company-kill-self-test" in incidents[0]
+
+
+@pytest.fixture
+def schedule_on(company, board, systemctl):
+    assert company("schedule", "enable", "--message", "1234").returncode == 0
+
+
+def test_a_job_that_refuses_is_a_job_that_failed(company, schedule_on):
+    # A lock that cannot be opened stops the tick, which the command reports and refuses.
+    (paths.home() / "paper.lock").mkdir()
+
+    done = company("schedule", "run", "paper-tick")
+
+    assert done.returncode == 1
+    assert [found["job"] for found in events("job-failed")] == ["paper-tick"]
+
+
+def test_a_job_that_raises_is_a_job_that_failed(company, schedule_on, tmp_path, monkeypatch):
+    patch_every_company(
+        tmp_path,
+        monkeypatch,
+        "from company import killswitch",
+        "def fail():\n    raise RuntimeError('a stand-in failure')",
+        "killswitch.self_test = fail",
+    )
+
+    done = company("schedule", "run", "kill-self-test")
+
+    assert done.returncode == 1
+    assert "a stand-in failure" in done.stderr
+    assert [(found["job"], found["exit"]) for found in events("job-failed")] == [("kill-self-test", 1)]
+
+
+def test_a_session_cannot_put_a_failure_in_the_digest(company, schedule_on):
+    env = {**os.environ, launcher.SESSION_VARIABLE: "eeeeeeee-0000-4000-8000-000000000000"}
+
+    done = company("schedule", "run", "treasurer-check", env=env)
+
+    assert done.returncode == 1
+    assert events("job-failed") == []
+
+
+def test_a_job_that_passes_or_is_refused_records_no_failure(company, board, systemctl):
+    assert company("schedule", "run", "kill-self-test").returncode == 1
+    assert events("job-failed") == []
+    assert company("schedule", "enable", "--message", "1234").returncode == 0
+    assert company("schedule", "run", "kill-self-test").returncode == 0
+    assert events("job-failed") == []
+    assert company("kill").returncode == 0
+    assert company("schedule", "run", "kill-self-test").returncode == 1
+    assert events("job-failed") == []
+
+
+def test_the_failures_of_one_job_read_as_one_line_and_only_for_the_week(company, schedule_on):
+    now = datetime.now(UTC)
+    for days in (9, 2, 1):
+        ledger_at(stamp(now - timedelta(days=days))).append("job-failed", {"job": "paper-tick", "exit": days}, "scheduler")
+    ledger_at(stamp(now - timedelta(days=1))).append("job-failed", {"job": "treasurer-charge", "exit": 1}, "scheduler")
+
+    incidents = digest_incidents(company).splitlines()
+
+    assert len(incidents) == 2
+    assert "paper-tick" in incidents[0]
+    assert "2 times " in incidents[0]
+    assert "exit 1" in incidents[0]
+    assert "treasurer-charge" in incidents[1]
+
+
+def test_a_failure_the_ledger_cannot_take_says_so_and_the_job_still_fails(company, schedule_on, tmp_path, monkeypatch):
+    patch_every_company(
+        tmp_path,
+        monkeypatch,
+        "from company import killswitch, ledger",
+        "def cut():\n    (ledger.paths.home() / 'ledger.head').unlink()\n    return [killswitch.Check('a stand-in check', False, 'it failed')]",
+        "killswitch.self_test = cut",
+    )
+    before = len(events())
+
+    done = company("schedule", "run", "kill-self-test")
+
+    assert done.returncode == 1
+    assert "could not record it" in done.stderr
+    assert len((paths.home() / "ledger.jsonl").read_text().splitlines()) == before

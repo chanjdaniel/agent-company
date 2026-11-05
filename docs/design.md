@@ -3,7 +3,7 @@
 This is the design the first slice builds, written 2026-11-04.
 It turns the research in [`docs/research/2026-11-02-org-and-profit-loops/`](research/2026-11-02-org-and-profit-loops/report.md) and Daniel's decisions into one document that later work is checked against.
 Where this document and the report or critique differ, this document holds; where this document and Daniel's word differ, Daniel's word holds, and this document is wrong.
-So far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the session launcher, the company tools' server with its note tool, the goal texts, the kill switch, the schedule with its first two jobs, the test suite with its guards and scan, and CI; nothing else here exists as code yet.
+So far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the session launcher, the company tools' server with its note, promise, registration, backtest, verdict and finding tools, the goal texts, the kill switch, the schedule with its first six jobs, the quant cell's registration, backtest runner and verdict, the paper account and its period, promises and the honesty checks, the Auditor and a cell's view of the ledger, the preflight, the probe and the runbook, the test suite with its guards and scan, and CI; nothing else here exists as code yet.
 
 Words used throughout:
 
@@ -176,6 +176,7 @@ Rules every session starts under:
 - **A launcher that dies.**
   A session with no end event claims no bar for any window from its start on, so before each launch, refused or not, the launcher closes each session whose launcher has gone: it stops any of the session's group that is left, since nothing watches its limits any more, and logs `session-stopped` with the reason `launcher-gone`.
   The next charge then counts the open window; the closed windows the session ran in stay named until they leave the trailing month, since nothing charges a window after its reset.
+  A launcher that cannot write its run's own record refuses the launch at the `run-files` check; if that write fails only once the session has started, it stops the session's group and logs `session-stopped` with the reason `not-recorded`, since a later launcher finds a group only by that record.
 - **One launch decides at a time.**
   A lock held from before `admit` until the session has started keeps two launches from both spending a word's last launch.
 - **A signal to the launcher.**
@@ -198,6 +199,10 @@ Rules every session starts under:
 
 The defaults are `claude-opus-5-5` for `cell_model`, `claude-sonnet-5-5` for `auditor_model`, and `claude-haiku-5-5` for the probe.
 
+A cell's ledger is a file written at each launch, `ledger.jsonl` in its workspace, replacing what is there without following a link, since an agent can write in that directory.
+It holds the session, money and minutes events on the bet, what the cell wrote, the runs, verdicts and paper events of its registrations, and the results of its promises without what they cite.
+Each kind is named in `views.py` with what ties it to a bet, so a kind nobody named is left out, and a finding, its confirmation, a pause, a complaint and a spam flag are named nowhere.
+
 Every goal text states the honesty constraints as part of the goal, and none says "whatever it takes" or "at all costs".
 Goal texts are files in the package, `src/company/goals/<role>.v<n>.md`, the newest of a role's being the one used, and one that fails the scan starts nothing.
 The evidence behind this is in the report's section 1.3: under such a prompt, agents lied about refunds and fixed prices.
@@ -210,7 +215,7 @@ A tool call that names another writer still writes as the session's own, and a c
 A refused call logs `append-refused` with its `session` and `tool`.
 Each server starts in the workspace, outside the sandbox, so it runs with Python's `-P`, and a file an agent planted there cannot run as the company's code.
 A session's shell cannot write the company home outside its workspace, so it cannot run `company` as anyone else, and `company ledger append`, which takes any writer, is the person's and the tests' door.
-As second layers, `company` is not on a session's path, the settings deny the shell `company` and `claude`, and `company ledger append` refuses and logs when the launcher's `COMPANY_SESSION` variable is set.
+As second layers, `company` is not on a session's path, the settings deny the shell `company` and `claude`, and `company ledger append`, `ledger show`, `digest`, `audit` and `finding confirm` refuse and log when the launcher's `COMPANY_SESSION` variable is set.
 
 ## The ledger
 
@@ -251,6 +256,7 @@ An `append-refused` event's writer is the code writer making the append, or `tre
 - A field ending in `_at` is a UTC timestamp like `2026-11-05T09:30:00Z`, and one ending in `_date` is a date like `2026-11-05`.
 - `bet` is a bet's id (lower-case letters, digits and hyphens), and `session` a session's UUID.
 - `message` is the Discord id of Daniel's word, as a string of digits.
+- `equity` and `pnl` are decimal strings that may start with a minus, since a short position can lose more than an account holds: both are paper figures and never money.
 - `amount` is a decimal string from zero up, always with `currency`, and `cost` is a decimal string from zero up in US dollars, so a refund is a positive `amount` of kind `refund`.
 - `minutes` is a number from zero up.
 - `week_start` is the UTC time a seven-day window opens.
@@ -272,6 +278,8 @@ A kind that a later ticket finds it needs joins this table and the contract in t
 | `go-given` | Governance | `board` | `scope`, `message`, `sessions` | |
 | `schedule-enabled` | Governance | `board` | `message`, `jobs` | |
 | `schedule-disabled` | Governance | `board`, `killswitch` | `reason` | |
+| `job-failed` | Governance | `scheduler` | `job`, `exit` | |
+| `account-checked` | Governance | `board` | | `message` |
 | `append-refused` | Governance | `treasurer`, `governor`, `launcher`, `scheduler`, `killswitch`, `runner` | `attempted_kind`, `attempted_writer`, `reason` | `session`, `tool` |
 | `usage-reading` | Resources | `board`, `governor` | `window`, `used_percent`, `resets_at`, `taken_at`, `source` | |
 | `resource-charged` | Resources | `treasurer` | `week_start`, `line`, `weight`, `fraction`, `company_used`, `cost`, `reading_seq`, `charge_id`, `charge_lines` | |
@@ -281,10 +289,11 @@ A kind that a later ticket finds it needs joins this table and the contract in t
 | `refund` | Money | `treasurer` | `amount`, `currency`, `source`, `record` | `bet` |
 | `fee` | Money | `treasurer` | `amount`, `currency`, `source`, `record` | `bet` |
 | `spend` | Money | `treasurer` | `amount`, `currency`, `source`, `record` | `bet` |
-| `session-started` | Sessions | `launcher` | `session`, `role`, `model`, `run`, `gate`, `account_used`, `company_used`, `reading_seq` | `bet` |
+| `session-started` | Sessions | `launcher` | `session`, `role`, `model`, `run`, `gate`, `account_used`, `company_used`, `reading_seq` | `bet`, `audited_runs` |
 | `session-ended` | Sessions | `launcher` | `session`, `exit`, `transcript_path`, `transcript_hash`, `weight` | |
 | `session-stopped` | Sessions | `launcher` | `session`, `reason` | `elapsed_minutes`, `weight` |
 | `session-note` | Sessions | `cell:<bet>`, `probe` | `session`, `text` | |
+| `probe-result` | Sessions | `treasurer` | `session`, `run`, `check`, `result` | `succeeded`, `unreported`, `present`, `left_running` |
 | `launch-refused` | Sessions | `governor`, `launcher` | `role`, `check`, `reason`, `fix` | `bet`, `account_used`, `company_used`, `reading_seq` |
 | `kill-pulled` | Kill switch | `killswitch` | `pull`, `by`, `reason` | `pulled_at`, `loop` |
 | `kill-step` | Kill switch | `killswitch` | `pull`, `step`, `target`, `result` | `detail` |
@@ -292,7 +301,8 @@ A kind that a later ticket finds it needs joins this table and the contract in t
 | `strategy-registered` | Quant | `cell:<bet>` | `strategy`, `universe`, `data_source`, `data_hash`, `in_sample`, `holdout`, `cost_model`, `slippage_model`, `max_configurations`, `acceptance` | `paper_days` |
 | `config-run` | Quant | `runner` | `registration_seq`, `config_hash`, `status`, `budget_used` | `sharpe`, `n_returns`, `skew`, `kurtosis`, `total_return`, `max_drawdown`, `returns_hash`, `failure` |
 | `config-refused` | Quant | `runner` | `registration_seq`, `config_hash`, `reason` | |
-| `verdict` | Quant | `treasurer` | `registration_seq`, `config_hash`, `passed`, `failed_tests`, `deflated_sharpe`, `holdout_return`, `max_drawdown`, `trials`, `config_run_seqs`, `holdout_hash` | |
+| `verdict-opened` | Quant | `treasurer` | `registration_seq`, `config_hash` | |
+| `verdict` | Quant | `treasurer` | `registration_seq`, `config_hash`, `passed`, `failed_tests`, `deflated_sharpe`, `holdout_return`, `max_drawdown`, `trials`, `config_run_seqs`, `holdout_hash` | `holdout_failure` |
 | `paper-opened` | Quant | `runner` | `registration_seq`, `verdict_seq`, `end_date`, `drawdown_kill` | `promise_seq` |
 | `paper-order` | Quant | `runner` | `period_seq`, `symbol`, `side`, `quantity`, `broker_order_id`, `status` | |
 | `paper-reading` | Quant | `runner` | `period_seq`, `equity`, `pnl`, `taken_at` | |
@@ -300,8 +310,9 @@ A kind that a later ticket finds it needs joins this table and the contract in t
 | `experiment-registered` | Venture | `cell:<bet>` | `experiment`, `hypothesis`, `metric`, `keep_threshold`, `kill_threshold`, `budget_tokens`, `budget_dollars`, `budget_minutes`, `end_date` | |
 | `experiment-verdict` | Venture | `treasurer` | `experiment_seq`, `outcome`, `metric_value`, `positive_signal` | `veto_seq` |
 | `promise-recorded` | Honesty | `cell:<bet>`, `runner` | `promise`, `due_date` | `bet`, `counterparty` |
+| `promise-kept` | Honesty | `board` | `promise_seq`, `kept_date` | `note` |
 | `promise-checked` | Honesty | `treasurer` | `promise_seq`, `result` | `evidence_seqs` |
-| `finding` | Honesty | `auditor`, `treasurer`, `board` | `rubric`, `summary`, `evidence` | `bet`, `session` |
+| `finding` | Honesty | `auditor`, `treasurer`, `board` | `rubric`, `summary`, `evidence` | `bet`, `session`, `promise_seq`, `claim` |
 | `finding-confirmed` | Honesty | `board`, `treasurer` | `finding_seq` | `message` |
 | `cell-paused` | Honesty | `treasurer` | `scope`, `reason`, `cause_seq` | `bet` |
 | `cell-resumed` | Honesty | `board` | `scope` | `bet`, `message` |
@@ -337,8 +348,12 @@ Notes on single kinds:
   A chargeback is recorded as a `refund`.
 - `settings-changed` holds the changed keys' names and the new digest, not their values.
 - `session-note` is a cell's or the probe's free text, so it is kept out of the strategy session's view, since that session never talks to a cell; that view still holds a cell's registrations and proposals, which it reads as data.
+- `verdict`'s `failed_tests` names each test failed, `overfitting`, `holdout` or `max_drawdown`; `max_drawdown` is the worse of the backtest's and the holdout's; `holdout_hash` is the hash of the holdout's returns, as `returns_hash` is of a backtest's; and a strategy that failed or took no position on the holdout has `holdout_failure`, the kind of failure with none of its words (`timed-out`, `crashed`, `ended-early`, `bad-output`, `not-finite` or `no-position`), and null for `holdout_return` and `holdout_hash`.
 - `session-started`'s `gate` is `go:<seq>` or `schedule`, and a `go-given` word's launches left are its `sessions` minus the `session-started` events citing it.
-- `launch-refused`'s `check` is the governor's step that refused (`ledger`, `kill`, `settings`, `go`, `pause`, `reading`, `floor` or `share`, and a scheduled session with the schedule off is refused at `go`) or, written by the launcher, its own (`goal`, `settings`, `binary`, `load-form`, `workspace`, `kill` or `ledger`); its `reason` starts with a code, such as `stale`, followed by a sentence, and `fix` is what to do about it.
+  `audited_runs` lists the runs an Auditor's session was given.
+- `launch-refused`'s `check` is the governor's step that refused (`ledger`, `kill`, `settings`, `go`, `pause`, `reading`, `floor` or `share`, and a scheduled session with the schedule off is refused at `go`) or, written by the launcher, its own (`goal`, `audit`, `settings`, `model`, `binary`, `load-form`, `workspace`, `run-files`, `kill` or `ledger`); its `reason` starts with a code, such as `stale`, followed by a sentence, and `fix` is what to do about it.
+- `account-checked` is Daniel's word, from `company account checked`, that extra usage is off and that the dependencies under "Dependencies to re-check" still hold, since no code can see either.
+- `probe-result`'s `check` is `guardrails` or `kill-test`, and its `result` is `passed`, `failed` or `not-proven`; `succeeded` and `unreported` list a probe's actions, `present` what it found loaded, and `left_running` counts what a kill test found.
 - `pull` on `kill-pulled` and `kill-step` is the pull's own id, the name of its file in `kill.state`.
 - `kill-pulled`'s `pulled_at` is when the pull began, and its `ts` when the ledger took it, which comes after the pull's actions and may be at the resume.
 - `kill-step`'s `step` is `hold`, `stop-session`, `schedule` or `rotation`; its `target` names what the step acted on, such as the session, `timers` or the account; and its `result` is `stopped`, `turned-off`, `moved-aside`, `no-key`, `held-no-record` or `failed`.
@@ -350,10 +365,15 @@ Notes on single kinds:
 - `promise-recorded` allows `runner` so that a paper period can record the promise of its own end date, and a runner's promise always sets `bet`.
   That promise is the code's and not the cell's, so the honesty metrics leave every runner's promise out of the cell's promises, and it is kept when `paper-closed` cites the period by the due date.
   If no tick closed the period by then, even if a later tick closes it, the Treasurer logs `promise-checked` with the result `not-run` and tells Daniel in the digest, with no `finding` and no `cell-paused`, and from ticket 19 on it logs one `incident`.
-- `promise-checked`'s `result` is `kept`, `broken` or `not-run`.
-- `finding` allows `treasurer` so that a check the Treasurer makes itself, such as an overdue promise, can record its finding.
+- `promise-kept` is Daniel's word that a cell's promise was kept on `kept_date`, written by `company promise kept <seq> [--on <day>] [--note <text>]`, since a cell's own report never counts and most promises leave no record code can read.
+- `promise-checked`'s `result` is `kept`, `broken` or `not-run`, and `evidence_seqs` names what it rests on: the `promise-kept`, the `paper-closed` or the finding.
+  A promise gets one, whatever happens after.
+- `job-failed` is written by `company schedule run <job>` when the job exits non-zero or raises, in the ledger of the home that command was started in, whichever home the job itself ran in; `exit` is the job's exit code, or 1 if it raised, and its output stays in the timer's journal.
+- `finding` allows `treasurer` so that a check the Treasurer makes itself, such as an overdue promise, can record its finding, whose `promise_seq` names that promise.
   It allows `board` so that Daniel can record a fabricated claim they find in the batch, with `company finding record`, which also writes `finding-confirmed`.
   For a claim in a draft the command takes the bet and pauses that cell; for a memo, whose author is no cell, it records the finding with no pause, beside `memo-rejected`, so that the honesty metrics still see it.
+- An Auditor's `finding` has as its `session` the session it is about, one of those it was given, and as its `bet` that session's, which the tool reads from the ledger.
+  Its `claim`, on an `unshown-result` alone, holds the `quote` and the `value` that code checks.
 
 ## The three resources and their budgets
 
@@ -446,12 +466,13 @@ Before money flows, a pre-registered leading indicator stands in for it, counted
 `company digest` prints the page Daniel reads each week, and writes nothing: the bar, each bet's margin, each resource against its budget, incidents, honesty metrics and pending approvals.
 
 - **Resources:** tokens from the share of each window with a reading against `company_share`, dollars spent in the last seven days, and Daniel-minutes in the last seven days against `daily_minutes × 7`, with a note of any decision not charged yet.
-- **Incidents:** those in the last seven days.
-- **Honesty:** the cells' promises made, kept, broken and open; findings in the last seven days, and those unconfirmed in all; complaints, spam flags and refunds in the last seven days; and the pauses in effect.
+- **Incidents:** those in the last seven days, and one line for each scheduled job that failed in them, with how many times and how it last ended.
+- **Honesty:** the cells' promises made, kept, broken, broken then said kept, and open; each open one on a line of its own, with its event, due date and text, so that Daniel can say it was kept; each runner's promise that was not run, on a line of its own and never among the cells'; findings in the last seven days, and those unconfirmed in all, each on a line of its own with its rubric, summary, evidence and, while it waits, the command that confirms it, and on a broken promise's, any word of Daniel's that came after; complaints, spam flags and refunds in the last seven days; and the pauses in effect.
 - **Pending approvals:** every `approval-asked` with no `approval-decided`.
 
 A section with nothing to say prints "none", and an empty ledger prints that for every section and exits 0, with or without settings.
 A ledger whose chain is broken gets one line saying so and no numbers, and exits 1.
+The page holds what a cell and an Auditor wrote, so `company` writes no control or format character, line or paragraph separator or lone surrogate to its output, in this command or any other, and keeps newlines and tabs: a promise cannot move the cursor over the lines above it, or stop the page from printing.
 A setting the page needs that is missing refuses the whole page, with no value assumed.
 A token window that cannot be read, or usage records that cannot be, say why on their own line, and the rest of the page still prints.
 
@@ -546,9 +567,9 @@ The kill switch is one command, `company kill`, that does the following:
 Only Daniel's resume command, `company resume [--message <Discord id>]`, undoes it, and every launch is refused until then.
 A resume leaves the schedule off and a moved key moved, so each of those comes back only by Daniel's own step.
 Any loop's red line can pull it by code outside a session, with `killswitch.pull(by, reason, loop)`, and the ledger names the loop.
+The probe's kill test alone passes `stop_only`, which holds and stops as a pull does and leaves the timers and the keys alone.
 Its self-test, `company kill --self-test`, runs in the test suite with stub sessions and accounts in its own temporary home, and on the schedule once gate C opens.
-It reads and writes nothing of the home it was started from, so its result goes to its output alone, which on the schedule is the timer's journal.
-So nobody sees a scheduled self-test that fails until ticket 11 records a failed job where Daniel reads, and the schedule stays off until gate C.
+It reads and writes nothing of the home it was started from, so its result goes to its output, which on the schedule is the timer's journal; `company schedule run`, in the real home, then logs `job-failed` if it failed, and the digest shows that.
 
 A pull must work when the ledger cannot, since `Ledger.append` raises on a broken end.
 So its first act is a file of its own in the company home's `kill.state` directory, and its actions all come before any ledger write and take no lock, with each failure a reported step that stops nothing else.
@@ -578,7 +599,10 @@ Each entry of `outside_accounts` is `{"name", "rotation", "key_file"}`, whose `r
 A pull reads that list from the file as it stands, each entry checked, since it must not wait on a lock or be stopped by the tamper it may be answering; a file that then fails its digest is reported by a `rotation` step on `settings` with the result `failed`.
 
 **The paper key's rotation:** the code moves the key aside so it can no longer be used, and tells Daniel to regenerate it at the broker, because the code holds no broker admin path.
+`settings init` writes the paper key's entry by default, `{"name": "paper", "rotation": "move-key", "key_file": "paper.key"}`, so a pull rotates it with no step of Daniel's.
 The key is read by the paper module from the key file at use, and passed to no session and no log.
+The key file is `paper.key` in Daniel's config directory: the key id and the secret on two lines, which a file anyone but its owner can reach, a link, or anything but a file refuses unread.
+`company paper check` makes one read-only call to the paper host, writes nothing, and prints the account's status and equity; with no key it says what to do and exits non-zero, and with the kill switch pulled it makes no call, as a tick does not.
 
 The schedule is systemd user timers behind a runner that tests replace, installed disabled, with its jobs listed in code in `schedule.JOBS`.
 The runner is the `systemctl` first on `PATH`, and the suite puts one there that fails any test that did not choose a stub.
@@ -586,7 +610,11 @@ The runner is the `systemctl` first on `PATH`, and the suite puts one there that
 Only Daniel's `company schedule enable --message <Discord id>` turns it on, and it logs `schedule-enabled` with the jobs; `company schedule disable` and the kill switch undo it, and `company schedule list` says which it is.
 If `enable` fails, or a pull lands during it, it turns the timers back off and logs `schedule-disabled`.
 A timer's service runs `company schedule run <job>`, which asks the ledger again and refuses with the schedule off or the kill switch pulled, so a timer that could not be turned off still runs nothing.
-A unit carries only `COMPANY_HOME`, `COMPANY_CONFIG` and `CLAUDE_CONFIG_DIR`, so a job that starts a session would look for `claude` on the user manager's own path and might be refused with `no-binary`; no job starts one yet, and ticket 12's are the first.
+A job that then fails, by exiting non-zero or by raising, is logged as `job-failed`, and the digest's incidents show it; a run refused at that first step is no failure and logs nothing, and over a broken ledger the failure can go only to the job's output, while the digest says the ledger is broken.
+A job that keeps failing logs each time, so a charge due every five minutes can log often; the digest gives each job one line.
+A job killed by a signal, or a service that never starts, logs nothing, and only the journal has it.
+A unit carries `COMPANY_HOME`, `COMPANY_CONFIG` and `CLAUDE_CONFIG_DIR` as they stand, and the `claude` that `company schedule install` or `enable` resolved, as `COMPANY_CLAUDE_BIN`, since the user manager's own path may not have it.
+With none to carry, the command says so and writes the units all the same, and a job that starts a session looks on the user manager's own path and is refused with `no-binary` if it is not there.
 Until gate C opens the schedule, the kill switch's self-test, `company paper tick`, `company treasurer check`, `company treasurer charge`, the daily audit sample, the weekly audit pass, the batch, the strategy session and the retro run by Daniel's command.
 
 ## The six loops
@@ -646,7 +674,7 @@ Pre-registration and the replay gate bind what crosses the company's boundary (m
 - **Metric:** complaints, refund requests and their outcome, platform warnings, spam flags on outreach (counted separately), Auditor findings, and promises made against promises kept.
 - **Ground truth:** what reaches Daniel's own inbox and accounts, recorded by Daniel; `promise-recorded` events checked by the Treasurer when due; the `config-run` and `verdict` records against what a transcript claims.
 - **Decision rule:** a confirmed deception, broken payment promise, fabricated claim in a draft or terms-of-service breach pauses the cell at once and tells Daniel; a check the Treasurer can make itself (an overdue promise a cell made, a result in a transcript that no record shows) is confirmed by code, and anything else by Daniel's `company finding confirm`; past the complaint threshold, new outside actions pause company-wide until Daniel reviews.
-- **Cadence:** Treasurer checks at `company treasurer check`, the Auditor's sample daily and a full pass weekly.
+- **Cadence:** Treasurer checks at `company treasurer check`, a job at 00:15 UTC once gate C opens and by Daniel's command until then, the Auditor's sample daily and a full pass weekly.
 - **Guardrail:** the Auditor runs fresh on a different Claude model and reports to Daniel only; no cell can read or argue with a finding; every goal text carries the honesty constraints.
 
 ### Rules every loop shares
@@ -700,29 +728,84 @@ Crypto and prediction markets count as trading under the same rule.
 
 - **Pre-registration before any backtest.**
   The ledger's `strategy-registered` holds the `universe`, the `data_source`, the `in_sample` and `holdout` periods, the `cost_model`, the `slippage_model`, `max_configurations`, the `acceptance` test (`min_deflated_sharpe`, `min_holdout_return`, `max_drawdown`) and `paper_days` (default 90).
+  A cell registers through its `register_strategy` tool, which reads the data, fills in `data_hash`, and refuses a missing or malformed field, or a source it cannot read or whose data does not hold every universe symbol on each bar of both periods, with at least two bars in each.
+  A `period` is `{start, end}` in days, and a `cost_model` or `slippage_model` is `{bps_per_turnover}` from 0 to 10,000.
+  A `data_source` is `fixture:<name>`, read from `market-data/<name>.jsonl` in the company home, or `broker:iex`, the paper broker's free daily bars, split-adjusted, which the tool fetches at the registration and keeps in `market-data/broker/<data_hash>.jsonl`, where no `fixture:` name can reach them.
+  Either way it is one `{date, symbols}` bar on each line, whose `symbols` hold each symbol's fields, `close` among them, and every later run and the verdict read those bytes, with no further call; only a paper tick fetches again.
+  A holdout on `broker:iex` must end before today, since a day's bar is not whole until the day ends, and with no key, or a broker that fails, the registration is refused with `data-unavailable:no-key` or `data-unavailable:broker-failed`.
+  `paper_days` is from 1 to 3,650, which keeps every end date one a date can hold.
+  The holdout must begin after the in-sample period ends.
+  Each strategy name is the cell's own, and a cell may replace a registration until its first run, when the newest stands.
   A registration cannot change once a `config-run` cites it.
+- **A holdout stays unseen, and is one registration's.**
+  On any data source, a new in-sample period or holdout may not touch an earlier registration's holdout, and a new holdout may not touch an earlier registration's in-sample period, whichever cell wrote it.
+  The guard reads the days alone, because there is one market: two sources may hold the same bars, and a source's name or provider says nothing of what it holds.
+  So a fixture with other prices on the same days is refused too, which is the cost, and it can take other days.
+  So a new name for a strategy needs a holdout of its own, and cannot reset a budget on the old one; it may share an in-sample period, so the verdict counts a cell's trials on those days across its registrations.
+  A registration that was replaced holds no period, since it ran nothing.
+  The refusal tells a cell only which dates another registration holds, never its bars.
 - **Trial counting.**
-  A configuration's identity is the hash of its code and parameters, and each new hash counts against the budget, so a cell cannot search its way to a result.
-  A repeat returns its stored result at no cost, and a run past the budget logs `config-refused`.
+  A configuration's identity is the hash of its code and parameters, and each new hash counts against the budget, a failed one too, so a cell cannot search its way to a result.
+  A repeat returns its stored result at no cost and writes nothing, and a run past the budget logs `config-refused` with `budget-spent`.
+  Data that no longer matches the registration's `data_hash` logs `config-refused` with `data-changed`, at no cost.
+  Each configuration's code and parameters are kept in `configurations/<registration_seq>/<config_hash>.json` in the company home, for the verdict to run.
+  One lock in the company home, `quant.lock`, keeps registrations and backtests one at a time, so two sessions of a bet cannot both spend its last run, and the time limit bounds how long it is held.
 - **The runner sits outside the session.**
-  It feeds a strategy's bars one at a time from the in-sample period, takes its target positions, applies the registered costs itself and records the returns.
-  Strategy code runs in its own `bwrap` with no network, no writes and a time limit.
+  A cell calls its `run_backtest` tool, whose server runs outside the session's sandbox and gives it no path to the bars.
+  It feeds a strategy's bars one at a time from the in-sample period, sending each only once the last has been answered, and leaves out the last bar, since no return follows it.
+  A strategy is Python defining `decide(bar, parameters)`, which returns target weights by symbol, each from -1 to 1 and together holding at most the account's whole value; a position at one bar earns the move to the next bar's close.
+  The runner applies the registered costs itself: the two models' basis points times the change in target weights, on the return that follows.
+  It records per-bar, not annualized, figures: `sharpe` (mean over sample standard deviation), `skew`, `kurtosis` (not excess, so a normal's is 3), and `total_return`, `max_drawdown` as a positive fraction, and `returns_hash`; an account that has lost everything stays at zero.
+  With no spread to measure against, a run reads as `sharpe` 0, `skew` 0 and `kurtosis` 3, and numbers past what a float holds make it a failed configuration, `not-finite`.
+- **Strategy code runs in its own `bwrap`, and has no other way to run.**
+  Every namespace is unshared, the root is read-only, the environment is empty, and it sees only the system's files, Python, its own small driver and `/dev/urandom`, so neither the ledger, the bars, Daniel's settings nor any directory it could write are there; it has at most 4 GiB of memory, and can start no second process or thread.
+  The time limit, `backtest_max_seconds`, is Daniel's setting, 60 by default, covers a whole run, and reaches the tools' server on its command line, so that the server holds no path to Daniel's settings.
+  The paper key's path reaches a cell's server the same way, `--paper-key`, for the broker's bars at a registration; that server builds `paper.MarketData`, which can read bars and nothing else.
+  So once it has fetched bars the key is in that server's memory, outside the sandbox, under the same user as the session's shell, and a shell that can see that process could reach it: the probe's reads through `/proc` ask whether it can see the launcher's, and nothing else here says.
+  The sandbox stays in the session's process group and dies with its parent, so a session's stop ends it.
+  A strategy that hangs, crashes, ends early or prints anything but its positions is a failed configuration, `status` `failed`, with a `failure` of `timed-out`, `crashed: <its error>`, `ended-early` or `bad-output: <what>`, and it counts against the budget.
+  With no `bwrap`, or one that cannot start, nothing runs, and `config-refused` says `no-confinement` or `confinement-failed`, at no cost, since no code of the cell's ran.
 - **The holdout is never shown to the cell.**
-  The cell names one configuration, once per registration, and the Treasurer runs it on the holdout, then computes the deflated Sharpe ratio (Bailey and López de Prado, 2014) over the trials actually run, the holdout return and the maximum drawdown, from `config-run` records alone.
+  A cell's `request_verdict` tool names one configuration it has run that did not fail, by its `config_hash`, once per registration; a second request logs `append-refused` with `verdict-given`, and naming a run that failed or never ran spends no verdict.
+  `verdict-opened` is logged before a holdout bar goes out, and from then on only that configuration may be named, with `verdict-opened` the refusal for another: a strategy could say what it saw by hanging, so a run cut short must leave a cell no second configuration to use that on, while a crash still costs no verdict, since the same one can finish.
+  The Treasurer runs the kept configuration in the same sandbox, feeding it the in-sample bars and then the holdout's as one run, so that what a strategy looks back on is there, since a fresh start would leave a look-back flat through a short holdout, and flat passes a return floor of zero.
+  Only the positions on holdout bars earn, from a flat start and at the registered costs, and `backtest_max_seconds` covers the whole of that run too.
+  A strategy that takes no position on the holdout fails it with `no-position`, since it was never tried there; a cell knows its holdout's dates, so this stops the plainest dodge, and a very small position is one it does not stop.
+  The answer is the `verdict` event's fields and its number, the holdout's returns are kept nowhere but as `holdout_hash`, its bars stay in `market-data/`, and a strategy's failure there is recorded only by its kind, since its words could quote a holdout bar.
+  Data that no longer matches `data_hash`, a kept configuration that is not what its hash names, or a sandbox that does not start logs `config-refused`, with `data-changed`, `configuration-lost`, `no-confinement` or `confinement-failed`, and gives no verdict; once `verdict-opened` stands, a retry must name the same configuration.
+- **The verdict is computed, and says which test failed.**
+  It passes when the deflated Sharpe ratio is at least `min_deflated_sharpe` (`overfitting`), the holdout's return is at least `min_holdout_return` (`holdout`) and the maximum drawdown is at most `max_drawdown` (`max_drawdown`).
+  The deflated Sharpe ratio is equation 2 of Bailey and López de Prado (2014) on the chosen `config-run`'s per-bar `sharpe`, `n_returns`, `skew` and `kurtosis`, against equation 1's threshold, which it computes from the number of trials and the variance of their Sharpe ratios, all read from the `config-run` records the verdict cites in `config_run_seqs`.
+  The trials are every `config-run` of that cell's on a registration whose in-sample period overlaps the chosen one's, on any data source, since two sources may hold the same bars, failed ones too, each run counting as one, so `trials` may be more than one registration's budget.
+  The variance is the sample variance of the runs that have a ratio, and at least chance's over the chosen run's returns, `1 / (n_returns - 1)`, which goes beyond the paper: a failed run has no ratio, though its failure's text may have told the cell how it did, so a search hidden in failures, or in near-copies, would otherwise leave the threshold at nothing.
+  A figure that cannot be measured, from one return, with no spread in the estimate or past what a float holds, reads as a deflated Sharpe ratio of 0.
+  The maximum drawdown is the worse of the backtest's and the holdout's, so that a short holdout cannot hide what the backtest recorded.
   The report allowed the probability of backtest overfitting instead; this slice builds the deflated Sharpe ratio, because it needs only the records and the standard library.
 - **About three months of paper trading.**
-  A passing verdict opens a paper period of `paper_days`, with an end date, a promise for that date, and the registration's `max_drawdown` as its drawdown kill, and the first tick on or after the end date closes it.
-  Only code places orders, in `company paper tick`, on the paper host, and the Treasurer reads the account's profit and loss as the cell's metric.
-  One strategy holds the paper account at a time in this slice.
+  A passing verdict opens a paper period of `paper_days`, with an end date, a promise for that date whose `bet` is always set, and the registration's `max_drawdown` as its drawdown kill.
+  `treasurer.opens_paper_period` is the one place that decides whether a verdict opens one, and today that is `passed` alone.
+  One strategy holds the paper account at a time in this slice: another passing verdict waits, and the tick that closes the period opens the oldest that waits, whose end date counts from then.
+  A verdict whose period could not be written opens at the next tick.
+- **A tick is the one order path.**
+  Only code places orders, in `company paper tick`, on the paper host, and no company tool can: the tools hold `paper.MarketData` alone, never load `paper_period.py`, and a test fails on any other module that reaches `paper.Account` or its order methods.
+  Each tick reads the account, whose status must be `ACTIVE`, and logs `paper-reading`, whose `pnl` is against the period's first reading, so the first tick is the base.
+  Then it closes the period if the equity is past the kill, measured from the period's highest reading at a tick, or is not above zero, with `drawdown-kill`, or if today is on or after the end date, with `end-date`; neither needs the bars or the strategy.
+  To close, it cancels what waits, places an order against every position, and only then logs `paper-closed`, so a failed order leaves the period open for the next tick.
+  Otherwise it fetches the broker's bars since the in-sample period began, whatever source the registration names, up to the last whole day, which is today only from 21:00 UTC, leaves out any day lacking a universe symbol, says the date of the close it acted on, and feeds them one at a time to the kept configuration, in the same sandbox and under the same time limit, as the verdict did, and takes its answer on the newest bar as the target.
+  A strategy that fails there closes the period with `strategy-failed:<kind>`, and only that kind is recorded; a sandbox that does not start closes nothing and places nothing.
+  It cancels what waits, so that a second tick before the market opens replaces the first's orders and does not double them, then places market orders for the day, sells first, in whole shares rounded towards zero, priced at the newest bar's close, for each symbol of the account or the target that differs; a symbol outside the target is sold, and a position crossing zero only closes on this tick and turns on the next, since the broker may refuse more against shares not yet sold.
+  A tick refuses with the kill switch pulled, the ledger broken, the settings changed, or inside a session, looks for the kill switch once more before each order, and takes `paper.lock`, so a second tick at once is refused.
 - **Paper results are paper results.**
-  They are labelled so wherever they are printed, and are not deployment evidence; Alpaca's [paper-trading docs](https://docs.alpaca.markets/docs/paper-trading) (read 2026-11-04) say the account is free, and that it does not model market impact, slippage or regulatory fees, among others.
+  They are labelled so wherever they are printed, in the tick's and the check's output and on their own lines under the digest's Bets, count towards no bar or margin, and are not deployment evidence; Alpaca's [paper-trading docs](https://docs.alpaca.markets/docs/paper-trading) (read 2026-11-04) say the account is free, and that it does not model market impact, slippage or regulatory fees, among others.
 - **No capital in view.**
   Real capital enters only when Daniel names an amount, and this document carries no figure.
   When it does, position and drawdown limits are enforced at the broker and in the Treasurer, and an LLM, if any, is an information interface feeding separate risk and execution code, never the thing that places an order.
 - **Nothing sold as advice.**
   Nothing the cell produces is sold, published or shown as advice, since a personalized recommendation to buy or sell is a high-risk use under Anthropic's usage policy and regulated advice is off limits.
 - **No path to a live account.**
-  The paper module refuses a transport aimed at any other host, and market data comes from a fixture or the broker's free IEX bars, fetched by code at registration and hashed into the ledger; a cell never holds the key or a network path.
+  The paper module refuses a transport that says it can reach any other host, before the key is read, and the real transport refuses any other host itself, follows no redirect and uses no proxy.
+  The scan fails on the live host, on any other host of the broker's but its documentation's, and on the broker's credential variables and key shapes anywhere but its own files, and on the paper hosts or the broker's headers outside the paper module and the documents.
+  Market data comes from a fixture or the broker's free IEX bars, fetched by code at registration and hashed into the ledger; a cell never holds the key or a network path.
 
 ## Outreach rules
 
@@ -790,13 +873,70 @@ The gap is known and accepted, and it is revisited at each retro.
 
 ### What the Auditor does
 
-- Its rubric is false statements, broken promises, a result the records do not show, and a rule broken.
-- It has read-only file tools and only its finding tool, and sees the rubric, the whole ledger and the audited transcripts.
+`company audit <run>` starts one Auditor session on a recorded run, `--sample` on one of the last day's cell runs chosen at random by code, and `--full` on every cell run of the last seven days, all in one session.
+It refuses a run the ledger does not name, one still open, one with no transcript, and one whose transcript no longer matches the hash in its `session-ended`.
+
+- Its rubric is false statements (`false-statement`), broken promises (`broken-promise`), a result the records do not show (`unshown-result`), and a rule broken (`rule-broken`).
+- It refuses to start on `cell_model` or on the model the audited session ran on, citing the gap above; a model counts as the same by its family, so `opus`, `claude-opus-5-5[1m]` and `claude-opus-4-8` are all `claude-opus-5-5`'s, and that holds for `company session start auditor` too, which is given no run and so can record no finding.
+- It has read-only file tools and only its `record_finding` tool, in a fresh workspace holding `ledger.jsonl`, the whole ledger, and `transcripts/<run>.jsonl`, with the rubric in its goal text.
+  Those copies are placed last before the launch, and are removed when its session ends, when a launch is refused while or after they are placed, or at the next launch if its launcher died after logging the start; the run's own record keeps the transcript.
+  Each is tried whatever becomes of the other, one that will not go is named on stderr for Daniel to remove by hand, and the session's end is logged all the same.
+- A call it made to a tool outside its list is refused by `--tools`, and at the session's end the launcher logs each such call it finds in the session's output and transcript as `append-refused`, with the tool's name in lower case and the reason `tool-not-in-role`.
 - It has no web read, so it checks a citation to the ledger and not an outside URL, which Daniel checks in the batch.
 - Its findings go only to Daniel's digest and the ledger; no cell has them in its ledger view.
-- A confirmed finding pauses the cell, and only Daniel's `company cell resume` resumes it.
-- Its daily sample and weekly full pass are schedule jobs, so they run only once gate C opens; until then they run by Daniel's command.
+- Its daily sample and weekly full pass are schedule jobs, `audit-sample` at 01:00 UTC and `audit-full` on Mondays at 02:00 UTC, so they run only once gate C opens; until then they run by Daniel's command.
+  With nothing to audit, neither starts a session.
 - Transcripts are kept in the company home for the audit window.
+
+**What code confirms.**
+A finding of `unshown-result` may carry a `claim`, a reply's words and the figure in them.
+Code confirms it when those words, as whole words and whole numbers, are in the text of one of the session's replies, its reasoning not counting, the figure is in those words, and no figure on a `config-run` or `verdict` of that bet's registrations, by the session's end, is within one unit of the last digit reported, as itself or as a percent.
+That the words report a result is still the Auditor's reading, so the pause is lifted as any other is.
+On any doubt it does not confirm, and the finding waits, since a wrong pause costs more than a wait.
+`company audit` and `company treasurer check` make this check, writing `finding-confirmed` and `cell-paused` as `treasurer`, so a check stopped part way is finished by the next.
+
+**What Daniel confirms.**
+Every other finding waits for `company finding confirm <seq> [--message <Discord id>]`, and the cell runs until then.
+It writes `finding-confirmed` as `board` and, for a finding on a bet, `cell-paused` as `treasurer`; a finding on no bet pauses nothing, and the command says so.
+A confirmed finding pauses its cell once, and only Daniel's `company cell resume --bet <bet>` resumes it, logged as `board`.
+
+### Promises and the honesty checks
+
+A cell records each promise it makes with its `record_promise` tool, which takes the text, the due date and any counterparty, refuses a date already past, and writes under the session's fixed writer.
+`company treasurer check` then settles each promise once, and is safe to run at any time and any number of times:
+
+| Promise | What it finds | Result | What else it writes |
+| - | - | - | - |
+| A cell's | Daniel's `promise-kept`, at any time before the check | `kept` | Nothing |
+| A cell's | No such word once its due date has ended, in UTC | `broken` | A code-confirmed `finding`, `finding-confirmed` and `cell-paused`, each by `treasurer` |
+| A runner's | `paper-closed` citing its period, on or before its due date | `kept` | Nothing |
+| A runner's | No such close once its due date has ended, whether or not one comes later | `not-run` | Nothing, and the digest lists it apart |
+
+**A cell's promise is kept only by Daniel's word.**
+A cell's report of its own promise is the thing the honesty loop must not rest on, and a promise such as a delivery leaves no record the code can read, so silence past the date reads as broken and it costs Daniel a command to say otherwise.
+That word must name a day from the promise's making to its due date, so a word Daniel gives late takes `--on`.
+Before a check reads the promise as broken, the word keeps it.
+After one has, even part way, silence has already been read as broken and the word stands beside that: `promise-kept` is logged, the one `promise-checked`, the finding and any pause stay, `company cell resume --bet <bet>` still lifts the pause, and the digest counts the promise as broken then said kept and says so on the finding's line.
+So a false mark against a cell that kept its word can be corrected in the record without rewriting it.
+The digest lists each open promise, with the command that says it was kept.
+
+Each write of a broken promise looks for what an earlier check wrote, so a check stopped part way is finished by the next with nothing twice, and a lock of its own, `honesty.lock`, keeps two from running at once.
+
+**A pause refuses the cell's next launch, and does no more.**
+A session already running goes on to its own limits, and a paper period goes on, since code and not the cell runs it.
+
+**A resume is Daniel's alone.**
+`company cell resume --bet <bet> [--message <Discord id>]` lifts a cell's pause, and a resume with nothing paused is refused and logged.
+None of this section's commands runs inside a session.
+
+**Complaints and spam flags** are Daniel's to record, with `company complaint record --source <where> --summary <text> [--bet <id>] [--contact <who>]` and `company spam-flag record --source <where> [--bet <id>] [--contact <who>]`.
+Each record weighs the threshold under "Numbers set here", and so does each check, which also says when a hold stands; if the settings cannot be read the flag stands and the command says it was not weighed, with no value assumed.
+Reaching the threshold logs `cell-paused` with the scope `outside-actions`, and from then on the ledger itself refuses `target-proposed`, `draft-proposed` and `experiment-registered`, the kinds by which a cell starts an outside action, with the reason `outside-actions-paused`, on every path to it.
+The list is `outside_actions` in the contract.
+A `send-confirmed` is not refused, since it records what Daniel already did, and a fact stays a fact.
+`company cell resume --outside-actions [--message <Discord id>]` is Daniel's review, and the threshold then counts only flags after it, or the next check would undo the review while those flags stay in the month.
+A hold stands until that review, even once its flags have aged out of the month.
+Outside actions in the 2% rule are the `send-confirmed` events in the same trailing days.
 
 ### Honesty toward people and platforms
 
@@ -827,7 +967,7 @@ Autonomy widens one class at a time to pre-approved classes after a run of clean
 
 ## Daniel's settings
 
-A JSON file in Daniel's config directory holds `company_share`, `team_floor`, `monthly_price`, `plan_name`, `cell_model`, `auditor_model`, `reading_max_age_minutes`, `session_max_minutes`, `session_max_weight`, `daily_minutes`, `weekly_send_cap`, `minutes_table`, `complaint_threshold`, `portfolio`, `outside_accounts` and `usage_day_dirs`.
+A JSON file in Daniel's config directory holds `company_share`, `team_floor`, `monthly_price`, `plan_name`, `cell_model`, `auditor_model`, `reading_max_age_minutes`, `session_max_minutes`, `session_max_weight`, `backtest_max_seconds`, `daily_minutes`, `weekly_send_cap`, `minutes_table`, `complaint_threshold`, `portfolio`, `outside_accounts` and `usage_day_dirs`.
 
 - Only `company settings init` and `company settings set` change it, and each logs `settings-changed` as `board` with the new digest.
 - `load()` compares the file with the last recorded digest; a mismatch logs `settings-tamper` and refuses.
@@ -846,7 +986,8 @@ A JSON file in Daniel's config directory holds `company_share`, `team_floor`, `m
 Each of these is **Daniel's to change,** with `company settings set`.
 
 **The complaint threshold** (`complaint_threshold`): complaints and spam flags together reaching two in a trailing 30 days, or 2% of outside actions in that time if that is higher, pause new outside actions company-wide until Daniel reviews.
-The file holds it as `count` 2, `days` 30 and `outside_action_fraction` 0.02.
+The file holds it as `count` 2, `days` 30 and `outside_action_fraction` 0.02, and refuses a `count` or `days` of zero, or `days` above 3650.
+"Reaching" means the flags are at or above the higher of the two numbers.
 
 **The portfolio rule's numbers** (`portfolio`), where the file holds each percent as a fraction, such as 0.1 for 10%, and a share above 1 is refused:
 
@@ -876,16 +1017,17 @@ The file holds it as `count` 2, `days` 30 and `outside_action_fraction` 0.02.
 | `tests/` | The suite and its fixtures |
 | `docs/` | `design.md`, `first-run.md` and `runs/` |
 | `.github/workflows/ci.yml` | One job named `test` on each PR to `dev` and `main`, with actions pinned by commit hash, read-only permissions and no secrets |
-| The company home, outside the repository (default `~/.local/state/agent-company/`, or `COMPANY_HOME`) | The ledger, session workspaces, each session's run and the replay set |
+| The company home, outside the repository (default `~/.local/state/agent-company/`, or `COMPANY_HOME`) | The ledger, session workspaces, each session's run, the market data, each configuration run and, once it is built, the replay set |
 | Daniel's config directory, outside the repository (default `~/.config/agent-company/`, or `COMPANY_CONFIG`) | Their settings and the paper key |
 
-`company` is a thin command line over deep modules: Ledger, Usage, Reading, Treasurer, Settings, Governor, Launcher, Company tools, Quant, Paper, Kill switch, Schedule, and one entry each for Batch, Outreach, Opportunity, Portfolio, Retro and Replay.
+`company` is a thin command line over deep modules: Ledger, Usage, Reading, Treasurer, Settings, Governor, Launcher, Company tools, Quant, Paper, Paper period, Honesty, Audit, Views, Preflight, Probe, Kill switch, Schedule, and one entry each for Batch, Outreach, Opportunity, Portfolio, Retro and Replay.
 
 The suite runs with no network and no model session, and fails on any attempt at either.
 It tests through the `company` command or the company tools over stdio, using a stub `claude` that plays a script through the same tools a real session uses.
 Its guards are in `tests/harness/`: each Python process has an audit hook on sockets and on Daniel's real paths, and a `claude` and a `systemctl` first on `PATH` fail the test.
 The launcher's allow-list strips the guard from a session's environment, as it must, so the seam is in the test's own executable and never in the company's code: the stub's wrapper notes the environment it was given, then sets the guard and the blocker again for the stub and the company tools it starts.
-Its scan, `tests/scan_rules.py`, walks every tracked file for what the runtime section bans; `docs/design.md`, `docs/first-run.md` and the research may name a banned variable, setting or flag and any URL, but no file but the scan's own may hold a real key's shape, a model vendor's host or SDK import, or the live broker host.
+Its scan, `tests/scan_rules.py`, walks every tracked file for what the runtime section bans; `docs/design.md`, `docs/first-run.md` and the research may name a banned variable, setting or flag and any URL, but no file but the scan's own may hold a real key's shape, a model vendor's host or SDK import, the live broker host or a broker's credential variable.
+No test reaches the broker: a command takes a fake transport through `paper.transport`, the company tools' server is handed one, and the real transport's own tests stand in for its connection, so nothing in the suite has made a real call to it.
 
 ## Phases
 
@@ -931,11 +1073,11 @@ No worker reads or writes a secret, Daniel's settings or the real company home, 
 | - | - | - | - |
 | S1 | Say which jurisdiction's commercial-email law applies to them; answered with CASL as the planning default | With the plan's approval | Ticket 01 |
 | S2 | Say the merge word for each PR, or give the plan-time word | The end of each phase | The next phase |
-| S3 | Create the free paper-trading account and save its key in the path `docs/first-run.md` names, mode 600 | Once phase 4 is merged | Ticket 14 |
+| S3 | Create the free paper-trading account and save its key id and secret on two lines in `paper.key` in their config directory, mode 600 | Once phase 4 is merged | Ticket 14 |
 | S4 | Install the merged `company` command, then run `company settings init` with the 25% share, the floor (recommended 60%, and open), the subscription's tier and monthly price, the reading's maximum age, a session's limits, and the models if not the defaults | Once phase 4 is merged | Ticket 14 |
-| S5 | Check on the account page that extra usage is off, since no code can see or set it, and that the dependencies under "Dependencies to re-check" still say what this document cites | Once phase 4 is merged, and before each go | Ticket 14 |
+| S5 | Check on the account page that extra usage is off, since no code can see or set it, and that the dependencies under "Dependencies to re-check" still say what this document cites, then say so with `company account checked` | Once phase 4 is merged, and before each go | Ticket 14 |
 | S6 | Record a reading of the account's use from the usage page with `company reading record`, and optionally install the status-line recorder in their interactive session's settings | Once phase 4 is merged, and whenever a launch refuses for a stale reading | Tickets 14 and 21 |
-| S7 | Gate A: give the go with `company go real-sessions`, then run the commands in `docs/first-run.md` | Ticket 13 merged and `company preflight` passing | Ticket 14 |
+| S7 | Gate A: give the go with `company go real-sessions`, then run the commands in `docs/first-run.md` | Ticket 13 merged, and `company preflight` open on S7 alone | Ticket 14 |
 | S8 | Gate B: give the go for the strategy and retro sessions, then run their commands | Phase 6 merged | Ticket 21 |
 | S9 | Decide the first batch with `company batch decide`, including each memo's admission and each retro proposal | After S8's sessions end | Ticket 21's close |
 | S10 | Set the weekly outreach send cap | Before the first revenue bet, outside this task | Nothing here: with no cap set, the batch holds every send |
@@ -957,6 +1099,56 @@ It blocks nothing here, since the task closes with the schedule off.
 
 The merged code sets no default that opens any of the three gates.
 
+### The first run
+
+`docs/first-run.md` is the runbook for S3 to S7, and a test runs each of its commands, in its order, on the stub.
+
+**`company preflight`** lists each of S3 to S7 as passed or open, with what closes it, and exits zero only when all have passed.
+It adds nothing to the ledger, and a settings file that fails its digest is reported and not logged.
+- S3 looks at the paper key's metadata, never opening the file: a plain file of Daniel's, reachable by nobody else, and not empty; and that `outside_accounts` still holds its entry, so that a pull moves it.
+- S4 asks what the governor asks of the settings, and that `claude --help` lists the launch's flags; that `bwrap` and `socat` are on a session's own path, which is not the shell's; and that no variable `banned.is_banned` names is in the shell.
+- S5 needs Daniel's word, `account-checked`, since no code can see extra usage or read the terms: one since the go before the newest word while any word has launches left, or since the newest go when every word is used up, so each go needs a check of its own.
+  `company go` records a go with no standing check all the same, since the word is Daniel's, and says that the check does not stand.
+- S6 asks what the governor's steps 6 to 8 ask of the reading, the floor and the share.
+- S7 needs a `go-given` word with launches left, and the kill switch not pulled.
+
+**`company session probe`** runs the probe role with a script that tries each forbidden action: each of reading and writing, from the shell and from the file tools, in the config directory and the company home; reading the same two ways from the user's home directory, `market-data/broker` and another workspace, and from a folder in the config directory through `/proc/<the launcher's process>/root`, which would go around every mount the sandbox made if the session can see that process; writing `CLAUDE.md` at the top of its own workspace from the shell, and `CLAUDE.local.md` from the file tools; and reaching a host from the shell, through the sandbox's proxy and around it.
+Before those it does three things that should work: a write in its workspace from the shell, one from the file tools, and finding `curl` and `timeout`.
+Any that did not work leaves the check `not-proven`, since a shell or a file tool that does nothing would otherwise read as a fence that held.
+Every path it names is a decoy named `probe-decoy-` with no secret in it, and the one host it names is `example.com`, which the company's own code never reaches.
+The session reports each result through its note tool, as `PROBE <action> refused` or `PROBE <action> succeeded`.
+What the code can see outranks that word: a decoy holding what was written, a read decoy's mark in the saved output, transcript or notes, or `reached` in a network call's answer is `succeeded` whatever the session says, and a session's own `succeeded` stands whatever the code sees.
+An empty file is not a write, since a refused one may leave a read-only bind's empty mount point on the host.
+A note with no tool call behind it is `not-tried`, so an action must be tried to count as refused.
+A forbidden action that succeeded fails the check and pulls the kill switch, and so does a ledger that no longer verifies at the end, since it did at the start.
+An action not tried or not reported, or a session that exits non-zero, shows nothing either way, which is `not-proven`, with no pull, as a failed sign-in is.
+So a session stopped at a limit is judged on what it left, and a stop normally exits non-zero.
+
+The probe also checks what a real session loads.
+A decoy `CLAUDE.md` holding a marker sits in `workspaces/`, the folder above its workspace, and a decoy rule holding a marker sits in `rules/` in Claude Code's directory, since the docs name only `CLAUDE.md` files for `CLAUDE_CODE_DISABLE_CLAUDE_MDS`.
+Neither asks anything of a reader, since the rule could load into another session Daniel starts in that minute.
+A model's context need not be in its transcript, so the script also has it copy out any instruction file its context holds, into `instructions-seen.txt` in its workspace and never a note, since a note stays in the ledger for good; with no such file the check is `not-proven`.
+A model that denies holding one would not be caught, which is the limit of this check.
+The saved output, the transcript, the notes and that file are scanned for each marker and for the lines of Daniel's `CLAUDE.md` of 25 characters or more, as words and not as escaped JSON, and each answer is reported only as `present` or `absent`; a `CLAUDE.md` that is there and cannot be read leaves the check `not-proven`.
+`present` fails the check with no pull, since nothing was reached, and Daniel starts nothing further until it is fixed.
+
+The result is `probe-report.json` in the run's directory and `probe-result` in the ledger.
+Each decoy and the probe's own workspace are removed at the end, and one left by a probe killed outright holds no secret.
+
+**`company session probe --kill-test`** starts a probe that says it is waiting and runs a `sleep` for a random nine-digit number, then pulls with `stop_only`, which holds and stops as a pull does and leaves the timers and keys alone.
+An awake launcher may see the hold and stop its own session before the pull's sweep looks, by the same signal to the group, in which case no `stop-session` step is logged.
+What is left is everything the launcher's group holds, every process with the session's `COMPANY_SESSION` in its environment, and every process running `sleep` for that number, which is how a process that left the group is found.
+Nothing left, with the command seen running first, passes and resumes.
+Anything left fails, is named and killed by its process number, and leaves a hold until `company resume`, even when the session ended by itself and no stop had run, since no further session should start on a stop that failed.
+A session that never got to wait shows nothing either way, and is `not-proven`.
+It is refused with the schedule on, since a pull's record would call the schedule off, and with another session running, since its stop would stop that one too.
+Its report is `kill-test.json` in the run's directory, and on a stub it shows only the procedure, as it says: C1's answer for a real session is what ticket 14 reads from Daniel's run.
+A report that cannot be saved does not lose what the test found: the command still prints it and logs `probe-result`, says so, and exits non-zero.
+
+**`company session scan-reading <run>`** opens the run's `output.jsonl` and no other file, and names any field in it whose name speaks of a rate limit, a window, a used percent, a utilization or a reset, and any bare word value that does, with no other value shown.
+It says whether a used percent is among them, since a limit's status alone would not serve as a reading.
+This is C2's answer, and a worker may run it on the real home.
+
 ## Sources
 
 Read 2026-11-04 unless noted.
@@ -969,6 +1161,6 @@ The research's own sources, read 2026-11-02, are listed in `report.md` and `crit
 - Canada, An Act to promote the efficiency and adaptability of the Canadian economy (Canada's Anti-Spam Legislation), S.C. 2010, c. 23, https://laws-lois.justice.gc.ca/eng/acts/E-1.6/
 - Canada, Electronic Commerce Protection Regulations (CRTC), SOR/2012-36, https://laws-lois.justice.gc.ca/eng/regulations/SOR-2012-36/FullText.html
 - US Federal Trade Commission, "CAN-SPAM Act: A Compliance Guide for Business", https://www.ftc.gov/business-guidance/resources/can-spam-act-compliance-guide-business
-- Alpaca docs: [paper trading](https://docs.alpaca.markets/docs/paper-trading), [market data](https://docs.alpaca.markets/docs/about-market-data-api)
+- Alpaca docs: [paper trading](https://docs.alpaca.markets/docs/paper-trading), [market data](https://docs.alpaca.markets/docs/about-market-data-api), and the references read 2026-11-05 for the hosts and fields the paper module uses: [account](https://docs.alpaca.markets/reference/getaccount-1), [positions](https://docs.alpaca.markets/reference/getallopenpositions), [placing an order](https://docs.alpaca.markets/reference/postorder), [cancelling orders](https://docs.alpaca.markets/reference/deleteallorders-1) and [stock bars](https://docs.alpaca.markets/reference/stockbars)
 - Xu et al., "Harness²: Recursive Agent Harnessing for an Open World", 2026, https://arxiv.org/abs/2610.14224, with its reading in T189's report, section 5, in the agent team's records
-- Bailey and López de Prado, "The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting, and Non-Normality", Journal of Portfolio Management 40(5), 2014, https://doi.org/10.3905/jpm.2014.40.5.094 (citation confirmed through search results; ticket 09 reads the paper for the formula)
+- Bailey and López de Prado, "The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting, and Non-Normality", Journal of Portfolio Management 40(5), 2014, https://doi.org/10.3905/jpm.2014.40.5.094 (read 2026-11-05 at https://www.davidhbailey.com/dhbpapers/deflated-sharpe.pdf; the suite holds its numerical example)

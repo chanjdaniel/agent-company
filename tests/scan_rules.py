@@ -16,6 +16,7 @@ from company import banned
 DOCUMENTS = ("docs/design.md", "docs/first-run.md", "docs/research/")
 PAPER_MODULE = "src/company/paper.py"
 PAPER_HOSTS = ("paper-api.alpaca.markets", "data.alpaca.markets")
+LIVE_BROKER_HOST = "api.alpaca.markets"
 SCAN_FILES = ("tests/scan_rules.py", "tests/test_scan.py", "src/company/banned.py")
 
 
@@ -30,6 +31,10 @@ def _never(path):
 def _url_allowed(path):
     # A lock file records where each package came from; the paper module is checked by _paper_urls.
     return _is_document(path) or path == "uv.lock" or path == PAPER_MODULE
+
+
+def _paper_reach_allowed(path):
+    return _is_document(path) or path == PAPER_MODULE
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,10 @@ RULES = (
             re.MULTILINE,
         ),
     ),
+    # Any other name of the broker's: only the two hosts have a reason to be named, and the documents cite its documentation's.
+    Rule("other-broker-host", re.compile(r"(?<![\w.-])(?!(?:paper-api|data|docs)\.alpaca\.markets)[\w.-]*alpaca\.markets", re.IGNORECASE)),
+    Rule("broker-key-variable", banned.BROKER_KEY_VARIABLE),
+    Rule("paper-reach", re.compile(r"(?<![\w.-])(?:paper-api|data)\.alpaca\.markets|APCA-API-", re.IGNORECASE), _paper_reach_allowed),
     Rule("api-key-helper", re.compile(r"apiKeyHelper"), _is_document),
     Rule("bare-mode", re.compile(r"(?<![\w-])--bare\b"), _is_document),
     Rule(
