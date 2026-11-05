@@ -121,9 +121,10 @@ _BACKTEST = Tool(
 _VERDICT = Tool(
     "request_verdict",
     "Ask the Treasurer for the verdict on one configuration you have run: once per registration, whatever it says. "
-    "It runs that configuration, outside this session, on the in-sample bars and then the holdout, as one run. "
+    "It runs that configuration, outside this session, on the in-sample bars and then the holdout, as one run under the same time limit. "
     "You are told the verdict's fields, and never the holdout's bars or returns, or anything the strategy said there. "
-    "Passing takes the deflated Sharpe ratio over every trial you ran on these in-sample bars, the holdout's return, and the worse of the two maximum drawdowns.",
+    "Passing takes the deflated Sharpe ratio over every trial you ran on these days, under any registration, the holdout's return, and the worse of the two maximum drawdowns; "
+    "a strategy that takes no position on the holdout fails it.",
     {
         "type": "object",
         "properties": {

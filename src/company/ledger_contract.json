@@ -41,6 +41,7 @@
     "strategy-registered": {"group": "Quant", "writers": ["cell:<bet>"], "required": ["strategy", "universe", "data_source", "data_hash", "in_sample", "holdout", "cost_model", "slippage_model", "max_configurations", "acceptance"], "optional": ["paper_days"]},
     "config-run": {"group": "Quant", "writers": ["runner"], "required": ["registration_seq", "config_hash", "status", "budget_used"], "optional": ["sharpe", "n_returns", "skew", "kurtosis", "total_return", "max_drawdown", "returns_hash", "failure"]},
     "config-refused": {"group": "Quant", "writers": ["runner"], "required": ["registration_seq", "config_hash", "reason"], "optional": []},
+    "verdict-opened": {"group": "Quant", "writers": ["treasurer"], "required": ["registration_seq", "config_hash"], "optional": []},
     "verdict": {"group": "Quant", "writers": ["treasurer"], "required": ["registration_seq", "config_hash", "passed", "failed_tests", "deflated_sharpe", "holdout_return", "max_drawdown", "trials", "config_run_seqs", "holdout_hash"], "optional": ["holdout_failure"]},
     "paper-opened": {"group": "Quant", "writers": ["runner"], "required": ["registration_seq", "verdict_seq", "end_date", "drawdown_kill"], "optional": ["promise_seq"]},
     "paper-order": {"group": "Quant", "writers": ["runner"], "required": ["period_seq", "symbol", "side", "quantity", "broker_order_id", "status"], "optional": []},

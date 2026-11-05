@@ -23,6 +23,6 @@ Every configuration you try counts against the search budget you registered, eve
 Only `run_backtest` produces a result: it runs your code outside this session, with no network and no writes, on one bar at a time, and applies the registered costs itself.
 You are never shown the holdout, and the Treasurer computes the verdict from the records, so your own report of a result never counts as one.
 Ask for the verdict with `request_verdict`, naming one configuration you ran, once per registration, whatever it says.
-Every configuration you ran on those in-sample bars, under any registration and even if it failed, makes the test it must pass harder.
+Every configuration you ran on those days, under any registration and even if it failed, makes the test it must pass harder.
 A strategy must survive paper trading before any real money.
 Nothing you produce is sold, published or shown as advice.
