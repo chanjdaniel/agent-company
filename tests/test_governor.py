@@ -559,7 +559,7 @@ def test_a_paused_bet_refuses_until_it_is_resumed(check, ready):
     event = assert_refused(check("cell", "alpha"), "pause", "paused")
 
     assert event["bet"] == "alpha"
-    assert event["fix"] == "company cell resume"
+    assert event["fix"] == "company cell resume --bet alpha"
     resume("alpha")
     assert check("cell", "alpha").returncode == 0
 

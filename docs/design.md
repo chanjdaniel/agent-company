@@ -273,6 +273,7 @@ A kind that a later ticket finds it needs joins this table and the contract in t
 | `go-given` | Governance | `board` | `scope`, `message`, `sessions` | |
 | `schedule-enabled` | Governance | `board` | `message`, `jobs` | |
 | `schedule-disabled` | Governance | `board`, `killswitch` | `reason` | |
+| `job-failed` | Governance | `scheduler` | `job`, `exit` | |
 | `append-refused` | Governance | `treasurer`, `governor`, `launcher`, `scheduler`, `killswitch`, `runner` | `attempted_kind`, `attempted_writer`, `reason` | `session`, `tool` |
 | `usage-reading` | Resources | `board`, `governor` | `window`, `used_percent`, `resets_at`, `taken_at`, `source` | |
 | `resource-charged` | Resources | `treasurer` | `week_start`, `line`, `weight`, `fraction`, `company_used`, `cost`, `reading_seq`, `charge_id`, `charge_lines` | |
@@ -302,8 +303,9 @@ A kind that a later ticket finds it needs joins this table and the contract in t
 | `experiment-registered` | Venture | `cell:<bet>` | `experiment`, `hypothesis`, `metric`, `keep_threshold`, `kill_threshold`, `budget_tokens`, `budget_dollars`, `budget_minutes`, `end_date` | |
 | `experiment-verdict` | Venture | `treasurer` | `experiment_seq`, `outcome`, `metric_value`, `positive_signal` | `veto_seq` |
 | `promise-recorded` | Honesty | `cell:<bet>`, `runner` | `promise`, `due_date` | `bet`, `counterparty` |
+| `promise-kept` | Honesty | `board` | `promise_seq`, `kept_date` | `note` |
 | `promise-checked` | Honesty | `treasurer` | `promise_seq`, `result` | `evidence_seqs` |
-| `finding` | Honesty | `auditor`, `treasurer`, `board` | `rubric`, `summary`, `evidence` | `bet`, `session` |
+| `finding` | Honesty | `auditor`, `treasurer`, `board` | `rubric`, `summary`, `evidence` | `bet`, `session`, `promise_seq` |
 | `finding-confirmed` | Honesty | `board`, `treasurer` | `finding_seq` | `message` |
 | `cell-paused` | Honesty | `treasurer` | `scope`, `reason`, `cause_seq` | `bet` |
 | `cell-resumed` | Honesty | `board` | `scope` | `bet`, `message` |
@@ -353,8 +355,11 @@ Notes on single kinds:
 - `promise-recorded` allows `runner` so that a paper period can record the promise of its own end date, and a runner's promise always sets `bet`.
   That promise is the code's and not the cell's, so the honesty metrics leave every runner's promise out of the cell's promises, and it is kept when `paper-closed` cites the period by the due date.
   If no tick closed the period by then, even if a later tick closes it, the Treasurer logs `promise-checked` with the result `not-run` and tells Daniel in the digest, with no `finding` and no `cell-paused`, and from ticket 19 on it logs one `incident`.
-- `promise-checked`'s `result` is `kept`, `broken` or `not-run`.
-- `finding` allows `treasurer` so that a check the Treasurer makes itself, such as an overdue promise, can record its finding.
+- `promise-kept` is Daniel's word that a cell's promise was kept on `kept_date`, written by `company promise kept <seq> [--on <day>] [--note <text>]`, since a cell's own report never counts and most promises leave no record code can read.
+- `promise-checked`'s `result` is `kept`, `broken` or `not-run`, and `evidence_seqs` names what it rests on: the `promise-kept`, the `paper-closed` or the finding.
+  A promise gets one, whatever happens after.
+- `job-failed` is written by `company schedule run <job>` when the job exits non-zero or raises, in the ledger of the home that command was started in, whichever home the job itself ran in; `exit` is the job's exit code, and its output stays in the timer's journal.
+- `finding` allows `treasurer` so that a check the Treasurer makes itself, such as an overdue promise, can record its finding, whose `promise_seq` names that promise.
   It allows `board` so that Daniel can record a fabricated claim they find in the batch, with `company finding record`, which also writes `finding-confirmed`.
   For a claim in a draft the command takes the bet and pauses that cell; for a memo, whose author is no cell, it records the finding with no pause, beside `memo-rejected`, so that the honesty metrics still see it.
 
@@ -449,8 +454,8 @@ Before money flows, a pre-registered leading indicator stands in for it, counted
 `company digest` prints the page Daniel reads each week, and writes nothing: the bar, each bet's margin, each resource against its budget, incidents, honesty metrics and pending approvals.
 
 - **Resources:** tokens from the share of each window with a reading against `company_share`, dollars spent in the last seven days, and Daniel-minutes in the last seven days against `daily_minutes × 7`, with a note of any decision not charged yet.
-- **Incidents:** those in the last seven days.
-- **Honesty:** the cells' promises made, kept, broken and open; findings in the last seven days, and those unconfirmed in all; complaints, spam flags and refunds in the last seven days; and the pauses in effect.
+- **Incidents:** those in the last seven days, and one line for each scheduled job that failed in them, with how many times and how it last ended.
+- **Honesty:** the cells' promises made, kept, broken and open; each runner's promise that was not run, on a line of its own and never among the cells'; findings in the last seven days, and those unconfirmed in all; complaints, spam flags and refunds in the last seven days; and the pauses in effect.
 - **Pending approvals:** every `approval-asked` with no `approval-decided`.
 
 A section with nothing to say prints "none", and an empty ledger prints that for every section and exits 0, with or without settings.
@@ -550,8 +555,7 @@ Only Daniel's resume command, `company resume [--message <Discord id>]`, undoes 
 A resume leaves the schedule off and a moved key moved, so each of those comes back only by Daniel's own step.
 Any loop's red line can pull it by code outside a session, with `killswitch.pull(by, reason, loop)`, and the ledger names the loop.
 Its self-test, `company kill --self-test`, runs in the test suite with stub sessions and accounts in its own temporary home, and on the schedule once gate C opens.
-It reads and writes nothing of the home it was started from, so its result goes to its output alone, which on the schedule is the timer's journal.
-So nobody sees a scheduled self-test that fails until ticket 11 records a failed job where Daniel reads, and the schedule stays off until gate C.
+It reads and writes nothing of the home it was started from, so its result goes to its output, which on the schedule is the timer's journal; `company schedule run`, in the real home, then logs `job-failed` if it failed, and the digest shows that.
 
 A pull must work when the ledger cannot, since `Ledger.append` raises on a broken end.
 So its first act is a file of its own in the company home's `kill.state` directory, and its actions all come before any ledger write and take no lock, with each failure a reported step that stops nothing else.
@@ -592,6 +596,8 @@ The runner is the `systemctl` first on `PATH`, and the suite puts one there that
 Only Daniel's `company schedule enable --message <Discord id>` turns it on, and it logs `schedule-enabled` with the jobs; `company schedule disable` and the kill switch undo it, and `company schedule list` says which it is.
 If `enable` fails, or a pull lands during it, it turns the timers back off and logs `schedule-disabled`.
 A timer's service runs `company schedule run <job>`, which asks the ledger again and refuses with the schedule off or the kill switch pulled, so a timer that could not be turned off still runs nothing.
+A job that then fails, by exiting non-zero or by raising, is logged as `job-failed`, and the digest's incidents show it; a run refused at that first step is no failure and logs nothing, and over a broken ledger the failure can go only to the job's output, while the digest says the ledger is broken.
+A job that keeps failing logs each time, so a charge due every five minutes can log often; the digest gives each job one line.
 A unit carries only `COMPANY_HOME`, `COMPANY_CONFIG` and `CLAUDE_CONFIG_DIR`, so a job that starts a session would look for `claude` on the user manager's own path and might be refused with `no-binary`; no job starts one yet, and ticket 12's are the first.
 Until gate C opens the schedule, the kill switch's self-test, `company paper tick`, `company treasurer check`, `company treasurer charge`, the daily audit sample, the weekly audit pass, the batch, the strategy session and the retro run by Daniel's command.
 
@@ -652,7 +658,7 @@ Pre-registration and the replay gate bind what crosses the company's boundary (m
 - **Metric:** complaints, refund requests and their outcome, platform warnings, spam flags on outreach (counted separately), Auditor findings, and promises made against promises kept.
 - **Ground truth:** what reaches Daniel's own inbox and accounts, recorded by Daniel; `promise-recorded` events checked by the Treasurer when due; the `config-run` and `verdict` records against what a transcript claims.
 - **Decision rule:** a confirmed deception, broken payment promise, fabricated claim in a draft or terms-of-service breach pauses the cell at once and tells Daniel; a check the Treasurer can make itself (an overdue promise a cell made, a result in a transcript that no record shows) is confirmed by code, and anything else by Daniel's `company finding confirm`; past the complaint threshold, new outside actions pause company-wide until Daniel reviews.
-- **Cadence:** Treasurer checks at `company treasurer check`, the Auditor's sample daily and a full pass weekly.
+- **Cadence:** Treasurer checks at `company treasurer check`, a job at 00:15 UTC once gate C opens and by Daniel's command until then, the Auditor's sample daily and a full pass weekly.
 - **Guardrail:** the Auditor runs fresh on a different Claude model and reports to Daniel only; no cell can read or argue with a finding; every goal text carries the honesty constraints.
 
 ### Rules every loop shares
@@ -854,9 +860,42 @@ The gap is known and accepted, and it is revisited at each retro.
 - It has read-only file tools and only its finding tool, and sees the rubric, the whole ledger and the audited transcripts.
 - It has no web read, so it checks a citation to the ledger and not an outside URL, which Daniel checks in the batch.
 - Its findings go only to Daniel's digest and the ledger; no cell has them in its ledger view.
-- A confirmed finding pauses the cell, and only Daniel's `company cell resume` resumes it.
+- A confirmed finding pauses the cell, and only Daniel's `company cell resume --bet <bet>` resumes it, logged as `board`.
 - Its daily sample and weekly full pass are schedule jobs, so they run only once gate C opens; until then they run by Daniel's command.
 - Transcripts are kept in the company home for the audit window.
+
+### Promises and the honesty checks
+
+A cell records each promise it makes with its `record_promise` tool, which takes the text, the due date and any counterparty, refuses a date already past, and writes under the session's fixed writer.
+`company treasurer check` then settles each promise once, and is safe to run at any time and any number of times:
+
+| Promise | What it finds | Result | What else it writes |
+| - | - | - | - |
+| A cell's | Daniel's `promise-kept`, at any time before the check | `kept` | Nothing |
+| A cell's | No such word once its due date has ended, in UTC | `broken` | A code-confirmed `finding`, `finding-confirmed` and `cell-paused`, each by `treasurer` |
+| A runner's | `paper-closed` citing its period, on or before its due date | `kept` | Nothing |
+| A runner's | No such close once its due date has ended, whether or not one comes later | `not-run` | Nothing, and the digest lists it apart |
+
+**A cell's promise is kept only by Daniel's word.**
+A cell's report of its own promise is the thing the honesty loop must not rest on, and a promise such as a delivery leaves no record the code can read, so silence past the date reads as broken and it costs Daniel a command to say otherwise.
+That word must name a day by the due date, and comes before the check reads the promise, so a word Daniel gives late takes `--on`, and one after the check has read it broken is refused; the pause is then lifted by `company cell resume`.
+
+Each write of a broken promise looks for what an earlier check wrote, so a check stopped part way is finished by the next with nothing twice, and a lock of its own, `honesty.lock`, keeps two from running at once.
+
+**A pause refuses the cell's next launch, and does no more.**
+A session already running goes on to its own limits, and a paper period goes on, since code and not the cell runs it.
+
+**A resume is Daniel's alone.**
+`company cell resume --bet <bet> [--message <Discord id>]` lifts a cell's pause, and a resume with nothing paused is refused and logged.
+None of this section's commands runs inside a session.
+
+**Complaints and spam flags** are Daniel's to record, with `company complaint record --source <where> --summary <text> [--bet <id>] [--contact <who>]` and `company spam-flag record --source <where> [--bet <id>] [--contact <who>]`.
+Each record weighs the threshold under "Numbers set here", and so does each check; if the settings cannot be read the flag stands and the command says it was not weighed, with no value assumed.
+Reaching the threshold logs `cell-paused` with the scope `outside-actions`, and from then on the ledger itself refuses `target-proposed`, `draft-proposed` and `experiment-registered`, the kinds by which a cell starts an outside action, with the reason `outside-actions-paused`, on every path to it.
+The list is `outside_actions` in the contract.
+A `send-confirmed` is not refused, since it records what Daniel already did, and a fact stays a fact.
+`company cell resume --outside-actions [--message <Discord id>]` is Daniel's review, and the threshold then counts only flags after it, or the next check would undo the review while those flags stay in the month.
+Outside actions in the 2% rule are the `send-confirmed` events in the same trailing days.
 
 ### Honesty toward people and platforms
 
@@ -906,7 +945,8 @@ A JSON file in Daniel's config directory holds `company_share`, `team_floor`, `m
 Each of these is **Daniel's to change,** with `company settings set`.
 
 **The complaint threshold** (`complaint_threshold`): complaints and spam flags together reaching two in a trailing 30 days, or 2% of outside actions in that time if that is higher, pause new outside actions company-wide until Daniel reviews.
-The file holds it as `count` 2, `days` 30 and `outside_action_fraction` 0.02.
+The file holds it as `count` 2, `days` 30 and `outside_action_fraction` 0.02, and refuses a `count` or `days` of zero, or `days` above 3650.
+"Reaching" means the flags are at or above the higher of the two numbers.
 
 **The portfolio rule's numbers** (`portfolio`), where the file holds each percent as a fraction, such as 0.1 for 10%, and a share above 1 is refused:
 
@@ -939,7 +979,7 @@ The file holds it as `count` 2, `days` 30 and `outside_action_fraction` 0.02.
 | The company home, outside the repository (default `~/.local/state/agent-company/`, or `COMPANY_HOME`) | The ledger, session workspaces, each session's run and the replay set |
 | Daniel's config directory, outside the repository (default `~/.config/agent-company/`, or `COMPANY_CONFIG`) | Their settings and the paper key |
 
-`company` is a thin command line over deep modules: Ledger, Usage, Reading, Treasurer, Settings, Governor, Launcher, Company tools, Quant, Paper, Paper period, Kill switch, Schedule, and one entry each for Batch, Outreach, Opportunity, Portfolio, Retro and Replay.
+`company` is a thin command line over deep modules: Ledger, Usage, Reading, Treasurer, Settings, Governor, Launcher, Company tools, Quant, Paper, Paper period, Honesty, Kill switch, Schedule, and one entry each for Batch, Outreach, Opportunity, Portfolio, Retro and Replay.
 
 The suite runs with no network and no model session, and fails on any attempt at either.
 It tests through the `company` command or the company tools over stdio, using a stub `claude` that plays a script through the same tools a real session uses.

@@ -7,7 +7,7 @@ The research behind it, with its critique, Daniel's decisions and draft tickets,
 
 ## The code
 
-The first slice is being built, and so far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the session launcher and company tools, the kill switch and the schedule, the quant cell's registration, backtest runner and verdict, the paper account and its period, the test suite and CI.
+The first slice is being built, and so far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the session launcher and company tools, the kill switch and the schedule, the quant cell's registration, backtest runner and verdict, the paper account and its period, promises and the honesty checks, the test suite and CI.
 It is Python 3.13 with no runtime dependency outside the standard library, and needs `uv` to run.
 
 ```sh
@@ -44,6 +44,14 @@ uv run company schedule enable --message 1234
 uv run company schedule disable        # turn the timers off
 uv run company paper check             # one read-only call to the paper account: its status and equity
 uv run company paper tick              # run the open paper period once, which only code does; no real money is involved
+uv run company treasurer check         # check each promise now settled, once; a broken one pauses its cell
+uv run company promise kept 12 --on 2026-11-05
+                                       # Daniel's word that a cell's promise was kept, which nothing else can say
+uv run company cell resume --bet alpha # lift a cell's pause, which nothing else does
+uv run company complaint record --source inbox --summary "what they said"
+uv run company spam-flag record --source inbox
+                                       # at the threshold these pause new outside actions, until:
+uv run company cell resume --outside-actions
 ```
 
 The share, the charge, the governor, a session and a digest of a ledger with events read `settings.json` in Daniel's config directory, and refuse without it, since no share or floor is compiled in.

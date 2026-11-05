@@ -3,7 +3,7 @@
 from datetime import datetime
 from fractions import Fraction
 
-from company import reading, times, treasurer
+from company import honesty, reading, schedule, times, treasurer
 
 NONE = "none"
 _SECTIONS = ("Bar", "Bets", "Resources", "Incidents", "Honesty", "Pending approvals")
@@ -167,6 +167,23 @@ def _incidents(events: list[dict], week: treasurer.Span) -> list[str]:
     for event in events:
         if event["kind"] == "incident" and week.holds(event):
             lines.append(f"Event {event['seq']}: {event['class']}{_bet_note(event)}, caused by event {event['cause_seq']}")
+    return [*lines, *_failed_job_lines(events, week)]
+
+
+def _failed_job_lines(events: list[dict], week: treasurer.Span) -> list[str]:
+    """One line for each job that failed on the schedule this week, however many times, since a timer may fail every few minutes."""
+    failures: dict[str, list[dict]] = {}
+    for event in events:
+        if event["kind"] == "job-failed" and week.holds(event):
+            failures.setdefault(event["job"], []).append(event)
+    lines = []
+    for job, failed in failures.items():
+        times_failed = "1 time" if len(failed) == 1 else f"{len(failed)} times"
+        newest = failed[-1]
+        lines.append(
+            f"Scheduled job {job} failed {times_failed} in the last seven days, last at {newest['ts']} with exit {newest['exit']}: "
+            f"a timer's output is in `{schedule.journal_command(job)}`"
+        )
     return lines
 
 
@@ -179,6 +196,16 @@ def _promises_line(events: list[dict]) -> str | None:
     kept = sum(result == "kept" for result in results.values())
     failed = sum(result == "broken" for result in results.values())
     return f"Cells' promises: {len(made)} made, {kept} kept, {failed} broken, {len(made) - len(results)} open"
+
+
+def _not_run_lines(events: list[dict]) -> list[str]:
+    """A runner's promises that nothing ran by their dates, listed apart: they are Daniel's to know, and count against no cell."""
+    results = {e["promise_seq"]: e["result"] for e in events if e["kind"] == "promise-checked"}
+    return [
+        f"The code's promise, not run and no cell's doing: event {e['seq']}, bet {e.get('bet', 'unknown')}, due {e['due_date']}: {e['promise']}"
+        for e in events
+        if e["kind"] == "promise-recorded" and results.get(e["seq"]) == honesty.NOT_RUN
+    ]
 
 
 def _findings_line(events: list[dict], week: treasurer.Span) -> str | None:
@@ -210,6 +237,7 @@ def _paused_line(events: list[dict]) -> str | None:
 def _honesty(events: list[dict], week: treasurer.Span) -> list[str]:
     lines = [
         _promises_line(events),
+        *_not_run_lines(events),
         _findings_line(events, week),
         _count_line(events, week, "complaint", "Complaints"),
         _count_line(events, week, "spam-flag", "Spam flags"),

@@ -54,11 +54,18 @@ JOBS = (
     Job(CHARGE_JOB, ("treasurer", "charge"), "*:0/5", treasurer.charge_due),
     # After New York's close in either season, so that the day's bar is whole; every day, since an end date may fall on any.
     Job("paper-tick", ("paper", "tick"), "*-*-* 21:30:00 UTC"),
+    # After each UTC day ends, which is when a promise falls overdue.
+    Job("treasurer-check", ("treasurer", "check"), "*-*-* 00:15:00 UTC"),
 )
 
 
 def job(name: str) -> Job:
     return next(found for found in JOBS if found.name == name)
+
+
+def journal_command(name: str) -> str:
+    """Where a timer's output for this job went."""
+    return f"journalctl --user -u {_UNIT_PREFIX}{name}"
 
 
 def enabled(events: list[dict]) -> bool:

@@ -5,13 +5,15 @@ import contextlib
 import json
 import os
 import sys
+import traceback
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from company import (
     contract,
     digest,
     governor,
+    honesty,
     kill_state,
     killswitch,
     launcher,
@@ -208,6 +210,116 @@ def _treasurer_charge(args) -> int:
             file=sys.stderr,
         )
     return EXIT_REFUSED if due.problems or isinstance(week, reading.Unreadable) else EXIT_OK
+
+
+def _checked_line(checked: honesty.Checked) -> str:
+    seq, promise = checked.promise["seq"], checked.promise
+    if checked.result == honesty.KEPT:
+        return f"Event {seq}, due {promise['due_date']}: kept."
+    if checked.result == honesty.NOT_RUN:
+        return f"Event {seq}, due {promise['due_date']}: not run, so no tick closed its paper period by then. It is the code's promise, so nothing goes against the cell, and the digest says so."
+    bet = promise["writer"].removeprefix(contract.CELL_PREFIX)
+    return f"Event {seq}, due {promise['due_date']}: broken, which is finding {checked.finding}. The cell {bet} is paused until `{honesty.resume_command(bet)}`."
+
+
+def _weigh_complaints() -> int:
+    """Whether the flags since Daniel's last review have reached the threshold, having said so; a recorded flag stands either way."""
+    try:
+        review = honesty.review_complaints()
+    except settings.SettingsRefused as refused:
+        print(f"company: the complaint threshold was not weighed: {refused}. Fix: `{refused.fix}`.", file=sys.stderr)
+        return EXIT_REFUSED
+    except (AppendRefused, LedgerBroken, OSError) as refused:
+        print(f"company: the complaint threshold was not weighed: {refused}. See `company ledger verify`.", file=sys.stderr)
+        return EXIT_REFUSED
+    if review is not None:
+        counted = f"Complaints and spam flags since your last review, in the last {review.days:g} days: {review.flagged}, and {float(review.needed):g} pause new outside actions."
+        print(counted)
+        if review.held:
+            print(f"New outside actions are refused company-wide until `{honesty.RESUME_OUTSIDE}`.")
+        if review.pause is not None:
+            print(f"Event {review.pause['seq']} in the ledger records the pause.")
+    return EXIT_OK
+
+
+def _treasurer_check(args) -> int:
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, "promise-checked", "treasurer") or _is_broken(ledger):
+        return EXIT_REFUSED
+    try:
+        results = honesty.check_promises()
+    except (AppendRefused, LedgerBroken, OSError) as refused:
+        print(f"company: the check stopped here: {refused}. What it wrote stands, and running it again once `company ledger verify` is clean finishes it, with nothing twice.", file=sys.stderr)
+        return EXIT_REFUSED
+    for checked in results:
+        print(_checked_line(checked))
+    if not results:
+        print("No promise is due a check.")
+    return _weigh_complaints()
+
+
+def _promise_kept(args) -> int:
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, "promise-kept", "board") or _is_broken(ledger):
+        return EXIT_REFUSED
+    today = times.now().date()
+    try:
+        on = date.fromisoformat(args.on) if args.on else today
+    except ValueError:
+        on = None
+    if on is None or on > today:
+        print("company: --on must be a day like 2026-11-05, and no later than today. Nothing was recorded.", file=sys.stderr)
+        return EXIT_USAGE
+    try:
+        event = honesty.keep_promise(args.promise, on, args.note)
+    except honesty.Refused as refused:
+        print(f"company: refused: {refused}. Nothing was recorded; event {refused.seq} in the ledger records the refusal.", file=sys.stderr)
+        return EXIT_REFUSED
+    except (AppendRefused, LedgerBroken, OSError) as refused:
+        print(f"company: refused: {refused}. Nothing was recorded; see `company ledger verify`.", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"Recorded event {event['seq']}: the promise in event {args.promise} was kept on {event['kept_date']}. The next `company treasurer check` logs it.")
+    return EXIT_OK
+
+
+def _cell_resume(args) -> int:
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, "cell-resumed", "board") or _is_broken(ledger):
+        return EXIT_REFUSED
+    scope = honesty.OUTSIDE_SCOPE if args.outside_actions else honesty.CELL_SCOPE
+    try:
+        event = honesty.resume(scope, args.bet, args.message)
+    except honesty.Refused as refused:
+        print(f"company: refused: {refused}. Nothing was resumed; event {refused.seq} in the ledger records the refusal.", file=sys.stderr)
+        return EXIT_REFUSED
+    except (AppendRefused, LedgerBroken, OSError) as refused:
+        print(f"company: refused: {refused}. Nothing was resumed; see `company ledger verify`.", file=sys.stderr)
+        return EXIT_REFUSED
+    what = f"the cell {args.bet} may launch again" if args.bet else "new outside actions may start again"
+    print(f"Recorded event {event['seq']}: {what}.")
+    return EXIT_OK
+
+
+def _record_flag(kind: str, fields: dict) -> int:
+    """Daniel's record of what reached them, which stands whether or not the threshold can then be weighed."""
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, kind, "board") or _is_broken(ledger):
+        return EXIT_REFUSED
+    try:
+        event = ledger.append(kind, {name: value for name, value in fields.items() if value is not None}, "board")
+    except (AppendRefused, LedgerBroken, OSError) as refused:
+        print(f"company: refused: {refused}. Nothing was recorded; see `company ledger verify`.", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"Recorded event {event['seq']}: a {kind.replace('-', ' ')}.")
+    return _weigh_complaints()
+
+
+def _complaint_record(args) -> int:
+    return _record_flag("complaint", {"source": args.source, "summary": args.summary, "bet": args.bet, "contact": args.contact})
+
+
+def _spam_flag_record(args) -> int:
+    return _record_flag("spam-flag", {"source": args.source, "bet": args.bet, "contact": args.contact})
 
 
 def _minutes_correct(args) -> int:
@@ -465,11 +577,30 @@ def _schedule_run(args) -> int:
     if refusal:
         print(f"company: refused: {refusal}. The job {args.job} did not run.", file=sys.stderr)
         return EXIT_REFUSED
-    job = schedule.job(args.job)
-    if not job.is_due(events, times.now()):
-        print(f"The job {args.job} is not due.")
-        return EXIT_OK
-    return main(list(job.command))
+    code = _job_exit(schedule.job(args.job), events)
+    if code != EXIT_OK:
+        _record_failed_job(args.job, code)
+    return code
+
+
+def _job_exit(job: schedule.Job, events: list[dict]) -> int:
+    """How the job ended: one that raises has failed like one that refuses, and its traceback goes to its output."""
+    try:
+        if not job.is_due(events, times.now()):
+            print(f"The job {job.name} is not due.")
+            return EXIT_OK
+        return main(list(job.command))
+    except (Exception, SystemExit):  # noqa: BLE001 - whatever ended the job, Daniel must read that it failed.
+        traceback.print_exc()
+        return EXIT_REFUSED
+
+
+def _record_failed_job(name: str, code: int) -> None:
+    """In this home's ledger, whichever home the job ran in, since a job's own output reaches only a journal Daniel does not read."""
+    try:
+        Ledger().append("job-failed", {"job": name, "exit": code}, "scheduler")
+    except (AppendRefused, LedgerBroken, OSError) as refused:
+        print(f"company: the job {name} failed, and the ledger could not record it: {refused}. See `company ledger verify`.", file=sys.stderr)
 
 
 def _paper_check(args) -> int:
@@ -564,6 +695,47 @@ def _parser() -> argparse.ArgumentParser:
         "charge", help="Charge what is owed: each decision's Daniel-minutes, and the open window's share, line by line."
     )
     charge.set_defaults(run=_treasurer_charge)
+
+    check = actions.add_parser("check", help="Check each promise now settled, once, and weigh complaints against the threshold.")
+    check.set_defaults(run=_treasurer_check)
+
+    promises = commands.add_parser("promise", help="Daniel's word on a cell's promise.")
+    actions = promises.add_subparsers(dest="action", required=True)
+
+    kept = actions.add_parser("kept", help="Say a cell's promise was kept, which nothing else can.")
+    kept.add_argument("promise", type=int, help="The seq of its `promise-recorded` event.")
+    kept.add_argument("--on", help="The day it was kept, like 2026-11-05; today if left out.")
+    kept.add_argument("--note", help="What shows it, in your words.")
+    kept.set_defaults(run=_promise_kept)
+
+    cells = commands.add_parser("cell", help="Daniel's word on a pause, which nothing else lifts.")
+    actions = cells.add_subparsers(dest="action", required=True)
+
+    lift = actions.add_parser("resume", help="Lift a cell's pause, or the company-wide pause of new outside actions.")
+    which = lift.add_mutually_exclusive_group(required=True)
+    which.add_argument("--bet", help="The bet whose cell may launch again.")
+    which.add_argument("--outside-actions", action="store_true", help="Say you have reviewed the complaints, and new outside actions may start again.")
+    lift.add_argument("--message", help="The Discord id of Daniel's word, if there is one.")
+    lift.set_defaults(run=_cell_resume)
+
+    complaints = commands.add_parser("complaint", help="What reached Daniel about the company.")
+    actions = complaints.add_subparsers(dest="action", required=True)
+
+    grievance = actions.add_parser("record", help="Record a complaint, and weigh the threshold that pauses new outside actions.")
+    grievance.add_argument("--source", required=True, help="Where it reached you.")
+    grievance.add_argument("--summary", required=True)
+    grievance.add_argument("--bet", help="The bet it is about, if one.")
+    grievance.add_argument("--contact", help="Who it came from, if that matters.")
+    grievance.set_defaults(run=_complaint_record)
+
+    flags = commands.add_parser("spam-flag", help="What a platform or person flagged as spam.")
+    actions = flags.add_subparsers(dest="action", required=True)
+
+    flagged = actions.add_parser("record", help="Record a spam flag, and weigh the threshold that pauses new outside actions.")
+    flagged.add_argument("--source", required=True, help="Where it reached you.")
+    flagged.add_argument("--bet", help="The bet it is about, if one.")
+    flagged.add_argument("--contact", help="Who was flagged about, if that matters.")
+    flagged.set_defaults(run=_spam_flag_record)
 
     minutes = commands.add_parser("minutes", help="Daniel's own word on the minutes charged.")
     actions = minutes.add_subparsers(dest="action", required=True)

@@ -31,15 +31,19 @@ DIGEST_SETTINGS = {
 }
 
 
-def charge_at(when: str) -> subprocess.CompletedProcess:
-    """`company treasurer charge` with the report's clock at `when`: the command has no flag for it, since it writes for good."""
+def run_at(when: str, *arguments: str) -> subprocess.CompletedProcess:
+    """A `company` command with its clock at `when`, for a command that has no flag for it since it writes for good."""
     code = (
         "import sys\n"
         "from company import cli, times\n"
         f"times.now = lambda: times.parse_stamp({when!r})\n"
-        "sys.exit(cli.main(['treasurer', 'charge']))\n"
+        f"sys.exit(cli.main({list(arguments)!r}))\n"
     )
     return subprocess.run([sys.executable, "-c", code], check=False, capture_output=True, text=True)
+
+
+def charge_at(when: str) -> subprocess.CompletedProcess:
+    return run_at(when, "treasurer", "charge")
 
 
 def ledger_at(when: str) -> Ledger:

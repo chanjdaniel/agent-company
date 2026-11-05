@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from company import contract, paper, quant
+from company import contract, paper, quant, times
 from company.ledger import AppendRefused, Ledger, LedgerBroken
 
 _PARSE_ERROR = -32700
@@ -41,6 +41,18 @@ def _note(server: "Server", arguments: dict) -> dict:
     return _result(f"Recorded as event {event['seq']}.")
 
 
+def _record_promise(server: "Server", arguments: dict) -> dict:
+    promise, due_date, counterparty = arguments.get("promise"), arguments.get("due_date"), arguments.get("counterparty")
+    if not isinstance(promise, str) or not promise or not isinstance(due_date, str) or (counterparty is not None and not isinstance(counterparty, str)):
+        raise _BadArguments
+    # A date already past would be broken as it is made; a malformed one goes on to the contract.
+    if due_date < times.now().date().isoformat():
+        raise _BadArguments
+    fields = {"promise": promise, "due_date": due_date} | ({"counterparty": counterparty} if counterparty else {})
+    event = server.ledger.append("promise-recorded", fields, server.writer, {"session": server.session, "tool": "record_promise"})
+    return _result(f"Recorded as event {event['seq']}, due {due_date}.")
+
+
 def _register_strategy(server: "Server", arguments: dict) -> dict:
     event = quant.register(arguments, server.writer, server.market_data)
     return _result(f"Registered as event {event['seq']}, with the data's hash {event['data_hash']}.")
@@ -60,6 +72,22 @@ _NOTE = Tool(
     {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
     "session-note",
     _note,
+)
+_PROMISE = Tool(
+    "record_promise",
+    "Record a promise you have made, with its due date. Daniel alone says it was kept, and with no such word by the end of that day, UTC, "
+    "it is broken: a finding that pauses this bet until Daniel resumes it.",
+    {
+        "type": "object",
+        "properties": {
+            "promise": {"type": "string", "description": "What was promised, plainly enough for Daniel to tell whether it was kept."},
+            "due_date": {"type": "string", "description": "The last day it may be kept on, as YYYY-MM-DD, UTC; not a day already past."},
+            "counterparty": {"type": "string", "description": "Whom it was made to, if anyone outside."},
+        },
+        "required": ["promise", "due_date"],
+    },
+    "promise-recorded",
+    _record_promise,
 )
 _PERIOD = {
     "type": "object",
@@ -137,8 +165,8 @@ _VERDICT = Tool(
     "verdict",
     _request_verdict,
 )
-TOOLS = {tool.name: tool for tool in (_NOTE, _REGISTER, _BACKTEST, _VERDICT)}
-ROLE_TOOLS = {"probe": ("note",), "cell": ("note", "register_strategy", "run_backtest", "request_verdict"), "strategy": (), "auditor": (), "retro": ()}
+TOOLS = {tool.name: tool for tool in (_NOTE, _PROMISE, _REGISTER, _BACKTEST, _VERDICT)}
+ROLE_TOOLS = {"probe": ("note",), "cell": ("note", "record_promise", "register_strategy", "run_backtest", "request_verdict"), "strategy": (), "auditor": (), "retro": ()}
 _UNKNOWN_KIND = "unknown-tool"
 
 

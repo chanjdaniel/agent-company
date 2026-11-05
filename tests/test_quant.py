@@ -1101,7 +1101,7 @@ def test_a_stub_cell_registers_and_runs_its_backtests_through_the_real_tools(cel
 
     assert done.returncode == 0, done.stdout + done.stderr
     listed = {tool["name"] for tool in stub.tool_lists()[-1]["result"]["tools"]}
-    assert {"note", "register_strategy", "run_backtest", "request_verdict"} == listed
+    assert {"note", "register_strategy", "run_backtest", "request_verdict", "record_promise"} == listed
     allowed = stub.argument("--allowedTools").split(",")
     assert "mcp__company__register_strategy" in allowed
     assert "mcp__company__run_backtest" in allowed

@@ -12,6 +12,7 @@ _NAME = re.compile(r"[a-z0-9][a-z0-9_:-]{0,63}")
 _BET = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 _CELL_WRITER = "cell:<bet>"
 CELL_PREFIX = "cell:"
+OUTSIDE_ACTIONS_SCOPE = "outside-actions"
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _DISCORD_ID = re.compile(r"[0-9]{1,32}")
 # From zero up: a refund written as -5.00 would add to net revenue, since refunds are subtracted.
@@ -87,11 +88,12 @@ class Contract:
     kinds: dict
     writers: dict
     field_types: dict
+    outside_actions: tuple[str, ...]
 
     @classmethod
     def load(cls) -> "Contract":
         data = json.loads(resources.files("company").joinpath("ledger_contract.json").read_text())
-        return cls(data["kinds"], data["writers"], data["field_types"])
+        return cls(data["kinds"], data["writers"], data["field_types"], tuple(data["outside_actions"]))
 
     def refusal(self, kind, fields, writer, next_seq: int) -> str | None:
         """Why this event may not be appended, as a short reason code naming no rejected value; or None."""

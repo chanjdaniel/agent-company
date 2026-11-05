@@ -259,16 +259,28 @@ def _portfolio(settings: dict, key: str) -> None:
         portfolio_number(settings, name)
 
 
+# Far past any trailing window worth having, and short of a date that would overflow.
+_MAX_THRESHOLD_DAYS = 3650
+
+
 def _complaint_threshold(settings: dict, key: str) -> None:
     value = settings.get(key)
     if (
         not isinstance(value, dict)
         or not _is_amount(value.get("count"))
+        or not value["count"] > 0
         or not _is_amount(value.get("days"))
+        or not 0 < value["days"] <= _MAX_THRESHOLD_DAYS
         or not _is_amount(value.get("outside_action_fraction"))
         or value["outside_action_fraction"] > 1
     ):
         raise SettingsRefused(f"the setting {key} is not a count, a number of days and a fraction of outside actions")
+
+
+def complaint_threshold(settings: dict) -> dict:
+    """The flags that pause new outside actions: a `count`, over `days`, or an `outside_action_fraction` of those actions if that is higher."""
+    _complaint_threshold(settings, "complaint_threshold")
+    return settings["complaint_threshold"]
 
 
 def minutes_table(settings: dict) -> dict[str, int | float]:
