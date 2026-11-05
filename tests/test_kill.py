@@ -86,9 +86,6 @@ def test_the_ledger_says_who_pulled_it_and_each_steps_result(company, running):
     assert pulled[0]["writer"] == "killswitch"
     assert pulled[0]["pulled_at"] <= pulled[0]["ts"]
     assert "loop" not in pulled[0]
-    session = events("session-started")[-1]["session"]
-    assert step(session)["step"] == "stop-session"
-    assert step(session)["result"] == "stopped"
     assert Ledger().verify().ok
 
 
@@ -102,6 +99,7 @@ def test_a_session_that_ignores_the_signal_is_killed(company, stub, board, syste
 
 
 def test_a_frozen_launcher_does_not_keep_the_session_or_itself_alive(company, stub, board, systemctl):
+    # A launcher that is awake may see the hold and stop its session first, leaving the pull no step for it; this one cannot.
     launch = hung_session(stub)
     launch.send_signal(signal.SIGSTOP)
 
@@ -112,6 +110,9 @@ def test_a_frozen_launcher_does_not_keep_the_session_or_itself_alive(company, st
     launch.communicate(timeout=30)
     assert launch.returncode == -signal.SIGKILL
     assert events("session-stopped")[-1]["reason"] == "launcher-gone"
+    session = events("session-started")[-1]["session"]
+    assert step(session)["step"] == "stop-session"
+    assert step(session)["result"] == "stopped"
 
 
 def test_with_nothing_running_it_still_holds_every_launch(company, board):
@@ -534,6 +535,8 @@ def test_it_stops_sessions_on_a_broken_ledger(company, company_home, stub, board
     set_accounts(company, "paper")
     key_of("paper").write_text("k")
     launch = hung_session(stub)
+    # So that the stop is the pull's, and this launcher does not see the hold and do it first.
+    launch.send_signal(signal.SIGSTOP)
     break_ledger(company_home)
 
     done = company("kill", "--reason", "with a broken ledger")
@@ -1030,7 +1033,9 @@ def test_a_long_lived_process_whose_session_a_pull_stops_is_not_killed(company, 
         assert process.stdout.readline().strip() == "ended"
         assert process.poll() is None
         assert events("session-stopped")[-1]["reason"] == "kill-switch"
-        assert step(events("session-started")[-1]["session"])["result"] == "stopped"
+        # The launcher may see the hold first, and then the pull has no step for this session.
+        session = events("session-started")[-1]["session"]
+        assert all(event["result"] == "stopped" for event in events("kill-step") if event["target"] == session)
     finally:
         process.kill()
         process.communicate()
