@@ -691,4 +691,5 @@ def scan_reading(run: str) -> ReadingScan:
             fields |= _window_fields(json.loads(line))
         except (ValueError, RecursionError):
             fields |= {f"in plain text: {word}" for word in _WINDOW_WORDS if word in _normal(line)}
-    return ReadingScan(run, tuple(sorted(fields)))
+    # A field's name is the session's to choose, and this reaches Daniel's screen.
+    return ReadingScan(run, tuple(sorted({" ".join(field.split()) for field in fields})))

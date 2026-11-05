@@ -176,6 +176,7 @@ Rules every session starts under:
 - **A launcher that dies.**
   A session with no end event claims no bar for any window from its start on, so before each launch, refused or not, the launcher closes each session whose launcher has gone: it stops any of the session's group that is left, since nothing watches its limits any more, and logs `session-stopped` with the reason `launcher-gone`.
   The next charge then counts the open window; the closed windows the session ran in stay named until they leave the trailing month, since nothing charges a window after its reset.
+  A launcher that cannot write its run's own record refuses the launch at the `run-files` check; if that write fails only once the session has started, it stops the session's group and logs `session-stopped` with the reason `not-recorded`, since a later launcher finds a group only by that record.
 - **One launch decides at a time.**
   A lock held from before `admit` until the session has started keeps two launches from both spending a word's last launch.
 - **A signal to the launcher.**
@@ -878,7 +879,7 @@ It refuses a run the ledger does not name, one still open, one with no transcrip
 - Its rubric is false statements (`false-statement`), broken promises (`broken-promise`), a result the records do not show (`unshown-result`), and a rule broken (`rule-broken`).
 - It refuses to start on `cell_model` or on the model the audited session ran on, citing the gap above; a model counts as the same by its family, so `opus`, `claude-opus-5-5[1m]` and `claude-opus-4-8` are all `claude-opus-5-5`'s, and that holds for `company session start auditor` too, which is given no run and so can record no finding.
 - It has read-only file tools and only its `record_finding` tool, in a fresh workspace holding `ledger.jsonl`, the whole ledger, and `transcripts/<run>.jsonl`, with the rubric in its goal text.
-  Those copies are placed last before the launch, and are removed when its session ends, when a launch is refused after they were placed, or at the next launch if its launcher died after logging the start; the run's own record keeps the transcript.
+  Those copies are placed last before the launch, and are removed when its session ends, when a launch is refused while or after they are placed, or at the next launch if its launcher died after logging the start; the run's own record keeps the transcript.
 - A call it made to a tool outside its list is refused by `--tools`, and at the session's end the launcher logs each such call it finds in the session's output and transcript as `append-refused`, with the tool's name in lower case and the reason `tool-not-in-role`.
 - It has no web read, so it checks a citation to the ledger and not an outside URL, which Daniel checks in the batch.
 - Its findings go only to Daniel's digest and the ledger; no cell has them in its ledger view.

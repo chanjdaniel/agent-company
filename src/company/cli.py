@@ -1057,6 +1057,7 @@ class _Screen:
     """An output stream that writes no character that could move a terminal's cursor, reorder its text, or fail to encode.
 
     What a cell or a session wrote reaches Daniel's screen, on the page they read about it, so this holds for all that the command prints.
+    It keeps newlines, which the command's own lines need, so text an agent wrote is put on one line where it is read.
     """
 
     def __init__(self, stream: TextIO):

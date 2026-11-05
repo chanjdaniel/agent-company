@@ -13,7 +13,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from session_checks import events, patch_every_company, wait_for
+from session_checks import events, patch_every_company, run_file_fails, wait_for
 from usage_records import SETTINGS_INIT, TEAM, transcript_line, week_reading
 
 from company import audit, goals, paths, schedule, times, tools, views
@@ -470,6 +470,8 @@ FILLED_THEN = {
     "the kill switch pulled during the launch": ["import company.launcher", "company.launcher._really_prepare = company.launcher._prepare", "def prepare(*given):", "    prepared = company.launcher._really_prepare(*given)", "    company.launcher.kill_state.present = lambda: True", "    return prepared", "company.launcher._prepare = prepare"],
     "a start that cannot be logged": ["import company.ledger", "company.ledger.Ledger.really_append = company.ledger.Ledger.append", "def append(self, kind, *rest, **more):", "    if kind == 'session-started':", "        raise OSError('the disk is full')", "    return self.really_append(kind, *rest, **more)", "company.ledger.Ledger.append = append"],
     "a claude that cannot start": ["import company.launcher", "def spawn(launch):", "    raise OSError(13, 'Permission denied')", "company.launcher._spawn = spawn"],
+    "a copy that fails part way": ["import company.views", "really_write = company.views.write", "def write(path, content):", "    if path.parent.name == 'transcripts':", "        raise OSError('the disk is full')", "    really_write(path, content)", "company.views.write = write"],
+    "a start's record that cannot be written": run_file_fails("path.name == 'session.json'"),
 }
 
 
@@ -482,6 +484,19 @@ def test_an_auditor_launch_refused_after_its_workspace_was_filled_leaves_no_copy
 
     assert done.returncode == 1, done.stdout + done.stderr
     assert events("launch-refused")[-1]["role"] == "auditor"
+    assert [path for path in paths.workspaces().rglob(views.FILE) if path.parent.name != cell["run"]] == []
+    assert list(paths.workspaces().rglob(audit.TRANSCRIPTS)) == []
+
+
+def test_an_auditor_whose_group_cannot_be_recorded_is_stopped_and_leaves_no_copy_there(company, stub, cell_run, tmp_path, monkeypatch):
+    cell = cell_run()
+    stub.play({"do": "hang"})
+    patch_every_company(tmp_path, monkeypatch, *run_file_fails("path.name == 'session.json' and value.get('group')"))
+
+    done = company("audit", cell["run"])
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert events("session-stopped")[-1]["reason"] == "not-recorded"
     assert [path for path in paths.workspaces().rglob(views.FILE) if path.parent.name != cell["run"]] == []
     assert list(paths.workspaces().rglob(audit.TRANSCRIPTS)) == []
 

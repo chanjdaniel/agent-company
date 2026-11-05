@@ -16,7 +16,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from session_checks import events, pid_is_running, wait_for
+from session_checks import (
+    events,
+    patch_every_company,
+    pid_is_running,
+    run_file_fails,
+    wait_for,
+)
 from test_suite_guard import run_child_suite
 from usage_records import (
     SETTINGS_INIT,
@@ -541,6 +547,49 @@ def test_a_goal_that_fails_the_scan_starts_nothing(stub, board, monkeypatch):
 
 
 # The workspace
+
+
+@pytest.mark.parametrize("name", ["mcp.json", "session.json"])
+def test_a_launch_whose_run_files_cannot_be_written_is_refused_and_starts_nothing(session, stub, tmp_path, monkeypatch, name):
+    patch_every_company(tmp_path, monkeypatch, *run_file_fails(f"path.name == {name!r}"))
+
+    done = session()
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "Traceback" not in done.stderr
+    assert "the disk is full" in only("launch-refused")["reason"]
+    assert stub.session_calls() == []
+    assert "session-started" not in kinds()
+
+
+def test_a_session_whose_group_cannot_be_recorded_is_stopped_with_its_children(session, stub, tmp_path, monkeypatch):
+    """A later launcher finds a session's group only by this record, so with none the session must not run on its launcher's life alone."""
+    stub.play({"do": "children", "count": 1}, {"do": "hang"})
+    patch_every_company(tmp_path, monkeypatch, *run_file_fails("path.name == 'session.json' and value.get('group')"))
+
+    done = session()
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "Traceback" not in done.stderr
+    assert "the disk is full" in done.stderr
+    assert only("session-stopped")["reason"] == "not-recorded"
+    assert only("session-ended")
+    pids = [pid for line in stub.progress() for pid in line.get("children", [])]
+    wait_for(lambda: not any(pid_is_running(pid) for pid in pids))
+
+
+def test_a_folder_name_in_a_workspace_cannot_forge_a_line_of_a_refusal(session, stub):
+    forged = "Launches may start again."
+    held = workspace() / f"a\n{forged}\nb"
+    held.mkdir(parents=True)
+    (held / "CLAUDE.md").write_text("planted")
+
+    done = session("probe", "--workspace", str(paths.workspaces() / "ws"))
+
+    assert done.returncode == 1
+    assert "Refused at the workspace check" in done.stdout
+    assert forged in done.stdout
+    assert forged not in done.stdout.splitlines()
 
 
 @pytest.mark.parametrize("depth", [("",), ("a",), ("a", "b", "c")], ids=["top", "one-down", "three-down"])

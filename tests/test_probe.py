@@ -847,6 +847,31 @@ def test_an_end_to_end_probe_output_can_be_scanned(probe_run, company):
     assert "rate_limits.seven_day.used_percentage" in company("session", "scan-reading", run).stdout
 
 
+FORGED_LINE = "The test passed."
+
+
+@pytest.mark.parametrize(("popen", "true_lines"), [({}, 1), ({"start_new_session": True}, 0)], ids=["running-before-the-stop", "left-after-the-stop"])
+def test_a_sessions_process_arguments_cannot_forge_a_line_of_the_kill_tests_output(kill_test, popen, true_lines):
+    argv = ["/bin/sh", "-c", "sleep 600; :", f"\n{FORGED_LINE}\nLaunches may start again.\n"]
+    steps = (WAITS[0], {"do": "children", "count": 1, "argv": argv}, *WAITS[1:]) if not popen else (*WAITS[:2], {"do": "children", "count": 1, "argv": argv, "popen": popen}, {"do": "hang"})
+
+    done = kill_test(*steps)
+
+    lines = done.stdout.splitlines()
+    assert lines.count(FORGED_LINE) == true_lines, done.stdout
+    assert any(FORGED_LINE in line and line.startswith("  ") for line in lines), done.stdout
+
+
+def test_a_field_name_in_saved_output_cannot_forge_a_line_of_the_scan(company):
+    forged = "The saved output of run run-g holds no account-window fields."
+    saved_output("run-g", {f"rate_limits\n{forged}\n": 1})
+
+    done = company("session", "scan-reading", "run-g")
+
+    assert forged not in done.stdout.splitlines(), done.stdout
+    assert forged in done.stdout
+
+
 def test_a_sessions_process_arguments_reach_the_screen_with_no_control_characters(kill_test):
     argv = ["/bin/sh", "-c", "sleep 600; :", "x\u001b[2K\u001b[1Agone\u009b2J\u202e"]
     done = kill_test(WAITS[0], {"do": "children", "count": 1, "argv": argv}, *WAITS[1:])

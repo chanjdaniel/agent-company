@@ -85,6 +85,7 @@ _MAX_WEIGHT = "max-weight"
 _SIGNALLED = "launcher-signalled"
 _GONE = "launcher-gone"
 _KILLED = "kill-switch"
+_NOT_RECORDED = "not-recorded"
 _SESSION_ENDS = ("session-ended", "session-stopped")
 
 
@@ -243,14 +244,24 @@ def _check_independent(loaded: dict, model: str, given: tuple[audit.Subject, ...
     raise _Refuse("model", reason, f"{settings.SET} auditor_model <a Claude model of another family than {model}>")
 
 
+def _take_copies_away(workspace: Path) -> None:
+    """Remove an Auditor's copies when no session's end will come to do it."""
+    try:
+        audit.remove_context(workspace)
+    except OSError as error:
+        print(f"company: the whole ledger's copy in {workspace} could not be removed: {error}. Remove it by hand.", file=sys.stderr)
+
+
 def _give_context(role: str, bet: str | None, workspace: Path, given: tuple[audit.Subject, ...]) -> None:
-    """Put in the workspace what the role reads of the home, which it cannot reach for itself."""
+    """Put in the workspace what the role reads of the home, which it cannot reach for itself; of an Auditor's copies, all or none."""
     try:
         if role == "cell" and bet:
             views.write(workspace / views.FILE, views.lines(views.cell_view(Ledger().read(), bet)))
         elif given:
             audit.give_context(workspace, given, Ledger().path)
     except (LedgerBroken, OSError) as error:
+        if given:
+            _take_copies_away(workspace)
         raise _Refuse("workspace", f"no-context: what this session reads could not be put in its workspace: {error}", f"look at {workspace}, after reading what wrote it") from None
 
 
@@ -288,7 +299,8 @@ def _held_configuration(workspace: Path) -> str | None:
 def _check_workspace(workspace: Path) -> None:
     held = _held_configuration(workspace)
     if held is not None:
-        reason = f"workspace-configures: the workspace holds {held}, which a session must not load"
+        # A folder's name is an agent's to choose, and this reaches Daniel's screen.
+        reason = f"workspace-configures: the workspace holds {' '.join(held.split())}, which a session must not load"
         raise _Refuse("workspace", reason, f"remove it from {workspace}, after reading what wrote it")
 
 
@@ -421,6 +433,7 @@ def session_processes(session: str, group: int | None = None, mark: str | None =
     """Everything running that is this session's, wherever it went: in its group, holding the variable the launcher set, or running `sleep` for the number `mark`.
 
     A process that left the group with `setsid` is out of a signal's reach, and this is what finds it.
+    Each command is on one line, since its arguments are the session's to write and it reaches Daniel's screen.
     """
     wanted = f"{SESSION_VARIABLE}={session}".encode()
     found = []
@@ -430,7 +443,7 @@ def session_processes(session: str, group: int | None = None, mark: str | None =
         command = _proc_fields(pid, "cmdline")
         marked = mark is not None and any(part == mark.encode() or f"sleep {mark}".encode() in part for part in command)
         if stat.group == group or marked or wanted in _proc_fields(pid, "environ"):
-            found.append(SessionProcess(pid, stat.started, b" ".join(part for part in command if part).decode("utf-8", "replace")[:200]))
+            found.append(SessionProcess(pid, stat.started, " ".join(b" ".join(command).decode("utf-8", "replace").split())[:200]))
     return sorted(found, key=lambda process: process.pid)
 
 
@@ -798,12 +811,12 @@ def _finish(launch: _Launch, process: subprocess.Popen, stopped: str | None, beg
     return Finished(launch.session, launch.run, process.returncode, weight, stopped, unlogged)
 
 
-def _run(launch: _Launch, process: subprocess.Popen) -> Finished:
+def _run(launch: _Launch, process: subprocess.Popen, must_stop: str | None) -> Finished:
     signalled: list[int] = []
     previous = {name: signal.signal(name, lambda number, _: signalled.append(number)) for name in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
     began = time.monotonic()
     try:
-        stopped = _watch(process, launch, signalled)
+        stopped = must_stop or _watch(process, launch, signalled)
         # The session's own leader may be gone with children left behind, so the group is stopped either way.
         stop_group(process.pid)
         process.wait()
@@ -828,11 +841,12 @@ def _charge_at_the_end() -> None:
 def _refuse_prepared(launch: _Launch, refusal: _Refuse) -> governor.Refused:
     """Refuse a launch whose workspace is filled, taking an Auditor's copies away, since no session's end will come to do it."""
     if launch.audited_runs:
-        try:
-            audit.remove_context(launch.workspace)
-        except OSError as error:
-            print(f"company: the whole ledger's copy in {launch.workspace} could not be removed: {error}. Remove it by hand.", file=sys.stderr)
+        _take_copies_away(launch.workspace)
     return _refuse(launch.role, launch.bet, refusal)
+
+
+def _no_run_files(error: OSError) -> _Refuse:
+    return _Refuse("run-files", f"no-run-files: this session's own record could not be written: {error}", f"make room under {paths.home()}, or mend what the error names")
 
 
 def start(role: str, bet: str | None = None, prompt: str = "", workspace: str | None = None, scheduled: bool = False, audited_runs: tuple[str, ...] = ()) -> Finished | governor.Refused:
@@ -846,10 +860,15 @@ def start(role: str, bet: str | None = None, prompt: str = "", workspace: str | 
             launch = _prepare(admitted, prompt, workspace, audited_runs)
         except _Refuse as refusal:
             return _refuse(role, bet, refusal)
+        except OSError as error:
+            return _refuse(role, bet, _no_run_files(error))
         # Preparing takes seconds, and the kill switch may have been pulled since the governor looked.
         if kill_state.present():
             return _refuse_prepared(launch, _Refuse("kill", "killed: the kill switch was pulled during this launch", governor.FIX_KILL))
-        _record_processes(launch, None)
+        try:
+            _record_processes(launch, None)
+        except OSError as error:
+            return _refuse_prepared(launch, _no_run_files(error))
         try:
             _log_start(launch, admitted)
         except (AppendRefused, LedgerBroken, OSError) as error:
@@ -863,7 +882,13 @@ def start(role: str, bet: str | None = None, prompt: str = "", workspace: str | 
             with contextlib.suppress(AppendRefused, LedgerBroken, OSError):
                 Ledger().append("session-stopped", {"session": launch.session, "reason": "not-started"}, "launcher")
             return _refuse_prepared(launch, _Refuse("binary", f"no-start: `claude` could not start: {error.strerror}", f"check {launch.command[0]}"))
-        _record_processes(launch, process.pid)
-    finished = _run(launch, process)
+        must_stop = None
+        try:
+            _record_processes(launch, process.pid)
+        except OSError as error:
+            # A later launcher finds a session's group only by this record, so with none it must not outlive this launcher.
+            must_stop = _NOT_RECORDED
+            print(f"company: this session is being stopped, since its group could not be recorded: {error}.", file=sys.stderr)
+    finished = _run(launch, process, must_stop)
     _charge_at_the_end()
     return finished
