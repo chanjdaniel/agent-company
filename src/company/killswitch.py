@@ -23,7 +23,7 @@ from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path
 
-from company import contract, kill_state, launcher, schedule, settings, times
+from company import contract, kill_state, launcher, paths, schedule, settings, times
 from company.ledger import AppendRefused, Ledger, LedgerBroken
 
 HOLD = "hold"
@@ -36,10 +36,13 @@ FAILED = "failed"
 TURNED_OFF = "turned-off"
 MOVED_ASIDE = "moved-aside"
 NO_KEY = "no-key"
+_KILL_FILE = "kill-file"
 _UNNAMED = "<unnamed>"
 _UNKNOWN = "unknown"
 _LAUNCH_WAIT_SECONDS = 60
 _LEDGER_WAIT_SECONDS = 30
+# Longer than a pull's write-up may hold `kill.lock`, so that only something frozen is refused for it.
+_RESUME_LOCK_WAIT_SECONDS = _LEDGER_WAIT_SECONDS + 5
 _RECORD_FAILURES = (AppendRefused, LedgerBroken, OSError, ValueError, KeyError, TypeError)
 
 
@@ -74,18 +77,26 @@ class PullRefused(Exception):
     """A pull from inside a session, which did nothing."""
 
 
+@dataclass(frozen=True)
+class Resumed:
+    """What a resume closed, and what it has to say of a pull whose record is not whole."""
+
+    events: list[dict]
+    words: list[str]
+
+
 class ResumeRefused(Exception):
     """The hold stands if there was one, and no pull was closed unless a subclass says so."""
 
 
-class AnotherPullLanded(ResumeRefused):
-    """The pulls the resume read are closed, and one that landed during it holds."""
+class PartlyResumed(ResumeRefused):
+    """These pulls are closed, and something still holds."""
 
-    def __init__(self, resumed: list[dict]):
+    def __init__(self, resumed: list[dict], holds: str, words: list[str]):
         closed = ", ".join(f"event {event['kill_seq']}" for event in resumed)
         super().__init__(
-            f"pulls closed, {len(resumed)}{f' ({closed})' if closed else ''}; another pull landed during this resume, so its hold stands and every launch is still refused."
-            f" See `company ledger show`, and run `{kill_state.RESUME}` again"
+            f"pulls closed, {len(resumed)}{f' ({closed})' if closed else ''}; {holds}, so every launch is still refused."
+            f" See `company ledger show`, and run `{kill_state.RESUME}` again.{''.join(f' {word}' for word in words)}"
         )
 
 
@@ -207,12 +218,14 @@ def _record_all(records: list[dict]) -> str | None:
 
     Whoever calls this holds `kill_state.recording()`.
     """
+    named = "the pull"
     try:
         ledger = Ledger()
         for record in {record["id"]: record for record in records}.values():
+            named = f"the pull in `kill.state/{record['id']}`"
             _record(ledger, record)
     except _RECORD_FAILURES as error:
-        return f"the ledger could not take the pull: {error}"
+        return f"the ledger could not take {named}: {error}"
     return None
 
 
@@ -262,26 +275,46 @@ def pull(by: str, reason: str, loop: str | None = None) -> Pulled:
     # Its process, until it has done, so that a resume can tell a pull still going from one that died.
     record: dict = {"id": f"{time.time_ns():020d}-{uuid.uuid4()}", "by": by, "reason": reason, "pulled_at": times.stamp(times.now()), **({"loop": loop} if loop else {}), "steps": [], "process": launcher.this_process()}
     held = _keep(record)
-    steps = [Step(HOLD, "kill-file", FAILED, held)] if held else []
-    steps += _attempt(STOP_SESSION, "sessions", _stop_sweep)
-    steps += _attempt(SCHEDULE, "timers", _schedule_off)
-    steps += _attempt(ROTATION, "settings", _rotate_accounts)
-    # Last, since this may wait for a launch that is still deciding, and nothing above should wait with it.
-    steps += _attempt(STOP_SESSION, "sessions", _last_sweep)
-    record["steps"] = [step.fields() for step in steps]
-    _keep(record)
+    steps = [Step(HOLD, _KILL_FILE, FAILED, held)] if held else []
+    # The last sweep comes last, since it may wait for a launch that is still deciding, and nothing else should wait with it.
+    for name, target, action in ((STOP_SESSION, "sessions", _stop_sweep), (SCHEDULE, "timers", _schedule_off), (ROTATION, "settings", _rotate_accounts), (STOP_SESSION, "sessions", _last_sweep)):
+        steps += _attempt(name, target, action)
+        # After each, so that a pull ended part way leaves what it had done.
+        record["steps"] = [step.fields() for step in steps]
+        _keep(record)
     unlogged = _within(_LEDGER_WAIT_SECONDS, lambda: _write_up(record, steps))
     del record["process"]
-    return Pulled(tuple(steps), record.get("seq"), unlogged, _keep(record))
+    unkept = _keep(record)
+    return Pulled(tuple(steps), record.get("seq"), unlogged, unkept and f"{unkept}; its file still names this process, so a resume is refused until this process ends")
 
 
-def resume(message: str | None = None) -> list[dict]:
+def _say_what_is_missing(records: list[dict]) -> list[str]:
+    """Add a step to each record that is not whole, for the ledger, and return the same word for Daniel.
+
+    The step goes after the ones it can have, and the ledger counts what it holds of each pull, so a resume run again writes it once.
+    """
+    words = []
+    for record in records:
+        # Any process a record still names has ended, since `resume` refuses one that has not.
+        missing = "its record of its steps could not be read" if record.get("steps_lost") else "its process ended before it had done" if "process" in record else None
+        if missing:
+            record["steps"] = [*record.get("steps", []), Step(HOLD, _KILL_FILE, FAILED, missing).fields()]
+            words.append(f"Pull {record['id']}: {missing}, so what it did may not all be in the ledger: check that each session stopped and each key moved.")
+    return words
+
+
+def resume(message: str | None = None) -> Resumed:
     """Daniel's word: write what the ledger lacks of the pulls read here, close every open pull, and clear the hold.
 
     A pull still running is refused, since it is still stopping sessions and moving keys, and launches may not start under it.
-    A pull that lands after the read is no part of this: its hold stands, and `AnotherPullLanded` says so.
+    A pull that lands after the read is no part of this: its hold stands, and `PartlyResumed` says so.
+    A lock that stays held is refused by name, since whatever holds it may be frozen for good.
     The schedule stays off, and a moved key stays moved.
     """
+    paths.home().mkdir(parents=True, exist_ok=True, mode=0o700)
+    for lock in ("kill.lock", "ledger.lock"):
+        if not launcher.lock_free_within(paths.home() / lock, _RESUME_LOCK_WAIT_SECONDS):
+            raise ResumeRefused(f"`{lock}` in the company home has stayed held for {_RESUME_LOCK_WAIT_SECONDS} seconds, so something may be frozen holding it: end that process, and resume again; the hold stands")
     ledger = Ledger()
     if not ledger.verify().ok:
         raise ResumeRefused("the ledger is broken, so see `company ledger verify`; the hold stands")
@@ -289,21 +322,27 @@ def resume(message: str | None = None) -> list[dict]:
         records = kill_state.read() or []
         for record in records:
             if launcher.process_running(record.get("process")):
-                raise ResumeRefused(f"a pull is still running, in process {record['process']['pid']}, so wait for it to end, or end that process, and resume again; the hold stands")
+                raise ResumeRefused(f"a pull is still running, in process {record['process']['pid']}, as `kill.state/{record['id']}` says, so wait for it to end, or end that process, and resume again; the hold stands")
+        words = _say_what_is_missing(records)
         unlogged = _record_all(records)
         if unlogged:
-            raise ResumeRefused(f"{unlogged.rstrip('.')}; the hold stands")
+            raise ResumeRefused(f"{unlogged.rstrip('.')}; the hold stands. If `company ledger verify` says the ledger is whole, that file is damaged: mend it or remove it, and resume again")
         pulls = kill_state.open_pulls(ledger.read())
         if not pulls and not kill_state.present():
             raise ResumeRefused("the kill switch is not pulled")
         if pulls:
             _note_schedule_off(ledger, pulls[-1]["seq"])
         fields = {"message": message} if message else {}
-        resumed = [ledger.append("resumed", {"kill_seq": event["seq"], **fields}, "board") for event in pulls]
-        kill_state.clear(records)
+        resumed: list[dict] = []
+        try:
+            for event in pulls:
+                resumed.append(ledger.append("resumed", {"kill_seq": event["seq"], **fields}, "board"))
+            kill_state.clear(records)
+        except (AppendRefused, LedgerBroken, OSError) as error:
+            raise PartlyResumed(resumed, f"the hold could not be cleared: {str(error).rstrip('.')}", words) from error
     if kill_state.present():
-        raise AnotherPullLanded(resumed)
-    return resumed
+        raise PartlyResumed(resumed, "another pull landed during this resume, so its hold stands", words)
+    return Resumed(resumed, words)
 
 
 # The self-test: the whole pull, in a temporary home of its own, on stubs that this writes.

@@ -556,10 +556,14 @@ It finds sessions from each run's `session.json`, reading the machine's processe
 A launcher that has logged its session's end clears its processes from that record, so a live process that has finished a session is not running one.
 Either `kill.state` or an open `kill-pulled` refuses a launch, so a pull the ledger could not take still holds, and a record lost later does not lift it.
 The ledger gets the pull once its actions are done, and the command reports after 30 seconds if the ledger's lock is held for that long.
+A pull keeps its steps in its file after each of its four actions, so one ended part way leaves what it had done.
 What the ledger has not taken stays in the pull's file, and `company resume` writes it when the ledger verifies again, before it lifts the hold.
 Each pull writes only its own file, and the ledger's events for its `pull` id say how far it got, so pulls that overlap and a resume refused part way write nothing twice; a lock of its own, which no action waits on, keeps two writers or two resumes from reading that at once.
 A pull's file names its process until the pull has done, and a resume refuses while that process runs, since the pull is still stopping sessions and moving keys and launches may not start under it; a pull that died part way does not stop a resume.
-A resume writes and closes only the pulls it read, so a pull that lands during it keeps its hold, and the resume names the pulls it closed and says that one still holds.
+A resume writes and closes only the pulls it read, so a pull that lands during it keeps its hold, and the resume names the pulls it closed and says that one still holds; it says the same when the hold cannot be cleared.
+A resume says so of a pull whose process ended before it had done, or whose steps cannot be read, in its output and by a failed `hold` step on `kill-file` in the ledger, and tells Daniel to check each session and key, since the record is a report and must not keep the company stopped.
+A record the ledger's contract refuses does refuse the resume, which names the file to mend or remove, since guessing at it would write something false.
+A resume waits 35 seconds for `kill.lock` and `ledger.lock` to come free, longer than a pull's write-up may hold the first, and refuses by name if one stays held, since whatever holds it may be frozen.
 
 **No company tool pulls it.**
 A tool's server has the session's environment, so it cannot see Daniel's config or reach the user's timers, and a pull there would leave a key in place and report timers that are on as turned off.

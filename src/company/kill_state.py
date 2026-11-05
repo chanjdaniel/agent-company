@@ -34,14 +34,17 @@ def present() -> bool:
 
 
 def _read_one(name: str) -> dict:
-    """One pull's record, whose `id` is its file's name; a file that is no record reads as an empty one, and steps that are no steps as none."""
+    """One pull's record, whose `id` is its file's name; a file that is no record reads as an empty one, and `steps_lost` says what could not be read."""
     try:
         record = json.loads((_path() / name).read_bytes())
     except (OSError, ValueError):
         record = {}
     record = record if isinstance(record, dict) else {}
     steps = record.get("steps")
-    return {**record, "steps": steps if isinstance(steps, list) and all(isinstance(step, dict) for step in steps) else [], "id": name}
+    if isinstance(steps, list) and all(isinstance(step, dict) for step in steps):
+        return {**record, "id": name}
+    kept = [step for step in steps if isinstance(step, dict)] if isinstance(steps, list) else []
+    return {**record, "steps": kept, "steps_lost": True, "id": name}
 
 
 def read() -> list[dict] | None:
@@ -53,7 +56,7 @@ def read() -> list[dict] | None:
     except FileNotFoundError:
         return None
     except OSError:
-        return [{"id": _path().name}]
+        return [{"id": _path().name, "steps_lost": True}]
     return [_read_one(name) for name in sorted(names)]
 
 

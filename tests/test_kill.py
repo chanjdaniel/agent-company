@@ -76,7 +76,7 @@ def test_the_kill_switch_stops_a_running_session_and_its_children_mid_way(compan
     assert [event["session"] for event in events("session-ended")] == [started["session"]]
 
 
-def test_the_ledger_says_who_pulled_it_and_each_steps_result(company, running):
+def test_the_ledger_says_who_pulled_it(company, running):
     company("kill", "--reason", "it looks wrong")
 
     pulled = events("kill-pulled")
@@ -552,6 +552,18 @@ def test_it_stops_sessions_on_a_broken_ledger(company, company_home, stub, board
     assert record["by"] == "daniel"
     assert record["reason"] == "with a broken ledger"
     assert {entry["step"] for entry in record["steps"]} >= {"stop-session", "schedule", "rotation"}
+
+
+def test_an_awake_launcher_that_sees_the_hold_on_a_broken_ledger_ends_by_itself(company, company_home, stub, board):
+    launch = hung_session(stub)
+    break_ledger(company_home)
+
+    company("kill", "--reason", "with a broken ledger")
+
+    assert not any(pid_is_running(pid) for pid in [progress(stub, "hanging"), *progress(stub, "children")])
+    _, stderr = launch.communicate(timeout=30)
+    assert launch.returncode == 1
+    assert "Traceback" not in stderr
 
 
 def test_a_ledger_cut_at_its_end_takes_no_write_and_the_launch_stays_refused(company, company_home, board):
@@ -1179,7 +1191,70 @@ def test_a_pull_that_died_part_way_does_not_stop_the_resume(company, board, syst
 
     assert done.returncode == 0, done.stderr
     assert company("governor", "check", "probe").returncode == 0
-    assert [event["reason"] for event in events("kill-pulled")] == ["cut short"]
+    pulled = events("kill-pulled")
+    assert [event["reason"] for event in pulled] == ["cut short"]
+    assert pulled[0]["pull"] in done.stdout
+    assert "each key moved" in done.stdout
+    assert "before it had done" in step("kill-file")["detail"]
+    assert step("kill-file")["pull"] == pulled[0]["pull"]
+
+
+def test_a_pull_ended_during_its_last_wait_leaves_what_it_had_done_in_the_ledger(company, board, systemctl):
+    # The wait for a launch is the longest in a pull, and comes after the keys have moved.
+    set_accounts(company, "paper")
+    key_of("paper").write_text("k")
+    lock = os.open(paths.home() / "launch.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        pull = subprocess.Popen([COMPANY, "kill"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        wait_for(lambda: not key_of("paper").exists() and any(entry["target"] == "paper" for record in kill_state.read() or [] for entry in record["steps"]))
+        pull.kill()
+        pull.wait()
+    finally:
+        os.close(lock)
+
+    done = company("resume")
+
+    assert done.returncode == 0, done.stderr
+    assert step("paper")["result"] == "moved-aside"
+    assert "each key moved" in done.stdout
+
+
+def test_a_pull_whose_last_write_fails_says_that_its_process_holds_a_resume(company, board, monkeypatch):
+    real = kill_state.write
+
+    def fails_at_the_last(record):
+        if "process" not in record:
+            raise OSError("the disk is full")
+        real(record)
+
+    monkeypatch.setattr(kill_state, "write", fails_at_the_last)
+
+    pulled = killswitch.pull("treasurer", "a red line was crossed")
+
+    assert "until this process ends" in pulled.unkept
+    done = company("resume")
+    assert done.returncode == 1
+    assert str(os.getpid()) in done.stderr
+
+
+@pytest.mark.parametrize("lock", ["kill.lock", "ledger.lock"])
+def test_a_resume_that_finds_a_lock_held_refuses_and_names_it(company, board, lock):
+    company("kill")
+    code = "from company import cli, killswitch\nkillswitch._RESUME_LOCK_WAIT_SECONDS = 0.2\nraise SystemExit(cli.main(['resume']))\n"
+    fd = os.open(paths.home() / lock, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=20, check=False)
+    finally:
+        os.close(fd)
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert lock in done.stderr
+    assert "the hold stands" in done.stderr
+    assert events("resumed") == []
+    assert "kill check" in company("governor", "check", "probe").stdout
+    assert company("resume").returncode == 0
 
 
 def test_a_later_process_with_a_pulls_number_does_not_stop_the_resume(company, board):
@@ -1250,6 +1325,23 @@ def test_the_command_says_which_pulls_closed_when_another_lands_during_its_resum
     assert "company resume" in said.err
 
 
+def test_a_resume_that_cannot_clear_the_hold_says_which_pulls_it_closed(company, board):
+    company("kill", "--reason", "first")
+    (paths.home() / "kill.state" / "sub").mkdir()
+
+    done = company("resume")
+
+    closed = events("resumed")
+    assert done.returncode == 1
+    assert closed
+    assert "Nothing was resumed" not in done.stderr
+    assert "launches may start" not in done.stdout
+    assert all(f"event {event['kill_seq']}" in done.stderr for event in closed)
+    assert "kill.state/sub" in done.stderr
+    assert "still refused" in done.stderr
+    assert kill_state.present()
+
+
 # Records that say the wrong thing: review finding 55
 
 
@@ -1293,16 +1385,54 @@ def test_a_write_up_that_fails_says_so_and_does_not_blame_the_lock(board, monkey
     assert kill_state.present()
 
 
-@pytest.mark.parametrize("steps", ["x", 5, [1], {"a": 1}, [{"step": ["x"], "target": "t", "result": "r"}], [{"target": "t"}]])
-def test_a_pulls_file_with_steps_that_are_not_steps_says_so_at_the_resume(company, board, steps):
+@pytest.mark.parametrize("steps", ["x", 5, [1], {"a": 1}])
+def test_a_pulls_file_with_steps_that_are_not_steps_closes_and_says_so_where_daniel_reads(company, board, steps):
     kill_state.write({"id": "1-edited", "by": "daniel", "reason": "edited", "steps": steps})
 
     done = company("resume")
 
+    assert done.returncode == 0, done.stderr
+    assert "1-edited" in done.stdout
+    assert "could not be read" in done.stdout
+    assert "could not be read" in step("kill-file")["detail"]
+    assert step("kill-file")["pull"] == "1-edited"
+    assert not kill_state.present()
+
+
+def test_a_pulls_file_with_one_step_that_is_no_step_keeps_the_others(company, board):
+    good = {"step": "rotation", "target": "paper", "result": "moved-aside"}
+    kill_state.write({"id": "1-edited", "by": "daniel", "reason": "edited", "steps": [good, 1]})
+
+    done = company("resume")
+
+    assert done.returncode == 0, done.stderr
+    assert step("paper")["result"] == "moved-aside"
+    assert "could not be read" in step("kill-file")["detail"]
+
+
+def test_a_pulls_file_the_contract_refuses_names_the_file_and_the_way_out(company, board):
+    kill_state.write({"id": "1-edited", "by": "daniel", "reason": "edited", "steps": [{"target": "t"}]})
+
+    done = company("resume")
+
+    assert done.returncode == 1
     assert "Traceback" not in done.stderr
     assert ".;" not in done.stderr
-    assert (done.returncode == 0) == (not kill_state.present())
-    assert (done.returncode == 0) == (len(events("resumed")) == 1)
+    assert "kill.state/1-edited" in done.stderr
+    assert "mend it or remove it" in done.stderr
+    assert kill_state.present()
+    assert events("resumed") == []
+
+
+def test_the_word_on_a_damaged_file_is_written_once_when_a_resume_is_refused_and_run_again(company, board):
+    kill_state.write({"id": "1-edited", "by": "daniel", "reason": "edited", "steps": "x"})
+    kill_state.write({"id": "2-edited", "by": "daniel", "reason": "edited", "steps": [{"target": "t"}]})
+    assert company("resume").returncode == 1
+
+    (paths.home() / "kill.state" / "2-edited").unlink()
+
+    assert company("resume").returncode == 0
+    assert step("kill-file")["pull"] == "1-edited"
 
 
 # The retry that keeps a pull's first act: review finding 56
@@ -1358,3 +1488,38 @@ def test_a_pull_refused_by_a_stray_variable_says_the_switch_was_not_pulled_and_n
     monkeypatch.delenv("COMPANY_SESSION")
     assert not kill_state.present()
     assert events("kill-pulled") == []
+    refused = events("append-refused")[-1]
+    assert refused["tool"] == "kill-pull"
+    assert refused.get("session") == (value or None)
+
+
+# A process's name, which is bytes: review finding 61
+
+NOT_TEXT = b"\xe6\x97"
+NAMES_ITSELF = f"from pathlib import Path\nPath('/proc/self/comm').write_bytes({NOT_TEXT!r})\n"
+
+
+def test_another_process_whose_name_is_not_text_spares_no_session(company, stub, board):
+    launch = hung_session(stub, {"do": "ignore-term"})
+    other = subprocess.Popen([sys.executable, "-c", NAMES_ITSELF + "print('named', flush=True)\nimport time\ntime.sleep(600)\n"], stdout=subprocess.PIPE, text=True)
+    try:
+        assert other.stdout.readline().strip() == "named"
+
+        done = company("kill")
+
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert not any(pid_is_running(pid) for pid in [progress(stub, "hanging"), *progress(stub, "children")])
+        launch.communicate(timeout=30)
+    finally:
+        other.kill()
+        other.communicate()
+
+
+def test_a_process_whose_own_name_is_not_text_can_still_pull(board):
+    code = NAMES_ITSELF + "from company import killswitch\nassert killswitch.pull('a-loop', 'a red line', loop='honesty').clean\n"
+
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60, check=False)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert kill_state.present()
+    assert [event["by"] for event in events("kill-pulled")] == ["a-loop"]

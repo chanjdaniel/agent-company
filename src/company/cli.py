@@ -383,13 +383,15 @@ def _resume(args) -> int:
         return EXIT_REFUSED
     try:
         resumed = killswitch.resume(args.message)
-    except killswitch.AnotherPullLanded as landed:
-        print(f"company: {landed}.", file=sys.stderr)
+    except killswitch.PartlyResumed as partly:
+        print(f"company: {partly}", file=sys.stderr)
         return EXIT_REFUSED
     except (killswitch.ResumeRefused, AppendRefused, LedgerBroken, OSError) as refused:
         print(f"company: refused: {refused}. Nothing was resumed.", file=sys.stderr)
         return EXIT_REFUSED
-    print(f"Resumed: pulls closed, {len(resumed)}; launches may start again.")
+    print(f"Resumed: pulls closed, {len(resumed.events)}; launches may start again.")
+    for word in resumed.words:
+        print(word)
     print(f"The schedule stays off until `{schedule.ENABLE}`, and a key moved aside stays moved until you regenerate it.")
     return EXIT_OK
 

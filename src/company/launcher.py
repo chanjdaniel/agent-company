@@ -271,14 +271,13 @@ class _ProcessStat(NamedTuple):
 
 
 def _process_stat(pid: int) -> _ProcessStat | None:
-    """A process's state, process group and start time, or None if it has gone."""
+    """A process's state, process group and start time, or None if it has gone or cannot be read."""
     try:
-        text = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:
+        # The name is bytes that may be no text, and may hold spaces and brackets, so the fields count from the last bracket.
+        fields = Path(f"/proc/{pid}/stat").read_bytes().rsplit(b")", 1)[1].split()
+        return _ProcessStat(fields[0].decode(), int(fields[2]), int(fields[19]))
+    except (OSError, ValueError, IndexError):
         return None
-    # The name may hold spaces and brackets, so the fields count from the last bracket.
-    fields = text.rsplit(")", 1)[1].split()
-    return _ProcessStat(fields[0], int(fields[2]), int(fields[19]))
 
 
 def _is_alive(found: _ProcessStat | None, started: int | None) -> bool:
@@ -383,7 +382,13 @@ def _launch_lock() -> Iterator[None]:
 
 def wait_for_launches(seconds: float) -> bool:
     """Wait until no launch is deciding, so that what was admitted before a pull has started; whether that happened."""
-    fd = _open_launch_lock()
+    paths.home().mkdir(parents=True, exist_ok=True, mode=0o700)
+    return lock_free_within(paths.home() / "launch.lock", seconds)
+
+
+def lock_free_within(path: Path, seconds: float) -> bool:
+    """Whether this lock comes free in this time; it is let go at once."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
 
     def deciding() -> bool:
         try:
