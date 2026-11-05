@@ -20,7 +20,7 @@ import pytest
 from session_checks import events, pid_is_running, wait_for
 from usage_records import TEAM, start_session
 
-from company import kill_state, killswitch, launcher, paths, settings
+from company import cli, kill_state, killswitch, launcher, paths, settings
 from company.ledger import Ledger
 
 COMPANY = Path(sys.executable).parent / "company"
@@ -852,7 +852,9 @@ def test_a_pulls_first_act_and_its_sweeps_do_not_grow_with_the_runs_the_company_
     held_at_each_read, held_at_each_sweep = [], []
 
     def counted_read(pid):
-        held_at_each_read.append(kill_state.present())
+        # A pull's own number goes in its first file: one read, of itself, whatever the machine holds.
+        if pid != os.getpid():
+            held_at_each_read.append(kill_state.present())
         return read(pid)
 
     def counted_sweep():
@@ -1101,7 +1103,7 @@ def test_a_session_is_given_what_refuses_a_pull_from_its_tools(company, stub, bo
 
 # What `key_file` may name: review finding 46
 
-RESERVED_KEY_FILES = (".", "./", "settings.json", "settings.lock", "./settings.json", "sub/..")
+RESERVED_KEY_FILES = (".", "./", "settings.json", "settings.lock", "settings.json.new", "./settings.json", "sub/..")
 
 
 @pytest.mark.parametrize("key_file", RESERVED_KEY_FILES)
@@ -1137,3 +1139,217 @@ def test_a_key_file_that_is_a_directory_is_left_where_it_is(company, board):
 
     assert step("paper")["result"] == "failed"
     assert (paths.config() / "keys" / "paper").read_text() == "k"
+
+
+# A resume against a pull that is still going: review findings 52, 53 and 54
+
+
+def test_a_resume_while_a_pull_is_still_running_is_refused_and_says_so(company, board, systemctl, tmp_path):
+    assert company("schedule", "enable", "--message", "1234").returncode == 0
+    said = tmp_path / "the-resume-said"
+    hook = systemctl.directory / "after-disable"
+    systemctl.after("disable", f"rm -f {shlex.quote(str(hook))}\n{shlex.quote(str(COMPANY))} resume > {shlex.quote(str(said))} 2>&1\necho \"exit $?\" >> {shlex.quote(str(said))}")
+
+    assert company("kill", "--reason", "first").returncode == 0
+
+    text = said.read_text()
+    assert "exit 1" in text
+    assert "still running" in text
+    assert "launches may start" not in text
+    assert events("resumed") == []
+    assert "pulled by event" in company("governor", "check", "probe").stdout
+    assert company("resume").returncode == 0
+    assert company("governor", "check", "probe").returncode == 0
+    assert [event["target"] for event in events("kill-step")] == ["timers"]
+
+
+def test_a_pull_that_died_part_way_does_not_stop_the_resume(company, board, systemctl):
+    assert company("schedule", "enable", "--message", "1234").returncode == 0
+    systemctl.after("disable", "kill -9 $PPID")
+
+    assert company("kill", "--reason", "cut short").returncode == -signal.SIGKILL
+    assert "kill check" in company("governor", "check", "probe").stdout
+
+    done = company("resume")
+
+    assert done.returncode == 0, done.stderr
+    assert company("governor", "check", "probe").returncode == 0
+    assert [event["reason"] for event in events("kill-pulled")] == ["cut short"]
+
+
+def test_a_later_process_with_a_pulls_number_does_not_stop_the_resume(company, board):
+    # This process's own number, with a start time that is not its own: the pull died, and the number was reused.
+    kill_state.write({"id": "1-reused", "by": "daniel", "reason": "reused", "steps": [], "process": {"pid": os.getpid(), "started": -1}})
+
+    done = company("resume")
+
+    assert done.returncode == 0, done.stderr
+    assert [event["reason"] for event in events("kill-pulled")] == ["reused"]
+
+
+def test_a_process_that_goes_on_after_its_pull_does_not_stop_the_resume(company, board):
+    assert killswitch.pull("treasurer", "a red line was crossed", loop="honesty").clean
+
+    done = company("resume")
+
+    assert done.returncode == 0, done.stderr
+    assert company("governor", "check", "probe").returncode == 0
+
+
+LANDED = {"id": "99999999999999999999-landed", "by": "daniel", "reason": "second", "steps": []}
+
+
+def a_pull_lands_once_the_resume_has_read(monkeypatch):
+    real = kill_state.read
+
+    def read_then_land():
+        found = real()
+        monkeypatch.setattr(kill_state, "read", real)
+        kill_state.write(LANDED)
+        return found
+
+    monkeypatch.setattr(kill_state, "read", read_then_land)
+
+
+def test_a_resume_cites_only_the_pulls_it_read(company, board, monkeypatch):
+    company("kill", "--reason", "first")
+    a_pull_lands_once_the_resume_has_read(monkeypatch)
+
+    with pytest.raises(killswitch.ResumeRefused, match="another pull"):
+        killswitch.resume()
+
+    first = next(event for event in events("kill-pulled") if event["reason"] == "first")
+    assert [event["kill_seq"] for event in events("resumed")] == [first["seq"]]
+    assert [event["reason"] for event in events("kill-pulled")] == ["first"]
+    assert kill_state.present()
+    assert "kill check" in company("governor", "check", "probe").stdout
+    assert company("resume").returncode == 0
+    assert company("governor", "check", "probe").returncode == 0
+    assert sorted(event["reason"] for event in events("kill-pulled")) == ["first", "second"]
+
+
+def test_the_command_says_which_pulls_closed_when_another_lands_during_its_resume(company, board, monkeypatch, capsys):
+    company("kill", "--reason", "first")
+    a_pull_lands_once_the_resume_has_read(monkeypatch)
+
+    code = cli.main(["resume", "--message", "1234"])
+
+    said = capsys.readouterr()
+    closed = events("resumed")[0]
+    assert code == 1
+    assert closed["message"] == "1234"
+    assert "Nothing was resumed" not in said.err
+    assert "launches may start" not in said.out
+    assert f"event {closed['kill_seq']}" in said.err
+    assert "another pull" in said.err
+    assert "company resume" in said.err
+
+
+# Records that say the wrong thing: review finding 55
+
+
+def a_session_whose_record_has_a_list_for_a_group(board):
+    start_session(TEAM, "probe", board)
+    run = paths.runs() / "run-1"
+    run.mkdir(parents=True)
+    (run / "session.json").write_text(json.dumps({"session": TEAM, "group": [1], "group_started": 1}))
+
+
+def test_a_group_that_is_no_number_does_not_stop_the_next_launch(company, stub, board):
+    stub.play()
+    a_session_whose_record_has_a_list_for_a_group(board)
+
+    done = company("session", "start", "probe")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "Traceback" not in done.stderr
+
+
+def test_a_group_that_is_no_number_does_not_stop_a_pulls_write_up(company, board):
+    a_session_whose_record_has_a_list_for_a_group(board)
+
+    done = company("kill", "--reason", "first")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "did not answer" not in done.stderr
+    assert [event["reason"] for event in events("kill-pulled")] == ["first"]
+
+
+def test_a_write_up_that_fails_says_so_and_does_not_blame_the_lock(board, monkeypatch):
+    def fails():
+        raise RuntimeError("the write-up broke")
+
+    monkeypatch.setattr(launcher, "close_gone_sessions", fails)
+
+    pulled = killswitch.pull("treasurer", "a red line was crossed")
+
+    assert "did not answer" not in pulled.unlogged
+    assert "the write-up broke" in pulled.unlogged
+    assert kill_state.present()
+
+
+@pytest.mark.parametrize("steps", ["x", 5, [1], {"a": 1}, [{"step": ["x"], "target": "t", "result": "r"}], [{"target": "t"}]])
+def test_a_pulls_file_with_steps_that_are_not_steps_says_so_at_the_resume(company, board, steps):
+    kill_state.write({"id": "1-edited", "by": "daniel", "reason": "edited", "steps": steps})
+
+    done = company("resume")
+
+    assert "Traceback" not in done.stderr
+    assert ".;" not in done.stderr
+    assert (done.returncode == 0) == (not kill_state.present())
+    assert (done.returncode == 0) == (len(events("resumed")) == 1)
+
+
+# The retry that keeps a pull's first act: review finding 56
+
+
+def test_a_pulls_record_is_kept_when_a_resume_takes_the_directory_away_mid_write(monkeypatch):
+    real = Path.replace
+
+    def taken_away_first(self, target):
+        monkeypatch.setattr(Path, "replace", real)
+        (paths.home() / "kill.state").rmdir()
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "replace", taken_away_first)
+
+    kill_state.write(LANDED)
+
+    assert kill_state.present()
+    assert kill_state.read() == [LANDED]
+
+
+# A launcher that could not clear its record: review finding 58
+
+
+def test_a_launcher_that_could_not_clear_its_record_does_not_stop_itself(stub, board):
+    stub.play()
+    code = (
+        "from company import killswitch, launcher\n"
+        "launcher._forget_processes = lambda launch: None\n"
+        "launcher.start('probe')\n"
+        "pulled = killswitch.pull('probe-check', 'a forbidden action succeeded', loop='first-run')\n"
+        "assert not [step for step in pulled.steps if step.step == killswitch.STOP_SESSION], pulled\n"
+    )
+
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60, check=False)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+
+
+# What a refused pull says: review finding 59
+
+
+@pytest.mark.parametrize("value", ["aaaaaaaa-0000-4000-8000-000000000000", ""])
+def test_a_pull_refused_by_a_stray_variable_says_the_switch_was_not_pulled_and_names_it(company, board, monkeypatch, value):
+    monkeypatch.setenv("COMPANY_SESSION", value)
+
+    done = company("kill")
+
+    assert done.returncode == 1
+    assert "kill switch was not pulled" in done.stderr
+    assert "COMPANY_SESSION" in done.stderr
+    assert "Every launch is refused" not in done.stdout
+    monkeypatch.delenv("COMPANY_SESSION")
+    assert not kill_state.present()
+    assert events("kill-pulled") == []

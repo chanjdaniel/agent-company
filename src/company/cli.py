@@ -360,9 +360,11 @@ def _kill_self_test() -> int:
 def _kill(args) -> int:
     if args.self_test:
         return _kill_self_test()
-    if _refused_inside_a_session(Ledger(), "kill-pulled", "killswitch"):
+    try:
+        pulled = killswitch.pull("daniel", args.reason)
+    except killswitch.PullRefused as refused:
+        print(f"company: refused: {refused}.", file=sys.stderr)
         return EXIT_REFUSED
-    pulled = killswitch.pull("daniel", args.reason)
     print(f"The kill switch is pulled: {args.reason}.")
     for step in pulled.steps:
         print(f"{step.step} {step.target}: {step.result}" + (f" ({step.detail})" if step.detail else ""))
@@ -381,6 +383,9 @@ def _resume(args) -> int:
         return EXIT_REFUSED
     try:
         resumed = killswitch.resume(args.message)
+    except killswitch.AnotherPullLanded as landed:
+        print(f"company: {landed}.", file=sys.stderr)
+        return EXIT_REFUSED
     except (killswitch.ResumeRefused, AppendRefused, LedgerBroken, OSError) as refused:
         print(f"company: refused: {refused}. Nothing was resumed.", file=sys.stderr)
         return EXIT_REFUSED

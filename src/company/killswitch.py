@@ -40,7 +40,7 @@ _UNNAMED = "<unnamed>"
 _UNKNOWN = "unknown"
 _LAUNCH_WAIT_SECONDS = 60
 _LEDGER_WAIT_SECONDS = 30
-_RECORD_FAILURES = (AppendRefused, LedgerBroken, OSError, ValueError, KeyError)
+_RECORD_FAILURES = (AppendRefused, LedgerBroken, OSError, ValueError, KeyError, TypeError)
 
 
 @dataclass(frozen=True)
@@ -75,7 +75,18 @@ class PullRefused(Exception):
 
 
 class ResumeRefused(Exception):
-    """Nothing was resumed, and the hold stands if there was one."""
+    """The hold stands if there was one, and no pull was closed unless a subclass says so."""
+
+
+class AnotherPullLanded(ResumeRefused):
+    """The pulls the resume read are closed, and one that landed during it holds."""
+
+    def __init__(self, resumed: list[dict]):
+        closed = ", ".join(f"event {event['kill_seq']}" for event in resumed)
+        super().__init__(
+            f"pulls closed, {len(resumed)}{f' ({closed})' if closed else ''}; another pull landed during this resume, so its hold stands and every launch is still refused."
+            f" See `company ledger show`, and run `{kill_state.RESUME}` again"
+        )
 
 
 def _refuse_inside_a_session() -> None:
@@ -89,7 +100,10 @@ def _refuse_inside_a_session() -> None:
     context = {"tool": "kill-pull", **({"session": session} if contract.UUID.fullmatch(session) else {})}
     with contextlib.suppress(LedgerBroken, OSError):
         Ledger().refuse("kill-pulled", "killswitch", "inside-a-session", context)
-    raise PullRefused("a session's processes cannot pull the kill switch: code outside the session pulls it")
+    raise PullRefused(
+        f"a session's processes cannot pull the kill switch, and `{launcher.SESSION_VARIABLE}` says this is one, so the kill switch was not pulled."
+        " Nothing was stopped or held. If this is your own shell, the variable is stray: unset it and pull again"
+    )
 
 
 def _stop_sweep() -> list[Step]:
@@ -104,7 +118,7 @@ def _stop_sweep() -> list[Step]:
 
 
 def _last_sweep() -> list[Step]:
-    """Wait out any launch admitted before the pull, and stop what it started; the launch also stops itself on the file."""
+    """Wait out any launch admitted before the pull, and stop what it started; the launch also stops itself on `kill.state`."""
     steps = []
     if not launcher.wait_for_launches(_LAUNCH_WAIT_SECONDS):
         steps.append(Step(STOP_SESSION, "launch-lock", FAILED, "a launch still holds its lock, and stops itself on the hold when it starts"))
@@ -188,15 +202,14 @@ def _record(ledger: Ledger, record: dict) -> None:
     _note_schedule_off(ledger, record["seq"])
 
 
-def _record_all(own: dict | None = None) -> str | None:
-    """Write what the ledger lacks of every pull, this one's `own` record as it stands, in case its file could not be kept.
+def _record_all(records: list[dict]) -> str | None:
+    """Write what the ledger lacks of these pulls, where a later record of one stands over an earlier.
 
     Whoever calls this holds `kill_state.recording()`.
     """
     try:
-        known = {record["id"]: record for record in kill_state.read() or []}
         ledger = Ledger()
-        for record in {**known, **({own["id"]: own} if own else {})}.values():
+        for record in {record["id"]: record for record in records}.values():
             _record(ledger, record)
     except _RECORD_FAILURES as error:
         return f"the ledger could not take the pull: {error}"
@@ -218,10 +231,10 @@ def _write_up(record: dict, steps: list[Step]) -> str | None:
     found = _settings_step()
     steps.extend(found)
     record["steps"].extend(step.fields() for step in found)
-    _keep(record)
     try:
         with kill_state.recording():
-            return _record_all(record)
+            # This pull's record as it stands, in case its file could not be kept.
+            return _record_all([*(kill_state.read() or []), record])
     except OSError as error:
         return f"the ledger could not take the pull: {error}"
 
@@ -229,7 +242,14 @@ def _write_up(record: dict, steps: list[Step]) -> str | None:
 def _within(seconds: float, work: Callable[[], str | None]) -> str | None:
     """Run `work` and give its answer, or say that it has not answered; it goes on in the background meanwhile."""
     answers: list[str | None] = []
-    thread = threading.Thread(target=lambda: answers.append(work()), daemon=True)
+
+    def answer() -> None:
+        try:
+            answers.append(work())
+        except Exception as error:  # noqa: BLE001 - a write-up that fails must be told from one still waiting.
+            answers.append(f"the pull could not be written up: {error}")
+
+    thread = threading.Thread(target=answer, daemon=True)
     thread.start()
     thread.join(seconds)
     return answers[0] if answers else f"the ledger did not answer in {seconds} seconds, so its lock is held"
@@ -239,7 +259,8 @@ def pull(by: str, reason: str, loop: str | None = None) -> Pulled:
     """Stop everything now, and hold every launch until `resume`; a loop's red line calls this, and names itself."""
     _refuse_inside_a_session()
     # Its time first, so that the file names sort in the order the pulls began.
-    record: dict = {"id": f"{time.time_ns():020d}-{uuid.uuid4()}", "by": by, "reason": reason, "pulled_at": times.stamp(times.now()), **({"loop": loop} if loop else {}), "steps": []}
+    # Its process, until it has done, so that a resume can tell a pull still going from one that died.
+    record: dict = {"id": f"{time.time_ns():020d}-{uuid.uuid4()}", "by": by, "reason": reason, "pulled_at": times.stamp(times.now()), **({"loop": loop} if loop else {}), "steps": [], "process": launcher.this_process()}
     held = _keep(record)
     steps = [Step(HOLD, "kill-file", FAILED, held)] if held else []
     steps += _attempt(STOP_SESSION, "sessions", _stop_sweep)
@@ -250,32 +271,38 @@ def pull(by: str, reason: str, loop: str | None = None) -> Pulled:
     record["steps"] = [step.fields() for step in steps]
     _keep(record)
     unlogged = _within(_LEDGER_WAIT_SECONDS, lambda: _write_up(record, steps))
+    del record["process"]
     return Pulled(tuple(steps), record.get("seq"), unlogged, _keep(record))
 
 
 def resume(message: str | None = None) -> list[dict]:
-    """Daniel's word: write what the ledger lacks, close every open pull, and clear the hold.
+    """Daniel's word: write what the ledger lacks of the pulls read here, close every open pull, and clear the hold.
 
+    A pull still running is refused, since it is still stopping sessions and moving keys, and launches may not start under it.
+    A pull that lands after the read is no part of this: its hold stands, and `AnotherPullLanded` says so.
     The schedule stays off, and a moved key stays moved.
     """
     ledger = Ledger()
     if not ledger.verify().ok:
         raise ResumeRefused("the ledger is broken, so see `company ledger verify`; the hold stands")
     with kill_state.recording():
-        records = kill_state.read()
-        unlogged = _record_all()
+        records = kill_state.read() or []
+        for record in records:
+            if launcher.process_running(record.get("process")):
+                raise ResumeRefused(f"a pull is still running, in process {record['process']['pid']}, so wait for it to end, or end that process, and resume again; the hold stands")
+        unlogged = _record_all(records)
         if unlogged:
-            raise ResumeRefused(f"{unlogged}; the hold stands")
+            raise ResumeRefused(f"{unlogged.rstrip('.')}; the hold stands")
         pulls = kill_state.open_pulls(ledger.read())
-        if not pulls and records is None:
+        if not pulls and not kill_state.present():
             raise ResumeRefused("the kill switch is not pulled")
         if pulls:
             _note_schedule_off(ledger, pulls[-1]["seq"])
         fields = {"message": message} if message else {}
         resumed = [ledger.append("resumed", {"kill_seq": event["seq"], **fields}, "board") for event in pulls]
-        kill_state.clear(records or [])
+        kill_state.clear(records)
     if kill_state.present():
-        raise ResumeRefused("another pull landed during this resume, so its hold stands; see `company ledger show`, and resume again")
+        raise AnotherPullLanded(resumed)
     return resumed
 
 

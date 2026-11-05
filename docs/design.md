@@ -558,16 +558,17 @@ Either `kill.state` or an open `kill-pulled` refuses a launch, so a pull the led
 The ledger gets the pull once its actions are done, and the command reports after 30 seconds if the ledger's lock is held for that long.
 What the ledger has not taken stays in the pull's file, and `company resume` writes it when the ledger verifies again, before it lifts the hold.
 Each pull writes only its own file, and the ledger's events for its `pull` id say how far it got, so pulls that overlap and a resume refused part way write nothing twice; a lock of its own, which no action waits on, keeps two writers or two resumes from reading that at once.
-A resume removes only the pulls it read, so a pull that lands during it keeps its hold, and the resume says so.
+A pull's file names its process until the pull has done, and a resume refuses while that process runs, since the pull is still stopping sessions and moving keys and launches may not start under it; a pull that died part way does not stop a resume.
+A resume writes and closes only the pulls it read, so a pull that lands during it keeps its hold, and the resume names the pulls it closed and says that one still holds.
 
 **No company tool pulls it.**
 A tool's server has the session's environment, so it cannot see Daniel's config or reach the user's timers, and a pull there would leave a key in place and report timers that are on as turned off.
-So `killswitch.pull` refuses and logs `append-refused` when the launcher's `COMPANY_SESSION` variable is set, as `company kill` does, and a red line that a tool sees goes in the ledger for code outside the session to pull on.
+So `killswitch.pull`, which `company kill` calls, refuses and logs `append-refused` when the launcher's `COMPANY_SESSION` variable is set, and the command says the switch was not pulled and names the variable; a red line that a tool sees goes in the ledger for code outside the session to pull on.
 
 A broken ledger refuses a resume, so the hold stands until it is whole.
 A process that leaves the session's process group with `setsid` is out of the signal's reach, which is what C1 asks of a real session.
 
-Each entry of `outside_accounts` is `{"name", "rotation", "key_file"}`, whose `rotation` is `move-key`, the only step the code has, and whose `key_file` is a path inside Daniel's config directory.
+Each entry of `outside_accounts` is `{"name", "rotation", "key_file"}`, whose `rotation` is `move-key`, the only step the code has, and whose `key_file` is a path inside Daniel's config directory that is not that directory or one of the settings' own files.
 A pull reads that list from the file as it stands, each entry checked, since it must not wait on a lock or be stopped by the tamper it may be answering; a file that then fails its digest is reported by a `rotation` step on `settings` with the result `failed`.
 
 **The paper key's rotation:** the code moves the key aside so it can no longer be used, and tells Daniel to regenerate it at the broker, because the code holds no broker admin path.

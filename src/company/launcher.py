@@ -131,8 +131,9 @@ def session_settings(workspace: Path) -> dict:
     workspace" at the permission layer: the two `block` keys say it, and the deny rules name what matters most.
     A `Write(path)` rule never matches, as the docs say: `Edit` rules cover every tool that edits.
 
-    On Linux a sandbox write rule takes no wildcard but a trailing `/**`, so the shell is denied these names only at the
-    top of the workspace. A deeper one gets past the shell, and the next launch in that workspace refuses it.
+    On Linux a sandbox write rule takes no wildcard but a trailing `/**`, so these settings can deny the shell these
+    names only at the top of the workspace, and the docs do not say how such a rule treats a path not there yet, which
+    ticket 13's probe tries. A deeper one gets past the shell, and the next launch in that workspace refuses it.
     """
     protected = (paths.config(), paths.claude_directory())
     rules = [f"{_absolute(root)}/**" for root in (*protected, paths.runs())]
@@ -289,6 +290,17 @@ def _alive(pid: int | None, started: int | None) -> bool:
     return pid is not None and _is_alive(_process_stat(pid), started)
 
 
+def this_process() -> dict:
+    """What tells this process from a later one with its number, for a record that `process_running` reads."""
+    found = _process_stat(os.getpid())
+    return {"pid": os.getpid(), "started": found.started if found else None}
+
+
+def process_running(process) -> bool:
+    """Whether the process that `this_process` described is still running; anything else in its place reads as not."""
+    return isinstance(process, dict) and type(process.get("pid")) is int and _alive(process["pid"], process.get("started"))
+
+
 class _Processes:
     """What every process was at one moment, so that a look through many run records costs one read of the machine."""
 
@@ -408,7 +420,7 @@ def _session_state(path: Path) -> dict:
 def _still_its_group(state: dict, processes: _Processes) -> bool:
     """Whether the recorded group is still this session's: a leader with another start time means the number was reused."""
     group, recorded = state.get("group"), state.get("group_started")
-    if not group or recorded is None or group not in processes.live_groups:
+    if type(group) is not int or group <= 0 or recorded is None or group not in processes.live_groups:
         return False
     leader = processes.stats.get(group)
     return leader is None or leader.started == recorded
@@ -625,7 +637,7 @@ def _watch(process: subprocess.Popen, launch: _Launch, signalled: list[int]) -> 
             if _weight(launch.session, launch.run_dir) >= launch.max_weight:
                 return _MAX_WEIGHT
         time.sleep(_TICK_SECONDS)
-    # The kill switch may have reached the session's group before this saw the file.
+    # The kill switch may have reached the session's group before this saw `kill.state`.
     return _KILLED if kill_state.present() else None
 
 

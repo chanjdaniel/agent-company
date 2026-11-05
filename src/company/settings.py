@@ -20,7 +20,7 @@ from company.ledger import AppendRefused, Ledger, LedgerBroken
 INIT = "company settings init"
 SET = "company settings set"
 MOVE_KEY = "move-key"
-_OWN_FILES = ("settings.json", "settings.lock")
+_OWN_FILES = ("settings.json", "settings.lock", "settings.json.new")
 _NO_FILE = "none"
 
 
