@@ -374,7 +374,10 @@ def _kill(args) -> int:
         print(f"company: {pulled.unkept}.", file=sys.stderr)
     elif pulled.unlogged:
         print("`kill.state` in the company home holds the record, and `company resume` writes it.", file=sys.stderr)
-    print("Every launch is refused until `company resume`.")
+    if pulled.held:
+        print("Every launch is refused until `company resume`.")
+    else:
+        print("This pull holds no launch, since neither `kill.state` nor the ledger took it: pull it again once that is mended.")
     return EXIT_OK if pulled.clean else EXIT_REFUSED
 
 

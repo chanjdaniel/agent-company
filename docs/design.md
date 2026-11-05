@@ -557,6 +557,7 @@ A launcher that has logged its session's end clears its processes from that reco
 Either `kill.state` or an open `kill-pulled` refuses a launch, so a pull the ledger could not take still holds, and a record lost later does not lift it.
 The ledger gets the pull once its actions are done, and the command reports after 30 seconds if the ledger's lock is held for that long.
 A pull keeps its steps in its file after each of its four actions, so one ended part way leaves what it had done.
+If neither `kill.state` nor the ledger takes a pull, the command says that it holds no launch.
 What the ledger has not taken stays in the pull's file, and `company resume` writes it when the ledger verifies again, before it lifts the hold.
 Each pull writes only its own file, and the ledger's events for its `pull` id say how far it got, so pulls that overlap and a resume refused part way write nothing twice; a lock of its own, which no action waits on, keeps two writers or two resumes from reading that at once.
 A pull's file names its process until the pull has done, and a resume refuses while that process runs, since the pull is still stopping sessions and moving keys and launches may not start under it; a pull that died part way does not stop a resume.

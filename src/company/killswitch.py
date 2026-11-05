@@ -43,8 +43,7 @@ _LAUNCH_WAIT_SECONDS = 60
 _LEDGER_WAIT_SECONDS = 30
 # Longer than a pull's write-up may hold `kill.lock`, so that only something frozen is refused for it.
 _RESUME_LOCK_WAIT_SECONDS = _LEDGER_WAIT_SECONDS + 5
-_LEDGER_FAILURES = (LedgerBroken, OSError)
-_RECORD_FAILURES = (AppendRefused, ValueError, KeyError, TypeError)
+_LEDGER_FAILURES = (LedgerBroken, OSError, ValueError, KeyError, TypeError)
 
 
 @dataclass(frozen=True)
@@ -62,12 +61,13 @@ class Step:
 
 @dataclass(frozen=True)
 class Pulled:
-    """What a pull did. `seq` is its `kill-pulled`; `unlogged` is what the ledger has not taken, and `unkept` why the file could not hold it."""
+    """What a pull did. `seq` is its `kill-pulled`; `unlogged` is what the ledger has not taken, `unkept` why the file could not hold it, and `held` whether either holds the launches."""
 
     steps: tuple[Step, ...]
     seq: int | None
     unlogged: str | None
     unkept: str | None
+    held: bool
 
     @property
     def clean(self) -> bool:
@@ -225,10 +225,10 @@ def _record_all(records: list[dict]) -> str | None:
         for record in {record["id"]: record for record in records}.values():
             named = f"the pull in `kill.state/{record['id']}`"
             _record(ledger, record)
+    except AppendRefused as error:
+        return f"the ledger could not take {named}: {str(error).rstrip('.')}; that file is damaged, so mend it or remove it"
     except _LEDGER_FAILURES as error:
-        return f"the ledger could not take {named}: {error}"
-    except _RECORD_FAILURES as error:
-        return f"the ledger could not take {named}: {str(error).rstrip('.')}; that file is damaged, so mend it or remove it, and resume again"
+        return f"the ledger could not take {named}: {type(error).__name__}: {error}; see `company ledger verify`"
     return None
 
 
@@ -290,7 +290,8 @@ def pull(by: str, reason: str, loop: str | None = None) -> Pulled:
     unkept = _keep(record)
     if unkept and any(found["id"] == record["id"] for found in kill_state.read() or []):
         unkept += "; its file still names this process, so a resume is refused until this process ends"
-    return Pulled(tuple(steps), record.get("seq"), unlogged, unkept)
+    # No read of the ledger, whose lock may be held for good.
+    return Pulled(tuple(steps), record.get("seq"), unlogged, unkept, kill_state.present() or record.get("seq") is not None)
 
 
 def _say_what_is_missing(records: list[dict]) -> list[str]:
@@ -346,7 +347,7 @@ def resume(message: str | None = None) -> Resumed:
         except (AppendRefused, LedgerBroken, OSError) as error:
             raise PartlyResumed(resumed, f"the hold could not be cleared: {str(error).rstrip('.')}", words) from error
     if kill_state.present():
-        landed = {found["id"] for found in kill_state.read() or []} - {record["id"] for record in records}
+        landed = {found["id"] for found in kill_state.read() or []} - {record["id"] for record in records} - {kill_state.UNLISTED}
         raise PartlyResumed(resumed, "another pull landed during this resume, and its hold stands" if landed else "the hold could not be cleared: `kill.state` is still there", words)
     return Resumed(resumed, words)
 

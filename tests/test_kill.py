@@ -1365,6 +1365,30 @@ def test_a_directory_that_cannot_be_listed_is_not_called_another_pull(company, b
     assert kill_state.present()
 
 
+def test_a_listing_that_fails_only_after_the_clear_is_not_called_another_pull(company, board, monkeypatch):
+    company("kill", "--reason", "first")
+    real = kill_state.os.listdir
+    calls = []
+
+    def fails_from_the_second(path):
+        calls.append(path)
+        if len(calls) > 1:
+            raise PermissionError(f"{path} cannot be listed")
+        return real(path)
+
+    def keeps_it(self):
+        raise OSError("the directory stays")
+
+    monkeypatch.setattr(kill_state.os, "listdir", fails_from_the_second)
+    monkeypatch.setattr(Path, "rmdir", keeps_it)
+
+    with pytest.raises(killswitch.PartlyResumed) as refused:
+        killswitch.resume()
+
+    assert "could not be cleared" in str(refused.value)
+    assert "another pull" not in str(refused.value)
+
+
 def test_a_resume_that_cannot_clear_the_hold_says_which_pulls_it_closed(company, board):
     company("kill", "--reason", "first")
     (paths.home() / "kill.state" / "sub").mkdir()
@@ -1444,6 +1468,37 @@ def test_a_pulls_file_with_steps_that_are_not_steps_closes_and_says_so_where_dan
     assert not kill_state.present()
 
 
+def write_a_file_nested_too_deep():
+    (paths.home() / "kill.state").mkdir(parents=True)
+    (paths.home() / "kill.state" / "1-deep").write_text("[" * 200_000)
+
+
+def test_a_pulls_file_nested_too_deep_closes_and_says_so(company, board):
+    write_a_file_nested_too_deep()
+
+    done = company("resume")
+
+    assert done.returncode == 0, done.stderr
+    assert "1-deep" in done.stdout
+    assert "could not be read" in done.stdout
+
+
+def test_a_failed_last_write_beside_a_file_nested_too_deep_still_reports(board, monkeypatch):
+    write_a_file_nested_too_deep()
+    real = kill_state.write
+
+    def fails_at_the_last(record):
+        if "process" not in record:
+            raise OSError("the disk is full")
+        real(record)
+
+    monkeypatch.setattr(kill_state, "write", fails_at_the_last)
+
+    pulled = killswitch.pull("treasurer", "a red line was crossed")
+
+    assert "the disk is full" in pulled.unkept
+
+
 def test_a_pulls_file_with_one_step_that_is_no_step_keeps_the_others(company, board):
     good = {"step": "rotation", "target": "paper", "result": "moved-aside"}
     kill_state.write({"id": "1-edited", "by": "daniel", "reason": "edited", "steps": [good, 1]})
@@ -1490,6 +1545,64 @@ def test_a_full_disk_at_a_resume_does_not_call_a_sound_file_damaged(board, monke
     assert "damaged" not in said
     assert "remove" not in said
     assert [record["id"] for record in kill_state.read()] == ["1-sound"]
+
+
+def test_a_damaged_ledger_at_a_pull_does_not_call_its_sound_file_damaged(company, company_home, board):
+    set_accounts(company, "paper")
+    ledger = company_home / "ledger.jsonl"
+    # An old line, older than the newest `settings-changed`, so that the settings' check does not reach it.
+    ledger.write_bytes(b'{"seq":1}\n' + ledger.read_bytes().split(b"\n", 1)[1])
+
+    done = company("kill")
+
+    assert done.returncode == 1
+    assert "could not take" in done.stderr
+    assert "damaged" not in done.stderr
+    assert "remove" not in done.stderr
+    assert len(kill_state.read()) == 1
+
+
+def test_a_pull_beside_a_refused_file_names_that_file_with_no_word_of_a_resume(company, board):
+    kill_state.write({"id": "1-edited", "by": "daniel", "reason": "edited", "steps": [REFUSED_STEP]})
+
+    done = company("kill")
+
+    assert done.returncode == 1
+    assert "kill.state/1-edited" in done.stderr
+    assert "mend it or remove it" in done.stderr
+    assert "resume again" not in done.stderr
+
+
+def test_a_pull_that_neither_the_file_nor_the_ledger_took_says_nothing_holds(board, monkeypatch, capsys):
+    def no_space(*args, **kwargs):
+        raise OSError("no space left")
+
+    monkeypatch.setattr(kill_state, "write", no_space)
+    monkeypatch.setattr(Ledger, "append", no_space)
+
+    code = cli.main(["kill"])
+
+    said = capsys.readouterr()
+    assert code == 1
+    assert kill_state.refusal(events()) is None
+    assert "Every launch is refused" not in said.out
+    assert "holds no launch" in said.out
+
+
+def test_a_pull_that_could_write_no_record_still_holds_if_a_directory_fits(monkeypatch):
+    real = Path.write_text
+
+    def no_space(self, *args, **kwargs):
+        if self.name.startswith("kill.state."):
+            raise OSError("no space left")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", no_space)
+
+    with pytest.raises(OSError, match="no space left"):
+        kill_state.write(LANDED)
+
+    assert kill_state.present()
 
 
 def test_the_word_on_a_damaged_file_is_written_once_when_a_resume_is_refused_and_run_again(company, board):

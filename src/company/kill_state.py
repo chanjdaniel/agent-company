@@ -15,6 +15,8 @@ from pathlib import Path
 from company import paths
 
 RESUME = "company resume"
+# What `read` calls the one record it gives for a `kill.state` it cannot list, which is no pull's file.
+UNLISTED = "kill.state"
 _WRITE_TRIES = 3
 
 
@@ -42,7 +44,7 @@ def _read_one(name: str) -> dict:
     """One pull's record, whose `id` is its file's name; a file that is no record reads as an empty one, and `steps_lost` says what could not be read."""
     try:
         record = json.loads((_path() / name).read_bytes())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         record = {}
     record = record if isinstance(record, dict) else {}
     steps = record.get("steps")
@@ -61,13 +63,15 @@ def read() -> list[dict] | None:
     except FileNotFoundError:
         return None
     except OSError:
-        return [{"id": _path().name, "steps_lost": True}]
+        return [{"id": UNLISTED, "steps_lost": True}]
     return [_read_one(name) for name in sorted(names)]
 
 
 def write(record: dict) -> None:
     """Keep one pull's record, which only that pull writes, whole; a resume may take the directory away at any moment."""
     paths.home().mkdir(parents=True, exist_ok=True, mode=0o700)
+    # First, so that the hold stands wherever a directory still fits, though the record may not.
+    _path().mkdir(mode=0o700, exist_ok=True)
     # Beside the directory and not in it, so that a write cut short leaves it nothing to hold the directory open with.
     temporary = paths.home() / f"kill.state.{record['id']}.new"
     temporary.write_text(json.dumps(record))
