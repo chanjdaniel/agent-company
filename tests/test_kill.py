@@ -852,3 +852,43 @@ def test_a_self_test_that_finds_a_broken_stop_fails(tmp_path, monkeypatch):
     checks = killswitch.self_test()
 
     assert [check.name for check in checks if not check.passed][:2] == ["the session and its child stopped, with nothing left running", "its launcher ended and logged the stop"]
+
+
+# What `key_file` may name: review finding 46
+
+RESERVED_KEY_FILES = (".", "./", "settings.json", "settings.lock", "./settings.json", "sub/..")
+
+
+@pytest.mark.parametrize("key_file", RESERVED_KEY_FILES)
+def test_settings_refuse_a_key_file_that_names_the_directory_or_its_own_files(company, board, key_file):
+    account = {"name": "x", "rotation": "move-key", "key_file": key_file}
+
+    done = company("settings", "set", "outside_accounts", json.dumps([account]))
+
+    assert done.returncode == 1, done.stdout
+    assert "outside_accounts" in done.stderr
+
+
+@pytest.mark.parametrize("key_file", RESERVED_KEY_FILES)
+def test_a_tampered_list_cannot_move_the_config_directory_or_its_own_files(company, board, key_file):
+    path = paths.config() / "settings.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), "outside_accounts": [{"name": "evil", "rotation": "move-key", "key_file": key_file}, {"name": "last", "rotation": "move-key", "key_file": "last.key"}]}))
+    key_of("last").write_text("k")
+
+    company("kill")
+
+    assert step("evil")["result"] == "failed"
+    assert step("last")["result"] == "moved-aside"
+    assert path.exists()
+    assert (paths.config() / "settings.lock").exists()
+
+
+def test_a_key_file_that_is_a_directory_is_left_where_it_is(company, board):
+    (paths.config() / "keys").mkdir()
+    (paths.config() / "keys" / "paper").write_text("k")
+    set_accounts(company, "paper", paper="keys")
+
+    company("kill")
+
+    assert step("paper")["result"] == "failed"
+    assert (paths.config() / "keys" / "paper").read_text() == "k"
