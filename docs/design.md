@@ -358,7 +358,7 @@ Notes on single kinds:
 - `promise-kept` is Daniel's word that a cell's promise was kept on `kept_date`, written by `company promise kept <seq> [--on <day>] [--note <text>]`, since a cell's own report never counts and most promises leave no record code can read.
 - `promise-checked`'s `result` is `kept`, `broken` or `not-run`, and `evidence_seqs` names what it rests on: the `promise-kept`, the `paper-closed` or the finding.
   A promise gets one, whatever happens after.
-- `job-failed` is written by `company schedule run <job>` when the job exits non-zero or raises, in the ledger of the home that command was started in, whichever home the job itself ran in; `exit` is the job's exit code, and its output stays in the timer's journal.
+- `job-failed` is written by `company schedule run <job>` when the job exits non-zero or raises, in the ledger of the home that command was started in, whichever home the job itself ran in; `exit` is the job's exit code, or 1 if it raised, and its output stays in the timer's journal.
 - `finding` allows `treasurer` so that a check the Treasurer makes itself, such as an overdue promise, can record its finding, whose `promise_seq` names that promise.
   It allows `board` so that Daniel can record a fabricated claim they find in the batch, with `company finding record`, which also writes `finding-confirmed`.
   For a claim in a draft the command takes the bet and pauses that cell; for a memo, whose author is no cell, it records the finding with no pause, beside `memo-rejected`, so that the honesty metrics still see it.
@@ -455,7 +455,7 @@ Before money flows, a pre-registered leading indicator stands in for it, counted
 
 - **Resources:** tokens from the share of each window with a reading against `company_share`, dollars spent in the last seven days, and Daniel-minutes in the last seven days against `daily_minutes × 7`, with a note of any decision not charged yet.
 - **Incidents:** those in the last seven days, and one line for each scheduled job that failed in them, with how many times and how it last ended.
-- **Honesty:** the cells' promises made, kept, broken and open; each runner's promise that was not run, on a line of its own and never among the cells'; findings in the last seven days, and those unconfirmed in all; complaints, spam flags and refunds in the last seven days; and the pauses in effect.
+- **Honesty:** the cells' promises made, kept, broken and open; each open one on a line of its own, with its event, due date and text, so that Daniel can say it was kept; each runner's promise that was not run, on a line of its own and never among the cells'; findings in the last seven days, and those unconfirmed in all; complaints, spam flags and refunds in the last seven days; and the pauses in effect.
 - **Pending approvals:** every `approval-asked` with no `approval-decided`.
 
 A section with nothing to say prints "none", and an empty ledger prints that for every section and exits 0, with or without settings.
@@ -598,6 +598,7 @@ If `enable` fails, or a pull lands during it, it turns the timers back off and l
 A timer's service runs `company schedule run <job>`, which asks the ledger again and refuses with the schedule off or the kill switch pulled, so a timer that could not be turned off still runs nothing.
 A job that then fails, by exiting non-zero or by raising, is logged as `job-failed`, and the digest's incidents show it; a run refused at that first step is no failure and logs nothing, and over a broken ledger the failure can go only to the job's output, while the digest says the ledger is broken.
 A job that keeps failing logs each time, so a charge due every five minutes can log often; the digest gives each job one line.
+A job killed by a signal, or a service that never starts, logs nothing, and only the journal has it.
 A unit carries only `COMPANY_HOME`, `COMPANY_CONFIG` and `CLAUDE_CONFIG_DIR`, so a job that starts a session would look for `claude` on the user manager's own path and might be refused with `no-binary`; no job starts one yet, and ticket 12's are the first.
 Until gate C opens the schedule, the kill switch's self-test, `company paper tick`, `company treasurer check`, `company treasurer charge`, the daily audit sample, the weekly audit pass, the batch, the strategy session and the retro run by Daniel's command.
 
@@ -878,7 +879,8 @@ A cell records each promise it makes with its `record_promise` tool, which takes
 
 **A cell's promise is kept only by Daniel's word.**
 A cell's report of its own promise is the thing the honesty loop must not rest on, and a promise such as a delivery leaves no record the code can read, so silence past the date reads as broken and it costs Daniel a command to say otherwise.
-That word must name a day by the due date, and comes before the check reads the promise, so a word Daniel gives late takes `--on`, and one after the check has read it broken is refused; the pause is then lifted by `company cell resume`.
+That word must name a day from the promise's making to its due date, and comes before any check reads the promise as broken, so a word Daniel gives late takes `--on`, and one after that is refused; the result then stands, and `company cell resume --bet <bet>` lifts the pause.
+The digest lists each open promise, with the command that says it was kept.
 
 Each write of a broken promise looks for what an earlier check wrote, so a check stopped part way is finished by the next with nothing twice, and a lock of its own, `honesty.lock`, keeps two from running at once.
 
@@ -890,11 +892,12 @@ A session already running goes on to its own limits, and a paper period goes on,
 None of this section's commands runs inside a session.
 
 **Complaints and spam flags** are Daniel's to record, with `company complaint record --source <where> --summary <text> [--bet <id>] [--contact <who>]` and `company spam-flag record --source <where> [--bet <id>] [--contact <who>]`.
-Each record weighs the threshold under "Numbers set here", and so does each check; if the settings cannot be read the flag stands and the command says it was not weighed, with no value assumed.
+Each record weighs the threshold under "Numbers set here", and so does each check, which also says when a hold stands; if the settings cannot be read the flag stands and the command says it was not weighed, with no value assumed.
 Reaching the threshold logs `cell-paused` with the scope `outside-actions`, and from then on the ledger itself refuses `target-proposed`, `draft-proposed` and `experiment-registered`, the kinds by which a cell starts an outside action, with the reason `outside-actions-paused`, on every path to it.
 The list is `outside_actions` in the contract.
 A `send-confirmed` is not refused, since it records what Daniel already did, and a fact stays a fact.
 `company cell resume --outside-actions [--message <Discord id>]` is Daniel's review, and the threshold then counts only flags after it, or the next check would undo the review while those flags stay in the month.
+A hold stands until that review, even once its flags have aged out of the month.
 Outside actions in the 2% rule are the `send-confirmed` events in the same trailing days.
 
 ### Honesty toward people and platforms

@@ -218,12 +218,12 @@ def _checked_line(checked: honesty.Checked) -> str:
         return f"Event {seq}, due {promise['due_date']}: kept."
     if checked.result == honesty.NOT_RUN:
         return f"Event {seq}, due {promise['due_date']}: not run, so no tick closed its paper period by then. It is the code's promise, so nothing goes against the cell, and the digest says so."
-    bet = promise["writer"].removeprefix(contract.CELL_PREFIX)
+    bet = treasurer.bet_of(promise)
     return f"Event {seq}, due {promise['due_date']}: broken, which is finding {checked.finding}. The cell {bet} is paused until `{honesty.resume_command(bet)}`."
 
 
 def _weigh_complaints() -> int:
-    """Whether the flags since Daniel's last review have reached the threshold, having said so; a recorded flag stands either way."""
+    """Weigh the flags since Daniel's last review against the threshold and say what came of it; the exit is non-zero only if that could not be done."""
     try:
         review = honesty.review_complaints()
     except settings.SettingsRefused as refused:
@@ -235,7 +235,7 @@ def _weigh_complaints() -> int:
     if review is not None:
         counted = f"Complaints and spam flags since your last review, in the last {review.days:g} days: {review.flagged}, and {float(review.needed):g} pause new outside actions."
         print(counted)
-        if review.held:
+        if review.holding:
             print(f"New outside actions are refused company-wide until `{honesty.RESUME_OUTSIDE}`.")
         if review.pause is not None:
             print(f"Event {review.pause['seq']} in the ledger records the pause.")
@@ -286,7 +286,7 @@ def _cell_resume(args) -> int:
     ledger = Ledger()
     if _refused_inside_a_session(ledger, "cell-resumed", "board") or _is_broken(ledger):
         return EXIT_REFUSED
-    scope = honesty.OUTSIDE_SCOPE if args.outside_actions else honesty.CELL_SCOPE
+    scope = contract.OUTSIDE_ACTIONS_SCOPE if args.outside_actions else honesty.CELL_SCOPE
     try:
         event = honesty.resume(scope, args.bet, args.message)
     except honesty.Refused as refused:
@@ -570,7 +570,7 @@ def _schedule_list(args) -> int:
 def _schedule_run(args) -> int:
     """What a timer's service runs: the ledger decides again, so a timer left on still runs nothing."""
     ledger = Ledger()
-    if _is_broken(ledger):
+    if _refused_inside_a_session(ledger, "job-failed", "scheduler") or _is_broken(ledger):
         return EXIT_REFUSED
     events = ledger.read()
     refusal = schedule.run_refusal(events)

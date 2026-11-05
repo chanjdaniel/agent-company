@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from ledger_history import ledger_at, section
-from session_checks import events
+from session_checks import events, patch_every_company
 from usage_records import (
     ALPHA,
     record_reading,
@@ -19,7 +19,7 @@ from usage_records import (
     week_reading,
 )
 
-from company import paths, schedule
+from company import launcher, paths, schedule
 from company.ledger import Ledger
 
 
@@ -485,17 +485,14 @@ def test_a_session_from_before_the_window_does_not_keep_the_charge_due(company, 
 
 def broken_stop(tmp_path, monkeypatch):
     """Every `company` from here on has a stop that does nothing, so that the kill switch's real self-test fails, and soon."""
-    wrapper = tmp_path / "pythonpath" / "sitecustomize.py"
-    wrapper.parent.mkdir()
-    wrapper.write_text(
-        f"import sys\nsys.path.insert(0, {os.environ['PYTHONPATH']!r})\n"
-        "import audit_guard\naudit_guard.install_from_env()\n"
-        "from company import kill_state, killswitch, launcher\n"
-        "launcher.running_sessions = lambda: []\n"
-        "kill_state.present = lambda: False\n"
-        "killswitch._TEST_WAIT_SECONDS = 1\n"
+    patch_every_company(
+        tmp_path,
+        monkeypatch,
+        "from company import kill_state, killswitch, launcher",
+        "launcher.running_sessions = lambda: []",
+        "kill_state.present = lambda: False",
+        "killswitch._TEST_WAIT_SECONDS = 1",
     )
-    monkeypatch.setenv("PYTHONPATH", str(wrapper.parent))
 
 
 def digest_incidents(company):
@@ -537,22 +534,28 @@ def test_a_job_that_refuses_is_a_job_that_failed(company, schedule_on):
 
 
 def test_a_job_that_raises_is_a_job_that_failed(company, schedule_on, tmp_path, monkeypatch):
-    wrapper = tmp_path / "pythonpath" / "sitecustomize.py"
-    wrapper.parent.mkdir()
-    wrapper.write_text(
-        f"import sys\nsys.path.insert(0, {os.environ['PYTHONPATH']!r})\n"
-        "import audit_guard\naudit_guard.install_from_env()\n"
-        "from company import killswitch\n"
-        "def fail():\n    raise RuntimeError('a stand-in failure')\n"
-        "killswitch.self_test = fail\n"
+    patch_every_company(
+        tmp_path,
+        monkeypatch,
+        "from company import killswitch",
+        "def fail():\n    raise RuntimeError('a stand-in failure')",
+        "killswitch.self_test = fail",
     )
-    monkeypatch.setenv("PYTHONPATH", str(wrapper.parent))
 
     done = company("schedule", "run", "kill-self-test")
 
     assert done.returncode == 1
     assert "a stand-in failure" in done.stderr
     assert [(found["job"], found["exit"]) for found in events("job-failed")] == [("kill-self-test", 1)]
+
+
+def test_a_session_cannot_put_a_failure_in_the_digest(company, schedule_on):
+    env = {**os.environ, launcher.SESSION_VARIABLE: "eeeeeeee-0000-4000-8000-000000000000"}
+
+    done = company("schedule", "run", "treasurer-check", env=env)
+
+    assert done.returncode == 1
+    assert events("job-failed") == []
 
 
 def test_a_job_that_passes_or_is_refused_records_no_failure(company, board, systemctl):
@@ -582,16 +585,13 @@ def test_the_failures_of_one_job_read_as_one_line_and_only_for_the_week(company,
 
 
 def test_a_failure_the_ledger_cannot_take_says_so_and_the_job_still_fails(company, schedule_on, tmp_path, monkeypatch):
-    wrapper = tmp_path / "pythonpath" / "sitecustomize.py"
-    wrapper.parent.mkdir()
-    wrapper.write_text(
-        f"import sys\nsys.path.insert(0, {os.environ['PYTHONPATH']!r})\n"
-        "import audit_guard\naudit_guard.install_from_env()\n"
-        "from company import killswitch, ledger\n"
-        "def cut():\n    (ledger.paths.home() / 'ledger.head').unlink()\n    return [killswitch.Check('a stand-in check', False, 'it failed')]\n"
-        "killswitch.self_test = cut\n"
+    patch_every_company(
+        tmp_path,
+        monkeypatch,
+        "from company import killswitch, ledger",
+        "def cut():\n    (ledger.paths.home() / 'ledger.head').unlink()\n    return [killswitch.Check('a stand-in check', False, 'it failed')]",
+        "killswitch.self_test = cut",
     )
-    monkeypatch.setenv("PYTHONPATH", str(wrapper.parent))
     before = len(events())
 
     done = company("schedule", "run", "kill-self-test")

@@ -54,7 +54,7 @@ uv run company spam-flag record --source inbox
 uv run company cell resume --outside-actions
 ```
 
-The share, the charge, the governor, a session and a digest of a ledger with events read `settings.json` in Daniel's config directory, and refuse without it, since no share or floor is compiled in.
+The share, the charge, the governor, a session and a digest of a ledger with events read `settings.json` in Daniel's config directory, and refuse without it, since no share or floor is compiled in; weighing complaints reads it too, and says so without it, and the flag and the promises it checked still stand.
 Only `company settings init` and `company settings set` change that file, and a file changed any other way refuses them all, until `company settings init` writes a new one.
 `company kill` needs neither the settings nor a whole ledger to stop what runs.
 The two shares are fractions, such as 0.25 for 25%, and a number above 1 is refused.

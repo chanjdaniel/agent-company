@@ -234,7 +234,7 @@ def _when(event: dict) -> datetime:
     return when
 
 
-def _of_kind(events: list[dict], *kinds: str) -> list[dict]:
+def of_kind(events: list[dict], *kinds: str) -> list[dict]:
     return [event for event in events if event["kind"] in kinds]
 
 
@@ -245,7 +245,7 @@ def last_seven_days(now: datetime) -> Span:
 
 def _newest_complete_window_end(events: list[dict], now: datetime) -> datetime:
     """The account's windows, stepped from the newest reading that can be true; with none, they step back from `now`."""
-    for event in reversed(_of_kind(events, "usage-reading")):
+    for event in reversed(of_kind(events, "usage-reading")):
         if event.get("window") != "seven_day":
             continue
         resets_at, taken_at = times.parse_stamp(event.get("resets_at")), times.parse_stamp(event.get("taken_at"))
@@ -270,7 +270,7 @@ def _window_index(week_start: str, month: Span) -> int:
 
 def _whole_charges(events: list[dict]) -> list[dict]:
     """The `resource-charged` lines of each charge that wrote them all: a charge stopped part way counts for nothing."""
-    lines = _of_kind(events, "resource-charged")
+    lines = of_kind(events, "resource-charged")
     written = Counter(event["charge_id"] for event in lines)
     return [event for event in lines if written[event["charge_id"]] == event["charge_lines"]]
 
@@ -287,19 +287,19 @@ def _charges_by_window(events: list[dict], month: Span) -> dict[tuple[int, str],
 
 def foreign_money(events: list[dict], span: Span, kinds=tuple(_MONEY_FIELDS)) -> tuple[int, ...]:
     """The money events of `kinds` in `span` not in the company's currency: there is no rate to add them with."""
-    return tuple(event["seq"] for event in _of_kind(events, *kinds) if span.holds(event) and event["currency"] != CURRENCY)
+    return tuple(event["seq"] for event in of_kind(events, *kinds) if span.holds(event) and event["currency"] != CURRENCY)
 
 
 def spent(events: list[dict], span: Span) -> Fraction:
     """Dollars spent in `span`, in the company's currency."""
-    spends = (e for e in _of_kind(events, "spend") if span.holds(e) and e["currency"] == CURRENCY)
+    spends = (e for e in of_kind(events, "spend") if span.holds(e) and e["currency"] == CURRENCY)
     return sum((Fraction(e["amount"]) for e in spends), Fraction(0))
 
 
 def figures(events: list[dict], month: Span) -> dict[str, Figures]:
     """Each line's money over the month: money with no bet is on the overhead line, so the lines add up to the company."""
     amounts: dict[str, dict[str, Fraction]] = defaultdict(lambda: defaultdict(Fraction))
-    for event in _of_kind(events, *_MONEY_FIELDS):
+    for event in of_kind(events, *_MONEY_FIELDS):
         if month.holds(event) and event["currency"] == CURRENCY:
             amounts[event.get("bet", OVERHEAD)][_MONEY_FIELDS[event["kind"]]] += Fraction(event["amount"])
     for (_, line), charge in _charges_by_window(events, month).items():
@@ -326,7 +326,7 @@ class _SessionRun:
 
 def _session_runs(events: list[dict]) -> list[_SessionRun]:
     by_session: dict[str, list[dict]] = defaultdict(list)
-    for event in _of_kind(events, "session-started", *_SESSION_ENDS):
+    for event in of_kind(events, "session-started", *_SESSION_ENDS):
         by_session[event["session"]].append(event)
     runs = []
     for found in by_session.values():
@@ -368,9 +368,9 @@ def ladder(events: list[dict], terms: Terms, now: datetime) -> Ladder:
 
 def bets(events: list[dict], lines: dict[str, Figures]) -> dict[str, bool]:
     """The bets to report, each with whether it is closed: a closed bet with nothing in the month drops off."""
-    known = {event["bet"] for event in _of_kind(events, "bet-admitted", "session-started") if "bet" in event}
+    known = {event["bet"] for event in of_kind(events, "bet-admitted", "session-started") if "bet" in event}
     known |= set(lines) - {OVERHEAD}
-    closed = {event["bet"] for event in _of_kind(events, "bet-closed")}
+    closed = {event["bet"] for event in of_kind(events, "bet-closed")}
     return {
         bet: bet in closed
         for bet in sorted(known)
@@ -383,7 +383,7 @@ def minutes_due(events: list[dict], table: dict) -> MinutesDue:
     by_seq = {event["seq"]: event for event in events}
     charged = _charged_subjects(events)
     charges, problems = [], []
-    for event in _of_kind(events, "approval-decided", "send-confirmed"):
+    for event in of_kind(events, "approval-decided", "send-confirmed"):
         if event["seq"] in charged:
             continue
         if event["kind"] == "send-confirmed":
@@ -408,13 +408,13 @@ def _cell_bet(event: dict) -> str | None:
 
 
 def _charged_subjects(events: list[dict]) -> set[int]:
-    return {event["subject_seq"] for event in _of_kind(events, "minutes-charged")}
+    return {event["subject_seq"] for event in of_kind(events, "minutes-charged")}
 
 
 def uncharged_decisions(events: list[dict]) -> int:
     """How many decisions and sends have no charge yet."""
     charged = _charged_subjects(events)
-    return sum(event["seq"] not in charged for event in _of_kind(events, "approval-decided", "send-confirmed"))
+    return sum(event["seq"] not in charged for event in of_kind(events, "approval-decided", "send-confirmed"))
 
 
 def minutes_by_subject(events: list[dict]) -> dict[int, Fraction]:
@@ -425,7 +425,7 @@ def minutes_by_subject(events: list[dict]) -> dict[int, Fraction]:
     """
     subject_of: dict[int, int] = {}
     standing: dict[int, Fraction] = {}
-    for event in _of_kind(events, "minutes-charged", "minutes-corrected"):
+    for event in of_kind(events, "minutes-charged", "minutes-corrected"):
         if event["kind"] == "minutes-charged":
             subject_of[event["seq"]] = event["subject_seq"]
             standing.setdefault(event["subject_seq"], _exact(event["minutes"]))
@@ -446,7 +446,7 @@ def charge_due(events: list[dict], now: datetime) -> bool:
     So one is due once a session in the newest reading's window has ended since the newest whole charge, and in the last
     `CHARGE_LEAD` of that window whatever else has happened, since a charge writes only what has changed.
     """
-    readings = [event for event in _of_kind(events, "usage-reading") if event["window"] == "seven_day"]
+    readings = [event for event in of_kind(events, "usage-reading") if event["window"] == "seven_day"]
     resets = times.parse_stamp(readings[-1]["resets_at"]) if readings else None
     if resets is None or now >= resets:
         return False
@@ -456,7 +456,7 @@ def charge_due(events: list[dict], now: datetime) -> bool:
     opened = resets - WEEK
     return any(
         event["seq"] > newest and (ended := times.parse_stamp(event["ts"])) is not None and ended >= opened
-        for event in _of_kind(events, "session-ended", "session-stopped")
+        for event in of_kind(events, "session-ended", "session-stopped")
     )
 
 
@@ -502,14 +502,14 @@ def opens_paper_period(verdict: dict) -> bool:
 
 def open_period(events: list[dict]) -> dict | None:
     """The period holding the paper account, as one strategy at a time does."""
-    closed = {event["period_seq"] for event in _of_kind(events, "paper-closed")}
-    return next((event for event in _of_kind(events, "paper-opened") if event["seq"] not in closed), None)
+    closed = {event["period_seq"] for event in of_kind(events, "paper-closed")}
+    return next((event for event in of_kind(events, "paper-opened") if event["seq"] not in closed), None)
 
 
 def verdict_awaiting_paper(events: list[dict]) -> dict | None:
     """The oldest verdict that opens a period and has none yet."""
-    opened = {event["verdict_seq"] for event in _of_kind(events, "paper-opened")}
-    return next((event for event in _of_kind(events, "verdict") if opens_paper_period(event) and event["seq"] not in opened), None)
+    opened = {event["verdict_seq"] for event in of_kind(events, "paper-opened")}
+    return next((event for event in of_kind(events, "verdict") if opens_paper_period(event) and event["seq"] not in opened), None)
 
 
 def registration_of(events: list[dict], period_or_verdict: dict) -> dict:
@@ -517,9 +517,9 @@ def registration_of(events: list[dict], period_or_verdict: dict) -> dict:
     return next(event for event in events if event["seq"] == period_or_verdict["registration_seq"])
 
 
-def bet_of(registration: dict) -> str:
-    """The bet whose cell wrote a registration."""
-    return registration["writer"].removeprefix(CELL_PREFIX)
+def bet_of(event: dict) -> str:
+    """The bet whose cell wrote this event."""
+    return event["writer"].removeprefix(CELL_PREFIX)
 
 
 def config_hash_of(events: list[dict], period: dict) -> str:
@@ -528,7 +528,7 @@ def config_hash_of(events: list[dict], period: dict) -> str:
 
 
 def _paper_readings(events: list[dict], period_seq: int) -> list[dict]:
-    return [event for event in _of_kind(events, "paper-reading") if event["period_seq"] == period_seq]
+    return [event for event in of_kind(events, "paper-reading") if event["period_seq"] == period_seq]
 
 
 def paper_pnl(events: list[dict], period_seq: int, equity: Decimal) -> Decimal:
@@ -561,12 +561,12 @@ class PaperResult:
 def paper_results(events: list[dict]) -> list[PaperResult]:
     """Each paper period, oldest first. None of this is money: paper results are never in a bar or a margin."""
     results = []
-    for period in _of_kind(events, "paper-opened"):
+    for period in of_kind(events, "paper-opened"):
         # The contract asks only that a seq exists, and a page must not fall over a period citing something else.
-        registration = next((event for event in _of_kind(events, "strategy-registered") if event["seq"] == period["registration_seq"]), None)
+        registration = next((event for event in of_kind(events, "strategy-registered") if event["seq"] == period["registration_seq"]), None)
         bet, strategy = (bet_of(registration), registration["strategy"]) if registration else ("unknown", "unknown")
         readings = _paper_readings(events, period["seq"])
-        closed = next((event for event in _of_kind(events, "paper-closed") if event["period_seq"] == period["seq"]), None)
+        closed = next((event for event in of_kind(events, "paper-closed") if event["period_seq"] == period["seq"]), None)
         results.append(PaperResult(period, bet, strategy, readings[-1] if readings else None, closed))
     return results
 

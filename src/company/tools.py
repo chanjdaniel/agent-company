@@ -21,7 +21,11 @@ _DEFAULT_PROTOCOL = "2025-06-18"
 
 
 class _BadArguments(Exception):
-    """A call's arguments cannot make the event."""
+    """A call's arguments cannot make the event; `reason` is the code its refusal logs."""
+
+    def __init__(self, reason: str = "bad-arguments"):
+        super().__init__(reason)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -43,11 +47,11 @@ def _note(server: "Server", arguments: dict) -> dict:
 
 def _record_promise(server: "Server", arguments: dict) -> dict:
     promise, due_date, counterparty = arguments.get("promise"), arguments.get("due_date"), arguments.get("counterparty")
-    if not isinstance(promise, str) or not promise or not isinstance(due_date, str) or (counterparty is not None and not isinstance(counterparty, str)):
+    if not isinstance(promise, str) or not promise or not isinstance(due_date, str) or not contract.is_date(due_date) or (counterparty is not None and not isinstance(counterparty, str)):
         raise _BadArguments
-    # A date already past would be broken as it is made; a malformed one goes on to the contract.
+    # It would be broken as it is made.
     if due_date < times.now().date().isoformat():
-        raise _BadArguments
+        raise _BadArguments("due-date-past")
     fields = {"promise": promise, "due_date": due_date} | ({"counterparty": counterparty} if counterparty else {})
     event = server.ledger.append("promise-recorded", fields, server.writer, {"session": server.session, "tool": "record_promise"})
     return _result(f"Recorded as event {event['seq']}, due {due_date}.")
@@ -75,7 +79,7 @@ _NOTE = Tool(
 )
 _PROMISE = Tool(
     "record_promise",
-    "Record a promise you have made, with its due date. Daniel alone says it was kept, and with no such word by the end of that day, UTC, "
+    "Record a promise you have made, with its due date. Daniel alone says it was kept, and with no such word at the first check after that day ends, UTC, "
     "it is broken: a finding that pauses this bet until Daniel resumes it.",
     {
         "type": "object",
@@ -199,8 +203,8 @@ class Server:
             return self._refused(tool.kind, name, "tool-not-in-role")
         try:
             return tool.act(self, arguments if isinstance(arguments, dict) else {})
-        except _BadArguments:
-            return self._refused(tool.kind, name, "bad-arguments")
+        except _BadArguments as bad:
+            return self._refused(tool.kind, name, bad.reason)
         except quant.Refused as refused:
             return self._refused(tool.kind, name, refused.reason)
         except quant.Logged as logged:

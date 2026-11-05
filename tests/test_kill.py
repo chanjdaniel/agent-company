@@ -17,7 +17,7 @@ from pathlib import Path
 
 import audit_guard
 import pytest
-from session_checks import events, pid_is_running, wait_for
+from session_checks import events, patch_every_company, pid_is_running, wait_for
 from usage_records import TEAM, start_session
 
 from company import cli, kill_state, killswitch, launcher, paths, settings
@@ -837,16 +837,7 @@ def test_the_self_test_leaves_nothing_of_its_own_behind(company, monkeypatch, tm
 
 def test_a_self_test_that_finds_a_broken_stop_fails(tmp_path, monkeypatch):
     # Every `company` it starts has a stop that does nothing: it must say so, and still end what it started.
-    wrapper = tmp_path / "pythonpath" / "sitecustomize.py"
-    wrapper.parent.mkdir()
-    wrapper.write_text(
-        f"import sys\nsys.path.insert(0, {os.environ['PYTHONPATH']!r})\n"
-        "import audit_guard\naudit_guard.install_from_env()\n"
-        "from company import kill_state, launcher\n"
-        "launcher.running_sessions = lambda: []\n"
-        "kill_state.present = lambda: False\n"
-    )
-    monkeypatch.setenv("PYTHONPATH", str(wrapper.parent))
+    patch_every_company(tmp_path, monkeypatch, "from company import kill_state, launcher", "launcher.running_sessions = lambda: []", "kill_state.present = lambda: False")
     monkeypatch.setattr(killswitch, "_TEST_WAIT_SECONDS", 1)
 
     checks = killswitch.self_test()

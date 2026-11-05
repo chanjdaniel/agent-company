@@ -38,7 +38,7 @@ def _is_seq(value, next_seq: int) -> bool:
     return _whole(value) and 1 <= value < next_seq
 
 
-def _is_date(value) -> bool:
+def is_date(value) -> bool:
     if not _matches(_DATE, value):
         return False
     try:
@@ -61,7 +61,7 @@ def _type_holds(type_name: str, value, next_seq: int) -> bool:
         case "timestamp":
             return isinstance(value, str) and times.parse_stamp(value) is not None
         case "date":
-            return _is_date(value)
+            return is_date(value)
         case "uuid":
             return _matches(UUID, value)
         case "bet":

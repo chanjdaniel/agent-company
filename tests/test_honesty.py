@@ -209,6 +209,33 @@ def test_a_word_on_a_promise_already_checked_or_already_kept_is_refused(company,
     assert len(events("promise-kept")) == 1
 
 
+def test_a_word_after_a_check_stopped_part_way_is_refused_since_it_read_the_promise_as_broken(company, digest_settings, check):
+    seq = promise()
+    finding = event("finding", {"rubric": "broken-promise", "summary": "s", "evidence": "e", "bet": "alpha", "promise_seq": seq}, "treasurer")
+
+    done = company("promise", "kept", str(seq), "--on", DUE)
+
+    assert done.returncode == 1
+    assert str(finding) in done.stderr
+    assert "company cell resume --bet alpha" in done.stderr
+    assert events("append-refused")[-1]["reason"] == "already-found-broken"
+    assert events("promise-kept") == []
+    check()
+    assert checked_results() == [(seq, "broken")]
+    assert [found["finding_seq"] for found in events("finding-confirmed")] == [finding]
+
+
+def test_a_word_of_a_day_before_the_promise_was_made_is_refused(company, digest_settings):
+    seq = promise()
+
+    done = company("promise", "kept", str(seq), "--on", "2001-01-01")
+
+    assert done.returncode == 1
+    assert "2026-09-28" in done.stderr
+    assert events("append-refused")[-1]["reason"] == "before-it-was-made"
+    assert events("promise-kept") == []
+
+
 def test_a_word_written_past_the_command_with_a_late_day_still_reads_as_broken(digest_settings, check):
     seq = promise()
     event("promise-kept", {"promise_seq": seq, "kept_date": "2026-10-02"}, "board")
@@ -272,6 +299,21 @@ def test_a_runners_promise_closed_by_its_date_is_kept_and_adds_nothing_to_the_ce
     assert honesty_section(company) == "none"
 
 
+def test_the_digest_names_each_open_promise_so_that_daniel_can_say_it_was_kept(company, digest_settings, check):
+    seq = promise(due="2099-01-01", text="deliver\nthe report")
+    kept = promise(due="2099-01-01")
+    assert company("promise", "kept", str(kept)).returncode == 0
+    promise(writer="runner", due="2099-01-01")
+    check()
+
+    honesty = honesty_section(company).splitlines()
+
+    assert honesty == [
+        "Cells' promises: 2 made, 1 kept, 0 broken, 1 open",
+        f"Open: event {seq}, bet alpha, due 2099-01-01, kept only if you say so with `company promise kept {seq}`: deliver the report",
+    ]
+
+
 def test_a_cells_promises_are_counted_apart_from_a_runners_not_run(company, digest_settings, check):
     kept = promise(due="2099-01-01")
     assert company("promise", "kept", str(kept)).returncode == 0
@@ -286,6 +328,27 @@ def test_a_cells_promises_are_counted_apart_from_a_runners_not_run(company, dige
     assert f"The code's promise, not run and no cell's doing: event {runner}, bet alpha, due {DUE}: {PERIOD_TEXT}" in honesty
     assert "Findings: 1 in the last seven days, 0 unconfirmed in all" in honesty
     assert "Paused now: cell alpha" in honesty
+
+
+@pytest.mark.parametrize(("clock", "result"), [("2026-10-01T23:59:00Z", []), ("2026-10-02T00:00:00Z", "not-run")])
+def test_a_runners_promise_is_not_run_only_when_its_due_date_has_ended_in_utc(digest_settings, clock, result):
+    seq = promise(writer="runner")
+    period(seq)
+
+    done = run_at(clock, "treasurer", "check")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert checked_results() == ([(seq, result)] if result else [])
+
+
+def test_only_the_close_of_a_promises_own_period_keeps_it(digest_settings, check):
+    first, second = promise(writer="runner"), promise(writer="runner")
+    period(first)
+    closed = close(period(second), BEFORE_DUE)
+
+    check()
+
+    assert [(found["promise_seq"], found["result"], found["evidence_seqs"]) for found in events("promise-checked")] == [(first, "not-run", []), (second, "kept", [closed])]
 
 
 def test_a_runners_promise_not_yet_due_with_its_period_open_waits(digest_settings, check):
@@ -455,6 +518,7 @@ def test_no_writer_but_board_can_resume_a_cell(company, writer):
         ("complaint", "record", "--source", "inbox", "--summary", "s"),
         ("spam-flag", "record", "--source", "inbox"),
         ("treasurer", "check"),
+        ("schedule", "run", "treasurer-check"),
     ],
 )
 def test_none_of_daniels_honesty_commands_runs_inside_a_session(company, arguments):
@@ -649,6 +713,30 @@ def test_a_review_counts_only_what_comes_after_it(company, daniels_settings, che
     assert len(events("cell-paused")) == 2
 
 
+def test_resuming_a_cell_is_no_review_of_the_complaints(company, daniels_settings):
+    seq = promise()
+    assert company("treasurer", "check").returncode == 0
+    assert checked_results() == [(seq, "broken")]
+    complaint(company)
+    assert company("cell", "resume", "--bet", "alpha").returncode == 0
+
+    complaint(company)
+
+    assert [found["scope"] for found in events("cell-paused")] == ["cell", "outside-actions"]
+
+
+def test_a_hold_outlasting_its_flags_is_still_said_to_stand(company, daniels_settings, check):
+    # Each flag has aged out of the month, and only Daniel's review lifts the hold.
+    aged = event("complaint", {"source": "inbox", "summary": "s"}, "board", times.stamp(times.now() - timedelta(days=40)))
+    event("cell-paused", {"scope": "outside-actions", "reason": "r", "cause_seq": aged}, "treasurer")
+
+    assert "company cell resume --outside-actions" in check().stdout
+
+    done = complaint(company)
+    assert "company cell resume --outside-actions" in done.stdout
+    assert draft(company).returncode == 1
+
+
 def test_a_flag_past_the_threshold_with_the_hold_on_writes_no_second_pause(company, daniels_settings):
     complaint(company)
     complaint(company)
@@ -721,6 +809,8 @@ def test_a_cell_records_a_promise_through_its_tool_under_its_own_name(company):
         {"promise": "a delivery"},
         {"promise": "a delivery", "due_date": "next week"},
         {"promise": "a delivery", "due_date": "2020-01-01"},
+        {"promise": "a delivery", "due_date": "2026-1-1"},
+        {"promise": "a delivery", "due_date": ""},
         {"promise": "a delivery", "due_date": "2099-01-01", "counterparty": 7},
         {"promise": 7, "due_date": "2099-01-01"},
     ],
@@ -735,6 +825,29 @@ def test_a_promise_that_cannot_be_checked_is_refused_and_logged(company, argumen
     assert answer["isError"]
     assert events("promise-recorded") == []
     assert events("append-refused")[-1]["attempted_kind"] == "promise-recorded"
+
+
+def test_a_promise_dated_in_the_past_is_told_so(company):
+    tools = CellTools()
+    try:
+        answer = tools.call("record_promise", {"promise": "a delivery", "due_date": "2020-01-01"})
+    finally:
+        tools.close()
+
+    assert answer["isError"]
+    assert "due-date-past" in text_of(answer)
+    assert events("append-refused")[-1]["reason"] == "due-date-past"
+
+
+@pytest.mark.parametrize("day", ["2026-1-1", ""])
+def test_a_due_date_that_is_no_date_is_not_called_past(company, day):
+    tools = CellTools()
+    try:
+        tools.call("record_promise", {"promise": "a delivery", "due_date": day})
+    finally:
+        tools.close()
+
+    assert events("append-refused")[-1]["reason"] == "bad-arguments"
 
 
 def test_no_tool_of_a_cells_says_a_promise_was_kept():

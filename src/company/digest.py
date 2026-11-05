@@ -193,9 +193,19 @@ def _promises_line(events: list[dict]) -> str | None:
     if not made:
         return None
     results = {e["promise_seq"]: e["result"] for e in events if e["kind"] == "promise-checked" and e["promise_seq"] in made}
-    kept = sum(result == "kept" for result in results.values())
-    failed = sum(result == "broken" for result in results.values())
+    kept = sum(result == honesty.KEPT for result in results.values())
+    failed = sum(result == honesty.BROKEN for result in results.values())
     return f"Cells' promises: {len(made)} made, {kept} kept, {failed} broken, {len(made) - len(results)} open"
+
+
+def _open_lines(events: list[dict]) -> list[str]:
+    """Each cell's promise with no result yet, since silence past its date reads as broken and only Daniel's word keeps it."""
+    checked = {e["promise_seq"] for e in events if e["kind"] == "promise-checked"}
+    lines = []
+    for e in events:
+        if e["kind"] == "promise-recorded" and e["writer"].startswith(treasurer.CELL_PREFIX) and e["seq"] not in checked:
+            lines.append(f"Open: event {e['seq']}, bet {treasurer.bet_of(e)}, due {e['due_date']}, kept only if you say so with `company promise kept {e['seq']}`: {' '.join(e['promise'].split())}")
+    return lines
 
 
 def _not_run_lines(events: list[dict]) -> list[str]:
@@ -237,6 +247,7 @@ def _paused_line(events: list[dict]) -> str | None:
 def _honesty(events: list[dict], week: treasurer.Span) -> list[str]:
     lines = [
         _promises_line(events),
+        *_open_lines(events),
         *_not_run_lines(events),
         _findings_line(events, week),
         _count_line(events, week, "complaint", "Complaints"),
