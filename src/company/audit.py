@@ -146,9 +146,23 @@ def give_context(workspace: Path, given: tuple[Subject, ...], ledger: Path) -> N
 
 
 def remove_context(workspace: Path) -> None:
-    """Take the whole ledger and the transcripts out once the session is over, so that no copy sits in the part of the home a session works in."""
-    (workspace / views.FILE).unlink(missing_ok=True)
-    shutil.rmtree(workspace / TRANSCRIPTS, ignore_errors=True)
+    """Take the whole ledger and the transcripts out once the session is over, so that no copy sits in the part of the home a session works in.
+
+    Each is tried whatever the other does; an `OSError` then says which stayed.
+    """
+    stayed = []
+    try:
+        (workspace / views.FILE).unlink(missing_ok=True)
+    except OSError as error:
+        stayed.append(f"{views.FILE} ({error})")
+    try:
+        shutil.rmtree(workspace / TRANSCRIPTS)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        stayed.append(f"{TRANSCRIPTS} ({error})")
+    if stayed:
+        raise OSError(" and ".join(stayed))
 
 
 def prompt(given: tuple[Subject, ...]) -> str:

@@ -501,6 +501,84 @@ def test_an_auditor_whose_group_cannot_be_recorded_is_stopped_and_leaves_no_copy
     assert list(paths.workspaces().rglob(audit.TRANSCRIPTS)) == []
 
 
+# A copy that will not go
+
+
+STUCK = {
+    "transcripts": ["import company.audit", "def rmtree(path, ignore_errors=False):", "    if not ignore_errors:", "        raise OSError(13, 'Permission denied', str(path))", "company.audit.shutil.rmtree = rmtree"],
+    "ledger.jsonl": ["import pathlib", "really_unlink = pathlib.Path.unlink", "def unlink(self, missing_ok=False):", "    if self.name == 'ledger.jsonl' and (self.parent / 'transcripts').exists():", "        raise OSError(13, 'Permission denied', str(self))", "    really_unlink(self, missing_ok)", "pathlib.Path.unlink = unlink"],
+}
+
+
+def assert_says_what_stayed(what, done, cell):
+    stayed = [line for line in done.stderr.splitlines() if "by hand" in line]
+    assert len(stayed) == 1, done.stderr
+    assert what in stayed[0]
+    if what == views.FILE:
+        assert "transcripts" not in stayed[0]
+        assert list(paths.workspaces().rglob(audit.TRANSCRIPTS)) == []
+    else:
+        assert views.FILE not in stayed[0]
+        assert [path for path in paths.workspaces().rglob(views.FILE) if path.parent.name != cell["run"]] == []
+
+
+@pytest.mark.parametrize("what", STUCK)
+def test_a_refused_launch_says_which_copy_would_not_go_and_still_tries_the_other(company, stub, cell_run, tmp_path, monkeypatch, what):
+    cell = cell_run()
+    patch_every_company(tmp_path, monkeypatch, *FILLED_THEN["a claude that cannot start"], *STUCK[what])
+
+    done = company("audit", cell["run"])
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert events("launch-refused")[-1]["role"] == "auditor"
+    assert_says_what_stayed(what, done, cell)
+
+
+@pytest.mark.parametrize("what", STUCK)
+def test_an_auditor_that_ended_logs_its_end_and_says_which_copy_would_not_go(company, stub, cell_run, tmp_path, monkeypatch, what):
+    cell = cell_run()
+    stub.play()
+    patch_every_company(tmp_path, monkeypatch, *STUCK[what])
+
+    done = company("audit", cell["run"])
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert events("session-ended")[-1]["session"] == events("session-started")[-1]["session"] != cell["session"]
+    assert_says_what_stayed(what, done, cell)
+
+
+@pytest.mark.parametrize("what", STUCK)
+def test_an_auditor_whose_launcher_died_is_closed_and_says_which_copy_would_not_go(company, stub, cell_run, tmp_path, monkeypatch, what):
+    cell = cell_run()
+    stub.play({"do": "hang"})
+    launch = subprocess.Popen([COMPANY, "audit", cell["run"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    wait_for(lambda: any("hanging" in line for line in stub.progress()))
+    launch.kill()
+    launch.wait()
+    stub.play()
+    patch_every_company(tmp_path, monkeypatch, *STUCK[what])
+
+    done = company("session", "start", "probe")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "launcher-gone" in [event["reason"] for event in events("session-stopped")]
+    assert_says_what_stayed(what, done, cell)
+
+
+def test_a_ledger_unreadable_while_an_audit_prepares_is_refused_at_the_ledger_check(company, stub, cell_run, tmp_path, monkeypatch):
+    cell = cell_run()
+    no_subjects = ["import company.audit", "def subjects(*given):", "    raise OSError('the ledger cannot be read')", "company.audit.subjects = subjects"]
+    patch_every_company(tmp_path, monkeypatch, *no_subjects)
+
+    done = company("audit", cell["run"])
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "Traceback" not in done.stderr
+    refused = events("launch-refused")[-1]
+    assert refused["check"] == "ledger"
+    assert "cannot be read" in refused["reason"]
+
+
 # Confirmed by code
 
 

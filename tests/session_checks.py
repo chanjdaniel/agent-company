@@ -16,13 +16,14 @@ def patch_every_company(tmp_path, monkeypatch, *lines):
     monkeypatch.setenv("PYTHONPATH", str(wrapper.parent))
 
 
-def run_file_fails(condition):
-    """Lines for `patch_every_company` that fail the write of a run's own file wherever `condition`, on `path` and `value`, holds."""
+def run_file_fails(condition, first=()):
+    """Lines for `patch_every_company` that fail the write of a run's own file wherever `condition`, on `path` and `value`, holds, doing `first` before it fails."""
     return [
         "import company.launcher",
         "really_write = company.launcher._write_json",
         "def write_json(path, value):",
         f"    if {condition}:",
+        *first,
         "        raise OSError('the disk is full')",
         "    really_write(path, value)",
         "company.launcher._write_json = write_json",
