@@ -136,7 +136,7 @@ def session_settings(workspace: Path) -> dict:
     """
     protected = (paths.config(), paths.claude_directory())
     rules = [f"{_absolute(root)}/**" for root in (*protected, paths.runs())]
-    rules += [_absolute(paths.home() / name) for name in ("ledger*", "*.lock", "*.state")]
+    rules += [_absolute(paths.home() / name) for name in ("ledger*", "*.lock", "*.state", "kill.state/**")]
     in_workspace = [f"{_absolute(workspace)}/**/{name}" for name in CONFIG_NAMES]
     deny = [f"{tool}({rule})" for tool in ("Read", "Edit") for rule in rules]
     deny += [f"Edit({rule})" for rule in in_workspace]
@@ -171,7 +171,7 @@ def session_settings(workspace: Path) -> dict:
 def _mcp_config(role: str, bet: str | None, session: str) -> dict:
     # `-P`: this starts in the workspace, and with the working directory on its path a file there could run as this code.
     arguments = ["-P", "-m", "company.tools", "--role", role, "--session", session, *(("--bet", bet) if bet else ())]
-    server = {"type": "stdio", "command": sys.executable, "args": arguments, "env": {"COMPANY_HOME": str(paths.home())}}
+    server = {"type": "stdio", "command": sys.executable, "args": arguments, "env": {"COMPANY_HOME": str(paths.home()), SESSION_VARIABLE: session}}
     return {"mcpServers": {"company": server}}
 
 
@@ -280,20 +280,27 @@ def _process_stat(pid: int) -> _ProcessStat | None:
     return _ProcessStat(fields[0], int(fields[2]), int(fields[19]))
 
 
-def _alive(pid: int, started: int | None) -> bool:
-    """Whether this process, and not a later one with its number, still runs."""
-    found = _process_stat(pid)
+def _is_alive(found: _ProcessStat | None, started: int | None) -> bool:
+    """Whether what was read of a process shows this one, and not a later one with its number, still running."""
     return found is not None and found.state != "Z" and found.started == started
+
+
+def _alive(pid: int | None, started: int | None) -> bool:
+    return pid is not None and _is_alive(_process_stat(pid), started)
+
+
+class _Processes:
+    """What every process was at one moment, so that a look through many run records costs one read of the machine."""
+
+    def __init__(self) -> None:
+        found = {int(entry.name): _process_stat(int(entry.name)) for entry in Path("/proc").iterdir() if entry.name.isdigit()}
+        self.stats = {pid: stat for pid, stat in found.items() if stat is not None}
+        self.live_groups = {stat.group for stat in self.stats.values() if stat.state != "Z"}
 
 
 def group_alive(group: int) -> bool:
     """Whether anything but a zombie is left in a process group."""
-    for entry in Path("/proc").iterdir():
-        if entry.name.isdigit():
-            found = _process_stat(int(entry.name))
-            if found is not None and found.group == group and found.state != "Z":
-                return True
-    return False
+    return group in _Processes().live_groups
 
 
 def _ends_within(seconds: float, holds: Callable[[], bool]) -> bool:
@@ -398,12 +405,12 @@ def _session_state(path: Path) -> dict:
     return state if isinstance(state, dict) else {}
 
 
-def _still_its_group(state: dict) -> bool:
+def _still_its_group(state: dict, processes: _Processes) -> bool:
     """Whether the recorded group is still this session's: a leader with another start time means the number was reused."""
     group, recorded = state.get("group"), state.get("group_started")
-    if not group or recorded is None or not group_alive(group):
+    if not group or recorded is None or group not in processes.live_groups:
         return False
-    leader = _process_stat(group)
+    leader = processes.stats.get(group)
     return leader is None or leader.started == recorded
 
 
@@ -415,6 +422,7 @@ class Running:
     group: int | None
     launcher: int | None
     launcher_started: int | None
+    record: Path
 
 
 def running_sessions() -> list[Running]:
@@ -423,27 +431,33 @@ def running_sessions() -> list[Running]:
     The launcher calling this is left out, since it runs no session now if it is asking.
     """
     found = []
+    processes = _Processes()
     for path in paths.runs().glob("*/session.json"):
         state = _session_state(path)
         try:
-            group = state["group"] if _still_its_group(state) else None
-            pid = state.get("launcher", -1)
-            alive = pid != os.getpid() and _alive(pid, state.get("launcher_started"))
+            group = state["group"] if _still_its_group(state, processes) else None
+            pid = state.get("launcher")
+            alive = pid is not None and pid != os.getpid() and _is_alive(processes.stats.get(pid), state.get("launcher_started"))
             if group is not None or alive:
-                found.append(Running(state["session"], group, pid if alive else None, state.get("launcher_started")))
+                found.append(Running(state["session"], group, pid if alive else None, state.get("launcher_started"), path))
         except (OSError, ValueError, KeyError, TypeError):
             continue
     return found
 
 
 def stop_session(found: Running) -> bool:
-    """Stop a session's group, then see its launcher out, which logs the end; a launcher that does not leave is killed.
+    """Stop a session's group, then wait until its launcher has logged the end; a launcher that does not is killed.
 
+    A launcher that has logged it may run on, as a process that starts sessions and does other work would.
     Whether nothing is left in the group.
     """
     stopped = found.group is None or stop_group(found.group)
     pid = found.launcher
-    if pid is not None and not _ends_within(_LAUNCHER_GRACE_SECONDS, lambda: _alive(pid, found.launcher_started)):
+
+    def still_at_it() -> bool:
+        return _session_state(found.record).get("launcher") == pid and _alive(pid, found.launcher_started)
+
+    if pid is not None and not _ends_within(_LAUNCHER_GRACE_SECONDS, still_at_it):
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.kill(pid, signal.SIGKILL)
     return stopped
@@ -452,10 +466,10 @@ def stop_session(found: Running) -> bool:
 def _close_if_gone(ledger: Ledger, started: dict) -> None:
     run_dir = paths.runs() / Path(started["run"]).name
     state = _session_state(run_dir / "session.json")
-    if _alive(state.get("launcher", -1), state.get("launcher_started")):
+    if _alive(state.get("launcher"), state.get("launcher_started")):
         return
     # Its launcher has gone, so nothing watches its limits: it must not run on unwatched.
-    if _still_its_group(state):
+    if _still_its_group(state, _Processes()):
         stop_group(state["group"])
     # With its launcher gone, nothing more can come from it, so this read is the last word on whether it ended.
     if started["session"] not in {event["session"] for event in _open_sessions(ledger.read())}:
@@ -571,6 +585,12 @@ def _record_processes(launch: _Launch, group: int | None) -> None:
     _write_json(launch.run_dir / "session.json", value)
 
 
+def _forget_processes(launch: _Launch) -> None:
+    """Note that this launcher no longer runs this session, which then is not a running one, whatever this process does next."""
+    with contextlib.suppress(OSError):
+        _write_json(launch.run_dir / "session.json", {"session": launch.session, "launcher": None, "group": None})
+
+
 def _spawn(launch: _Launch) -> subprocess.Popen:
     with (
         (launch.run_dir / "prompt.txt").open("rb") as prompt,
@@ -626,6 +646,7 @@ def _finish(launch: _Launch, process: subprocess.Popen, stopped: str | None, beg
         ledger.append("session-ended", fields, "launcher")
     except (AppendRefused, LedgerBroken, OSError) as error:
         unlogged = f"the ledger could not take the session's end: {error}"
+    _forget_processes(launch)
     return Finished(launch.session, launch.run, process.returncode, weight, stopped, unlogged)
 
 
@@ -674,10 +695,12 @@ def start(role: str, bet: str | None = None, prompt: str = "", workspace: str | 
         try:
             _log_start(launch, admitted)
         except (AppendRefused, LedgerBroken, OSError) as error:
+            _forget_processes(launch)
             return _refuse(role, bet, _Refuse("ledger", f"unlogged: the session's start could not be logged: {error}", governor.FIX_LEDGER))
         try:
             process = _spawn(launch)
         except OSError as error:
+            _forget_processes(launch)
             # If the ledger will not take this either, the next launch closes the session, since it has no group.
             with contextlib.suppress(AppendRefused, LedgerBroken, OSError):
                 Ledger().append("session-stopped", {"session": launch.session, "reason": "not-started"}, "launcher")

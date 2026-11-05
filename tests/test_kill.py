@@ -9,17 +9,18 @@ import fcntl
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
-import time
 from pathlib import Path
 
+import audit_guard
 import pytest
 from session_checks import events, pid_is_running, wait_for
 from usage_records import TEAM, start_session
 
-from company import killswitch, launcher, paths, settings
+from company import kill_state, killswitch, launcher, paths, settings
 from company.ledger import Ledger
 
 COMPANY = Path(sys.executable).parent / "company"
@@ -45,6 +46,10 @@ def running(stub, board, systemctl):
     if launch.poll() is None:
         launch.kill()
         launch.communicate()
+
+
+def remove_the_kill_records():
+    shutil.rmtree(paths.home() / "kill.state")
 
 
 def step(target):
@@ -162,7 +167,7 @@ def test_a_launch_that_holds_its_lock_does_not_delay_the_rest_and_is_reported(co
 
 
 def wrap_stub(stub, tmp_path, monkeypatch, when):
-    """A `claude` that pulls the kill file into place at `when`, as a pull landing at that moment would."""
+    """A `claude` that puts `kill.state` in place at `when`, as a pull landing at that moment would."""
     wrapper = tmp_path / "wrapped-claude"
     held = shlex.quote(str(paths.home() / "kill.state"))
     wrapper.write_text(f"#!/bin/sh\ncase \"$*\" in {when}) echo '{{}}' > {held};; esac\nexec {shlex.quote(str(stub.binary))} \"$@\"\n")
@@ -201,10 +206,11 @@ def test_a_sessions_rules_keep_it_from_the_kill_file(company, stub, board):
     stub.play()
     assert company("session", "start", "probe").returncode == 0
 
-    rule = "//" + str(paths.home() / "*.state").lstrip("/")
     deny = stub.settings()["permissions"]["deny"]
-    assert f"Read({rule})" in deny
-    assert f"Edit({rule})" in deny
+    for name in ("*.state", "kill.state/**", "*.lock"):
+        rule = "//" + str(paths.home() / name).lstrip("/")
+        assert f"Read({rule})" in deny
+        assert f"Edit({rule})" in deny
 
 
 # The hold
@@ -247,7 +253,7 @@ def test_the_kill_is_checked_after_the_ledger_and_before_the_settings(company):
 
 def test_a_ledger_event_alone_holds_every_launch_even_with_the_file_gone(company, board):
     company("kill")
-    (paths.home() / "kill.state").unlink()
+    remove_the_kill_records()
 
     assert "kill check" in company("governor", "check", "probe").stdout
 
@@ -256,7 +262,7 @@ def test_a_ledger_event_alone_holds_every_launch_even_with_the_file_gone(company
 
 
 def test_the_file_alone_holds_every_launch_when_the_ledger_could_not_take_the_pull(company, board):
-    (paths.home() / "kill.state").write_text(json.dumps({"pulls": [{"by": "daniel", "reason": "r", "pulled_at": "2026-11-05T00:00:00Z", "steps": []}]}))
+    kill_state.write({"id": "a-pull", "by": "daniel", "reason": "r", "pulled_at": "2026-11-05T00:00:00Z", "steps": []})
 
     assert "kill check" in company("governor", "check", "probe").stdout
 
@@ -466,7 +472,7 @@ def test_no_key_text_reaches_the_ledger_or_the_output(company, company_home, boa
 
     assert "the-fixture-key" not in done.stdout + done.stderr
     assert "the-fixture-key" not in (company_home / "ledger.jsonl").read_text()
-    assert "the-fixture-key" not in (company_home / "kill.state").read_text()
+    assert "the-fixture-key" not in json.dumps(kill_state.read())
 
 
 @pytest.mark.parametrize(
@@ -539,7 +545,7 @@ def test_it_stops_sessions_on_a_broken_ledger(company, company_home, stub, board
     assert not key_of("paper").exists()
     assert "could not take" in done.stderr
     assert "stop-session" in done.stdout
-    record = json.loads((company_home / "kill.state").read_text())["pulls"][-1]
+    record = kill_state.read()[-1]
     assert record["by"] == "daniel"
     assert record["reason"] == "with a broken ledger"
     assert {entry["step"] for entry in record["steps"]} >= {"stop-session", "schedule", "rotation"}
@@ -665,7 +671,7 @@ def test_a_resume_with_the_file_gone_still_leaves_the_schedule_off(company, comp
     monkeypatch.setattr(Ledger, "append", no_steps)
     killswitch.pull("daniel", "part way")
     monkeypatch.setattr(Ledger, "append", real)
-    (company_home / "kill.state").unlink()
+    remove_the_kill_records()
 
     assert company("resume").returncode == 0
 
@@ -698,7 +704,7 @@ def test_a_frozen_lock_on_the_ledger_stops_no_action_and_the_pull_still_reports(
         os.close(lock)
     launch.communicate(timeout=30)
     assert (paths.home() / "kill.state").exists()
-    record = json.loads((paths.home() / "kill.state").read_text())["pulls"][-1]
+    record = kill_state.read()[-1]
     assert record["reason"] == "a frozen lock"
 
 
@@ -752,36 +758,14 @@ def test_the_launcher_that_finished_a_session_can_pull_it_at_once(stub, board):
         "from company import killswitch, launcher\n"
         "launcher.start('probe')\n"
         "pulled = killswitch.pull('probe-check', 'a forbidden action succeeded', loop='first-run')\n"
-        "raise SystemExit(0 if pulled.clean else 1)\n"
+        "assert pulled.clean, pulled\n"
+        "assert not [step for step in pulled.steps if step.step == killswitch.STOP_SESSION], pulled\n"
     )
-    began = time.monotonic()
 
     done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60, check=False)
 
     assert done.returncode == 0, done.stdout + done.stderr
-    assert time.monotonic() - began < 5, "it waited for itself"
     assert events("kill-pulled")[-1]["loop"] == "first-run"
-
-
-def test_a_pull_from_inside_a_sessions_own_group_finishes_every_step(company, stub, board, systemctl):
-    # A company tool runs in its session's group, and a pull signals that group, so it must step out first.
-    assert company("schedule", "enable", "--message", "1234").returncode == 0
-    set_accounts(company, "paper")
-    key_of("paper").write_text("k")
-    code = "from company import killswitch\nkillswitch.pull('a-tool', 'crossed a line', loop='honesty')\n"
-    environment = {name: os.environ[name] for name in ("COMPANY_HOME", "COMPANY_CONFIG", "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR", "HOME")}
-    environment["PATH"] = os.environ["PATH"]
-    stub.play({"do": "children", "count": 1}, {"do": "run", "command": [sys.executable, "-c", code], "env": environment}, {"do": "hang"})
-
-    done = company("session", "start", "probe")
-
-    assert done.returncode == 1
-    wait_for(lambda: any(event["kind"] == "kill-step" and event["step"] == "rotation" for event in events()))
-    wait_for(lambda: events("schedule-disabled"))
-    assert events("kill-pulled")[-1]["loop"] == "honesty"
-    assert step("paper")["result"] == "moved-aside"
-    assert not key_of("paper").exists()
-    assert not pid_is_running(progress(stub, "children")[0])
 
 
 # The self-test
@@ -852,6 +836,267 @@ def test_a_self_test_that_finds_a_broken_stop_fails(tmp_path, monkeypatch):
     checks = killswitch.self_test()
 
     assert [check.name for check in checks if not check.passed][:2] == ["the session and its child stopped, with nothing left running", "its launcher ended and logged the stop"]
+
+
+# The cost of a pull: review finding 41
+
+
+def test_a_pulls_first_act_and_its_sweeps_do_not_grow_with_the_runs_the_company_has_had(monkeypatch):
+    for number in range(500):
+        run = paths.runs() / f"old-{number}"
+        run.mkdir(parents=True)
+        # Numbers above any pid this machine can give, as a long-gone session's are; each as a real record holds them.
+        record = {"session": f"old-{number}", "launcher": 5_000_000 + number, "launcher_started": 1, "group": 5_000_000 + number, "group_started": 1}
+        (run / "session.json").write_text(json.dumps(record))
+    read, sweep = launcher._process_stat, launcher.running_sessions
+    held_at_each_read, held_at_each_sweep = [], []
+
+    def counted_read(pid):
+        held_at_each_read.append(kill_state.present())
+        return read(pid)
+
+    def counted_sweep():
+        held_at_each_sweep.append(kill_state.present())
+        return sweep()
+
+    monkeypatch.setattr(launcher, "_process_stat", counted_read)
+    monkeypatch.setattr(launcher, "running_sessions", counted_sweep)
+
+    killswitch.pull("daniel", "after many runs")
+
+    assert all(held_at_each_sweep), "a sweep came before the hold"
+    assert all(held_at_each_read), "a look at the processes came before the hold"
+    processes = sum(entry.name.isdigit() for entry in Path("/proc").iterdir())
+    assert len(held_at_each_read) < 10 * processes, "each run's record cost a look at every process"
+
+
+# Pulls that overlap: review finding 42
+
+
+def a_second_pull_during_the_first(systemctl):
+    hook = systemctl.directory / "after-disable"
+    systemctl.after("disable", f"rm -f {shlex.quote(str(hook))}\n{shlex.quote(str(COMPANY))} kill --reason second > /dev/null 2>&1")
+
+
+def assert_each_pull_once_with_its_steps():
+    pulled = events("kill-pulled")
+    assert sorted(event["reason"] for event in pulled) == ["first", "second"]
+    for event in pulled:
+        steps = [found for found in events("kill-step") if found.get("pull") == event.get("pull")]
+        assert [found["target"] for found in steps] == ["timers"], event["reason"]
+
+
+def test_two_pulls_that_overlap_on_a_whole_ledger_are_each_written_once(company, board, systemctl):
+    assert company("schedule", "enable", "--message", "1234").returncode == 0
+    a_second_pull_during_the_first(systemctl)
+
+    company("kill", "--reason", "first")
+    assert company("resume").returncode == 0
+
+    assert_each_pull_once_with_its_steps()
+
+
+def test_two_pulls_that_overlap_on_a_cut_ledger_are_each_written_once_at_the_resume(company, company_home, board, systemctl):
+    assert company("schedule", "enable", "--message", "1234").returncode == 0
+    a_second_pull_during_the_first(systemctl)
+    ledger, head = company_home / "ledger.jsonl", company_home / "ledger.head"
+    kept = ledger.read_bytes(), head.read_bytes()
+    head.write_text("not a head")
+
+    company("kill", "--reason", "first")
+    ledger.write_bytes(kept[0])
+    head.write_bytes(kept[1])
+    assert company("resume").returncode == 0
+
+    assert_each_pull_once_with_its_steps()
+
+
+def test_a_pull_that_lands_during_a_resume_keeps_its_hold(company, board, monkeypatch):
+    company("kill", "--reason", "first")
+    real = Ledger.append
+
+    def a_pull_lands(self, kind, fields, writer, refusal_context=None):
+        written = real(self, kind, fields, writer, refusal_context)
+        if kind == "resumed":
+            monkeypatch.setattr(Ledger, "append", real)
+            # The hold is its first act; its write-up then waits its turn behind this resume.
+            second.append(subprocess.Popen([COMPANY, "kill", "--reason", "second"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            wait_for(lambda: len(kill_state.read()) == 2)
+        return written
+
+    second = []
+    monkeypatch.setattr(Ledger, "append", a_pull_lands)
+
+    with pytest.raises(killswitch.ResumeRefused, match="another pull"):
+        killswitch.resume()
+    monkeypatch.setattr(Ledger, "append", real)
+    assert second[0].wait(timeout=60) == 0
+
+    assert "kill check" in company("governor", "check", "probe").stdout
+    assert company("resume").returncode == 0
+    assert company("governor", "check", "probe").returncode == 0
+    assert sorted(event["reason"] for event in events("kill-pulled")) == ["first", "second"]
+
+
+def test_resumes_at_the_same_moment_write_each_event_once(company, company_home, board):
+    set_accounts(company, "paper")
+    ledger, head = company_home / "ledger.jsonl", company_home / "ledger.head"
+    kept = ledger.read_bytes(), head.read_bytes()
+    head.write_text("not a head")
+    company("kill", "--reason", "cut")
+    ledger.write_bytes(kept[0])
+    head.write_bytes(kept[1])
+
+    resumes = [subprocess.Popen([COMPANY, "resume"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for _ in range(6)]
+    for resume in resumes:
+        resume.wait(timeout=60)
+
+    assert len(events("kill-pulled")) == 1
+    assert len(events("resumed")) == 1
+    assert len([event for event in events("kill-step") if event["target"] == "paper"]) == 1
+    assert Ledger().verify().ok
+    assert company("governor", "check", "probe").returncode == 0
+
+
+def test_one_pulls_record_is_not_written_over_by_anothers(company, company_home, board, systemctl):
+    assert company("schedule", "enable", "--message", "1234").returncode == 0
+    a_second_pull_during_the_first(systemctl)
+    (company_home / "ledger.head").write_text("not a head")
+
+    company("kill", "--reason", "first")
+
+    assert sorted(record["reason"] for record in kill_state.read()) == ["first", "second"]
+    assert all(record["steps"] for record in kill_state.read())
+
+
+# A refused resume: review finding 43
+
+
+def test_a_refused_resume_leaves_the_next_one_nothing_to_write_twice(company, company_home, board):
+    set_accounts(company, "paper")
+    key_of("paper").write_text("k")
+    ledger, head = company_home / "ledger.jsonl", company_home / "ledger.head"
+    kept = ledger.read_bytes(), head.read_bytes()
+    head.write_text("not a head")
+    company("kill", "--reason", "cut")
+    ledger.write_bytes(kept[0])
+    head.write_bytes(kept[1])
+
+    refused = company("resume", "--message", "not-an-id")
+
+    assert refused.returncode == 1
+    assert "kill check" in company("governor", "check", "probe").stdout
+
+    assert company("resume", "--message", "1234").returncode == 0
+
+    assert len(events("kill-pulled")) == 1
+    targets = [event["target"] for event in events("kill-step")]
+    assert sorted(targets) == sorted(set(targets))
+    assert "paper" in targets
+
+
+# A session that has ended: review finding 44
+
+
+def test_a_live_process_that_has_finished_its_sessions_is_not_running_one(company, stub, board, systemctl):
+    stub.play()
+    code = "import time\nfrom company import launcher\nlauncher.start('probe')\nlauncher.start('probe')\nprint('ready', flush=True)\ntime.sleep(600)\n"
+    process = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    try:
+        assert process.stdout.readline().strip() == "ready"
+
+        done = company("kill")
+
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert [event for event in events("kill-step") if event["step"] == "stop-session"] == []
+        assert process.poll() is None
+    finally:
+        process.kill()
+        process.communicate()
+
+
+def test_a_long_lived_process_whose_session_a_pull_stops_is_not_killed(company, stub, board, systemctl, tmp_path):
+    stub.play({"do": "children", "count": 1}, {"do": "hang"})
+    code = "import time\nfrom company import launcher\nlauncher.start('probe')\nprint('ended', flush=True)\ntime.sleep(600)\n"
+    process = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    try:
+        wait_for(lambda: any("hanging" in line for line in stub.progress()))
+
+        done = company("kill")
+
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert process.stdout.readline().strip() == "ended"
+        assert process.poll() is None
+        assert events("session-stopped")[-1]["reason"] == "kill-switch"
+        assert step(events("session-started")[-1]["session"])["result"] == "stopped"
+    finally:
+        process.kill()
+        process.communicate()
+
+
+def test_a_long_lived_process_whose_session_could_not_start_is_not_running_one(company, stub, board, systemctl, tmp_path, monkeypatch):
+    wrapper = tmp_path / "goes-after-its-help"
+    wrapper.write_text(f"#!/bin/sh\nrm -f {shlex.quote(str(wrapper))}\nexec {shlex.quote(str(stub.binary))} \"$@\"\n")
+    wrapper.chmod(0o700)
+    monkeypatch.setenv(launcher.BINARY_VARIABLE, str(wrapper))
+    code = "import time\nfrom company import launcher\nprint(launcher.start('probe').check, flush=True)\ntime.sleep(600)\n"
+    process = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    try:
+        assert process.stdout.readline().strip() == "binary"
+
+        done = company("kill")
+
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert [event for event in events("kill-step") if event["step"] == "stop-session"] == []
+        assert process.poll() is None
+    finally:
+        process.kill()
+        process.communicate()
+
+
+# A pull from a company tool: review finding 45
+
+
+def test_a_pull_in_a_tools_environment_is_refused_and_says_so(company, stub, board, systemctl, tmp_path):
+    # A real server has the session's allow-list and its own `env`, so it cannot see the config or reach the timers.
+    # Pulling all the same reported timers that are on as `turned-off`, `0 installed`, and left the key in place.
+    assert company("schedule", "enable", "--message", "1234").returncode == 0
+    set_accounts(company, "paper")
+    key_of("paper").write_text("k")
+    code = "from company import killswitch\nkillswitch.pull('a-tool', 'crossed a line', loop='honesty')\n"
+    session = "11111111-2222-4333-8444-555555555555"
+    environment = {
+        **launcher.child_environment(session),
+        **launcher._mcp_config("probe", None, session)["mcpServers"]["company"]["env"],
+        "PATH": f"{systemctl.directory}{os.pathsep}{launcher.CHILD_PATH}",
+        "PYTHONPATH": os.environ["PYTHONPATH"],
+        audit_guard.ENV: os.environ[audit_guard.ENV],
+    }
+    pairs = [f"{name}={value}" for name, value in environment.items()]
+    stub.play({"do": "run", "command": ["/usr/bin/env", "-i", *pairs, sys.executable, "-c", code]})
+    disabled_before = [call for call in systemctl.calls() if " disable " in call]
+
+    assert company("session", "start", "probe").returncode == 0
+
+    assert stub.runs()[-1]["exit"] != 0
+    assert "cannot pull the kill switch" in stub.runs()[-1]["stderr"]
+    assert key_of("paper").exists()
+    assert not kill_state.present()
+    assert events("kill-pulled") == []
+    assert [call for call in systemctl.calls() if " disable " in call] == disabled_before
+    refused = events("append-refused")[-1]
+    assert refused["attempted_kind"] == "kill-pulled"
+    assert refused["reason"] == "inside-a-session"
+    assert refused["session"] == session
+
+
+def test_a_session_is_given_what_refuses_a_pull_from_its_tools(company, stub, board):
+    stub.play()
+
+    assert company("session", "start", "probe").returncode == 0
+
+    server = stub.mcp_config()["mcpServers"]["company"]
+    assert server["env"][launcher.SESSION_VARIABLE] == stub.argument("--session-id")
 
 
 # What `key_file` may name: review finding 46

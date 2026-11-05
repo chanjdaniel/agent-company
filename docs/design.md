@@ -137,7 +137,7 @@ Rules every session starts under:
   They set `sandbox.enabled`, `sandbox.failIfUnavailable` and `sandbox.allowUnsandboxedCommands: false`, a read boundary (`sandbox.filesystem.denyRead` of the home directory, the company home, the config directory and Claude Code's directory, with the workspace allowed), no write beyond the working directory the sandbox already allows and its per-user temporary directory, no network hosts, and permission rules keeping the file tools inside the workspace.
   At the sandbox layer the read boundary is those directories and not the whole disk, since commands need to read the system's own files.
   At the permission layer, `permissions.blockReadsOutsideWorkingDirectories` and `permissions.blockWritesOutsideWorkingDirectories` say "outside the workspace", because no deny rule can: a deny beats an allow, and the workspace sits inside the home directory.
-  Deny rules also name the config directory, Claude Code's directory, and the ledger, locks, kill file and runs in the company home.
+  Deny rules also name the config directory, Claude Code's directory, and the ledger, locks, kill records and runs in the company home.
   They are `Read` and `Edit` rules, since the [permission docs](https://code.claude.com/docs/en/permissions) (read 2026-11-05) say a `Write(path)` rule is accepted and never matches, and that `Edit` rules cover every tool that edits.
   They set no `apiKeyHelper`, no hook and no status line, and the session loads no user-level settings, instructions, skills, subagents, plugins, auto memory or MCP servers.
 - **Both layers are needed.**
@@ -153,7 +153,8 @@ Rules every session starts under:
   None of these enters a session, from the workspace, a folder above it or `~/.claude`.
 - **How the launcher holds these two rules.**
   It keeps `--strict-mcp-config`, denies the file tools writes to `.claude/`, `.mcp.json`, `CLAUDE.md` and `CLAUDE.local.md` at any depth in the workspace, and refuses to start a session in a workspace that holds any of them, logging `launch-refused`.
-  The sandbox denies the shell those names only at the top of the workspace, since the [settings reference](https://code.claude.com/docs/en/settings-reference) (read 2026-11-05) says that on Linux a sandbox write rule takes no wildcard but a trailing `/**`.
+  The settings deny the shell those names only at the top of the workspace, since the [settings reference](https://code.claude.com/docs/en/settings-reference) (read 2026-11-05) says that on Linux a sandbox write rule takes no wildcard but a trailing `/**`.
+  The docs do not say how `denyWrite` treats a path that does not exist yet, as all four are in a fresh workspace, so even that denial is unproven until ticket 13's probe tries it.
   So a shell can write one deeper down, and what stops it reaching a session is the refusal: the next launch in that workspace starts nothing.
   A workspace must lie under the company home's `workspaces/`, and with none chosen a session gets a fresh one.
   The form that loads nothing else, from the [CLI reference](https://code.claude.com/docs/en/cli-reference) and the [environment variables page](https://code.claude.com/docs/en/env-vars) (read 2026-11-05), is these together:
@@ -180,7 +181,7 @@ Rules every session starts under:
 - **A signal to the launcher.**
   SIGTERM, SIGINT or SIGHUP stops the session's group and logs `session-stopped` with the reason `launcher-signalled`, since a Ctrl-C reaches only the launcher, the session being in a group of its own.
 - **The kill switch.**
-  A launcher that sees the kill file stops the session's group and logs `session-stopped` with the reason `kill-switch`, and it refuses a launch whose preparing took long enough for a pull to land.
+  A launcher that sees `kill.state` stops the session's group and logs `session-stopped` with the reason `kill-switch`, and it refuses a launch whose preparing took long enough for a pull to land.
 - **At the end,** the launcher logs `session-ended` with the exit, the transcript's path and hash and the session's weight, and copies the transcript into the company home, so that it outlives Claude Code's own clean-up and the audit window can rely on it.
   A session with no transcript has `none` for its path and hash.
   Each run's directory, `runs/<run>/` in the company home, also keeps its raw output, settings, server configuration and prompt.
@@ -285,8 +286,8 @@ A kind that a later ticket finds it needs joins this table and the contract in t
 | `session-stopped` | Sessions | `launcher` | `session`, `reason` | `elapsed_minutes`, `weight` |
 | `session-note` | Sessions | `cell:<bet>`, `probe` | `session`, `text` | |
 | `launch-refused` | Sessions | `governor`, `launcher` | `role`, `check`, `reason`, `fix` | `bet`, `account_used`, `company_used`, `reading_seq` |
-| `kill-pulled` | Kill switch | `killswitch` | `by`, `reason` | `pulled_at`, `loop` |
-| `kill-step` | Kill switch | `killswitch` | `step`, `target`, `result` | `detail` |
+| `kill-pulled` | Kill switch | `killswitch` | `pull`, `by`, `reason` | `pulled_at`, `loop` |
+| `kill-step` | Kill switch | `killswitch` | `pull`, `step`, `target`, `result` | `detail` |
 | `resumed` | Kill switch | `board` | `kill_seq` | `message` |
 | `strategy-registered` | Quant | `cell:<bet>` | `strategy`, `universe`, `data_source`, `data_hash`, `in_sample`, `holdout`, `cost_model`, `slippage_model`, `max_configurations`, `acceptance` | `paper_days` |
 | `config-run` | Quant | `runner` | `registration_seq`, `config_hash`, `status`, `budget_used` | `sharpe`, `n_returns`, `skew`, `kurtosis`, `total_return`, `max_drawdown`, `returns_hash`, `failure` |
@@ -338,6 +339,7 @@ Notes on single kinds:
 - `session-note` is a cell's or the probe's free text, so it is kept out of the strategy session's view, since that session never talks to a cell; that view still holds a cell's registrations and proposals, which it reads as data.
 - `session-started`'s `gate` is `go:<seq>` or `schedule`, and a `go-given` word's launches left are its `sessions` minus the `session-started` events citing it.
 - `launch-refused`'s `check` is the governor's step that refused (`ledger`, `kill`, `settings`, `go`, `pause`, `reading`, `floor` or `share`, and a scheduled session with the schedule off is refused at `go`) or, written by the launcher, its own (`goal`, `settings`, `binary`, `load-form`, `workspace`, `kill` or `ledger`); its `reason` starts with a code, such as `stale`, followed by a sentence, and `fix` is what to do about it.
+- `pull` on `kill-pulled` and `kill-step` is the pull's own id, the name of its file in `kill.state`.
 - `kill-pulled`'s `pulled_at` is when the pull began, and its `ts` when the ledger took it, which comes after the pull's actions and may be at the resume.
 - `kill-step`'s `step` is `hold`, `stop-session`, `schedule` or `rotation`; its `target` names what the step acted on, such as the session, `timers` or the account; and its `result` is `stopped`, `turned-off`, `moved-aside`, `no-key` or `failed`.
 - `resource-charged`'s `line` is a bet's id or `overhead`, and each event is that line's whole window so far, so the newest of a window and line replaces the rest.
@@ -543,17 +545,25 @@ The kill switch is one command, `company kill`, that does the following:
 
 Only Daniel's resume command, `company resume [--message <Discord id>]`, undoes it, and every launch is refused until then.
 A resume leaves the schedule off and a moved key moved, so each of those comes back only by Daniel's own step.
-Any loop's red line can pull it by code, with `killswitch.pull(by, reason, loop)`, and the ledger names the loop.
+Any loop's red line can pull it by code outside a session, with `killswitch.pull(by, reason, loop)`, and the ledger names the loop.
 Its self-test, `company kill --self-test`, runs in the test suite with stub sessions and accounts in its own temporary home, and on the schedule once gate C opens.
 It reads and writes nothing of the home it was started from, so its result goes to its output alone, which on the schedule is the timer's journal.
+So nobody sees a scheduled self-test that fails until ticket 11 records a failed job where Daniel reads, and the schedule stays off until gate C.
 
 A pull must work when the ledger cannot, since `Ledger.append` raises on a broken end.
-So its first act is a file in the company home, `kill.state`, and its actions all come before any ledger write and take no lock of the ledger's, with each failure a reported step that stops nothing else.
-It finds sessions from each run's `session.json`, and a launcher that is running also watches the file, so a session stops itself even with no kill command running.
-Either the file or an open `kill-pulled` refuses a launch, so a pull the ledger could not take still holds, and a file lost later does not lift it.
+So its first act is a file of its own in the company home's `kill.state` directory, and its actions all come before any ledger write and take no lock, with each failure a reported step that stops nothing else.
+It finds sessions from each run's `session.json`, reading the machine's processes once for each sweep whatever the number of runs, and a launcher that is running also watches for `kill.state`, so a session stops itself even with no kill command running.
+A launcher that has logged its session's end clears its processes from that record, so a live process that has finished a session is not running one.
+Either `kill.state` or an open `kill-pulled` refuses a launch, so a pull the ledger could not take still holds, and a record lost later does not lift it.
 The ledger gets the pull once its actions are done, and the command reports after 30 seconds if the ledger's lock is held for that long.
-What the ledger has not taken stays in the file, a second pull's record beside the first's, and `company resume` writes it when the ledger verifies again, before it lifts the hold.
-A pull called from inside a session's own process group, as a company tool's would be, leaves that group first, so that its own signal does not end it part way.
+What the ledger has not taken stays in the pull's file, and `company resume` writes it when the ledger verifies again, before it lifts the hold.
+Each pull writes only its own file, and the ledger's events for its `pull` id say how far it got, so pulls that overlap and a resume refused part way write nothing twice; a lock of its own, which no action waits on, keeps two writers or two resumes from reading that at once.
+A resume removes only the pulls it read, so a pull that lands during it keeps its hold, and the resume says so.
+
+**No company tool pulls it.**
+A tool's server has the session's environment, so it cannot see Daniel's config or reach the user's timers, and a pull there would leave a key in place and report timers that are on as turned off.
+So `killswitch.pull` refuses and logs `append-refused` when the launcher's `COMPANY_SESSION` variable is set, as `company kill` does, and a red line that a tool sees goes in the ledger for code outside the session to pull on.
+
 A broken ledger refuses a resume, so the hold stands until it is whole.
 A process that leaves the session's process group with `setsid` is out of the signal's reach, which is what C1 asks of a real session.
 
@@ -569,6 +579,7 @@ The runner is the `systemctl` first on `PATH`, and the suite puts one there that
 Only Daniel's `company schedule enable --message <Discord id>` turns it on, and it logs `schedule-enabled` with the jobs; `company schedule disable` and the kill switch undo it, and `company schedule list` says which it is.
 If `enable` fails, or a pull lands during it, it turns the timers back off and logs `schedule-disabled`.
 A timer's service runs `company schedule run <job>`, which asks the ledger again and refuses with the schedule off or the kill switch pulled, so a timer that could not be turned off still runs nothing.
+A unit carries only `COMPANY_HOME`, `COMPANY_CONFIG` and `CLAUDE_CONFIG_DIR`, so a job that starts a session would look for `claude` on the user manager's own path and might be refused with `no-binary`; no job starts one yet, and ticket 12's are the first.
 Until gate C opens the schedule, the kill switch's self-test, `company paper tick`, `company treasurer check`, `company treasurer charge`, the daily audit sample, the weekly audit pass, the batch, the strategy session and the retro run by Daniel's command.
 
 ## The six loops

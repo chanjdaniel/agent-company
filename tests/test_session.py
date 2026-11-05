@@ -622,7 +622,7 @@ def test_each_server_is_started_with_what_the_launcher_fixed(session, stub):
     assert arguments[arguments.index("--role") + 1] == "cell"
     assert arguments[arguments.index("--bet") + 1] == "alpha"
     assert arguments[arguments.index("--session") + 1] == stub.argument("--session-id")
-    assert server["env"] == {"COMPANY_HOME": str(paths.home())}
+    assert server["env"] == {"COMPANY_HOME": str(paths.home()), "COMPANY_SESSION": stub.argument("--session-id")}
 
 
 def test_a_tool_outside_the_role_is_refused_and_logged_with_its_session_and_tool(session, stub):

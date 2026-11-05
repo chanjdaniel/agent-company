@@ -1,15 +1,21 @@
-"""Whether the kill switch is pulled, which two records say: a file in the company home, and the ledger.
+"""Whether the kill switch is pulled, which two records say: a directory in the company home, and the ledger.
 
-The file is written first and needs no ledger, so a pull holds every launch even on a ledger that cannot take it.
-The ledger outlives the file, so either record alone refuses, and only `company resume` clears both.
+Each pull writes one file of its own there, first, with no lock and no ledger, so a pull holds every launch even on a
+ledger that cannot take it, and pulls that overlap cannot overwrite each other.
+The ledger outlives the directory, so either record alone refuses, and only `company resume` clears both.
 """
 
+import contextlib
+import fcntl
 import json
+import os
+from collections.abc import Iterator
 from pathlib import Path
 
 from company import paths
 
 RESUME = "company resume"
+_WRITE_TRIES = 3
 
 
 def _path() -> Path:
@@ -17,7 +23,7 @@ def _path() -> Path:
 
 
 def present() -> bool:
-    """Whether the file is there; one that cannot be looked at counts as there."""
+    """Whether it is there; one that cannot be looked at counts as there."""
     try:
         _path().stat()
     except FileNotFoundError:
@@ -27,26 +33,67 @@ def present() -> bool:
     return True
 
 
+def _read_one(name: str) -> dict:
+    """One pull's record, whose `id` is its file's name; a file that is no record reads as an empty one."""
+    try:
+        record = json.loads((_path() / name).read_bytes())
+    except (OSError, ValueError):
+        record = {}
+    return {**(record if isinstance(record, dict) else {}), "id": name}
+
+
 def read() -> list[dict] | None:
-    """The record of each pull since the last resume, or None with no file; a file that is no record reads as one empty pull."""
+    """The record of each pull since the last resume, oldest first, or None with none there; anything else there reads as one empty pull."""
     if not present():
         return None
     try:
-        pulls = json.loads(_path().read_bytes())["pulls"]
-    except (OSError, ValueError, KeyError, TypeError):
-        return [{}]
-    return pulls if isinstance(pulls, list) and pulls and all(isinstance(pull, dict) for pull in pulls) else [{}]
+        names = os.listdir(_path())
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return [{"id": _path().name}]
+    return [_read_one(name) for name in sorted(names)]
 
 
-def write(pulls: list[dict]) -> None:
+def write(record: dict) -> None:
+    """Keep one pull's record, which only that pull writes, whole; a resume may take the directory away at any moment."""
     paths.home().mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = _path().with_name("kill.state.new")
-    temporary.write_text(json.dumps({"pulls": pulls}))
-    temporary.replace(_path())
+    # Beside the directory and not in it, so that a write cut short leaves it nothing to hold the directory open with.
+    temporary = paths.home() / f"kill.state.{record['id']}.new"
+    temporary.write_text(json.dumps(record))
+    for try_left in reversed(range(_WRITE_TRIES)):
+        _path().mkdir(mode=0o700, exist_ok=True)
+        try:
+            temporary.replace(_path() / record["id"])
+            return
+        except FileNotFoundError:
+            if not try_left:
+                raise
 
 
-def clear() -> None:
-    _path().unlink(missing_ok=True)
+def clear(records: list[dict]) -> None:
+    """Remove these pulls' records, and the hold with them unless another pull has landed since they were read."""
+    path = _path()
+    if not path.is_dir():
+        path.unlink(missing_ok=True)
+        return
+    for record in records:
+        (path / record["id"]).unlink(missing_ok=True)
+    # What refuses this is a pull's file that this did not read, and that pull's hold must stand.
+    with contextlib.suppress(OSError):
+        path.rmdir()
+
+
+@contextlib.contextmanager
+def recording() -> Iterator[None]:
+    """One writer at a time of pulls and resumes into the ledger, which says how far each got. No action of a pull waits on this."""
+    paths.home().mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(paths.home() / "kill.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 def open_pulls(events: list[dict]) -> list[dict]:
