@@ -26,10 +26,10 @@ MODEL_KEY_VARIABLE = re.compile(
 )
 
 # The variables a broker's own tools read its credentials and host from, live ones among them. The key lives only in its file.
-BROKER_KEY_VARIABLE = re.compile(r"\bAPCA_[A-Z_]+\b")
+BROKER_KEY_VARIABLE = re.compile(r"\b(?:APCA|ALPACA)_[A-Z_]+\b")
 
 # Wider at run time than in a file: whatever else picks a provider or an account under these prefixes goes too.
-_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_USE_", "APCA_")
+_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_USE_", "APCA_", "ALPACA_")
 
 
 def is_banned(name: str) -> bool:

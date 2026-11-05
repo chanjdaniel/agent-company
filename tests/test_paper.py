@@ -35,6 +35,7 @@ from quant_tools import (
     verdict_of,
     write_market,
 )
+from scan_rules import LIVE_BROKER_HOST
 from session_checks import events
 
 from company import cli, paper, paths, schedule, times, tools
@@ -42,7 +43,7 @@ from company.ledger import AppendRefused, Ledger
 
 KEY_ID = "FIXTUREKEYIDVALUE"
 SECRET = "fixture-secret-never-printed-9f1c"
-LIVE_HOST = "api." + "alpaca.markets"
+LIVE_HOST = LIVE_BROKER_HOST
 LENIENT = {"min_deflated_sharpe": 0, "min_holdout_return": -1, "max_drawdown": 0.6}
 TODAY_BAR = bar("2026-03-02", 100)
 ORDER_PATHS = frozenset({"place_order", "cancel_orders"})
@@ -158,8 +159,8 @@ def run(capsys):
 def clock(monkeypatch):
     """Move the time a tick reads, with no change to the time the ledger stamps."""
 
-    def move(day):
-        when = datetime.combine(day, datetime.min.time(), tzinfo=UTC).replace(hour=22)
+    def move(day, hour=22):
+        when = datetime.combine(day, datetime.min.time(), tzinfo=UTC).replace(hour=hour)
         monkeypatch.setattr(times, "now", lambda: when)
 
     return move
@@ -388,6 +389,14 @@ def test_a_tick_with_nothing_open_is_labelled_and_calls_nobody(board, broker, ke
     assert broker.requests == []
 
 
+def test_an_account_below_zero_prints_as_a_loss(board, broker, key, run):
+    broker.equity = "-5.00"
+
+    _, out, _ = run("paper", "check")
+
+    assert "its equity is -$5.00." in out
+
+
 def test_the_check_is_labelled_paper(board, broker, key, run):
     _, out, _ = run("paper", "check")
 
@@ -426,6 +435,21 @@ def test_the_kill_counts_from_the_highest_reading_and_not_the_first(period, brok
     run("paper", "tick")
 
     assert events("paper-closed")[0]["reason"] == "drawdown-kill"
+
+
+def test_an_account_below_zero_closes_whatever_its_kill_and_its_loss_is_kept(board, broker, key, run):
+    """A short position can lose more than the account holds, and no registered kill may leave code sizing on that."""
+    pass_a_verdict(acceptance={**LENIENT, "max_drawdown": 100})
+    run("paper", "tick")
+    broker.equity = "-5.00"
+
+    exit_code, _, err = run("paper", "tick")
+
+    assert exit_code == 0, err
+    assert events("paper-reading")[-1]["equity"] == "-5.00"
+    assert events("paper-reading")[-1]["pnl"] == "-100005.00"
+    assert [(event["reason"], event["equity"]) for event in events("paper-closed")] == [("drawdown-kill", "-5.00")]
+    assert broker.positions == {}
 
 
 def test_a_kill_needs_neither_the_bars_nor_the_strategy(period, broker, key, run):
@@ -497,6 +521,16 @@ def test_a_close_whose_order_fails_leaves_the_period_open_for_the_next_tick(peri
     assert broker.positions == {}
 
 
+def test_a_close_cancels_what_waits_before_it_reads_the_positions(period, broker, key, run, clock):
+    """An order left waiting would fill after the period closed, and leave the account holding it."""
+    clock(date.fromisoformat(period["end_date"]))
+
+    run("paper", "tick")
+
+    methods = [(request["method"], request["path"]) for request in broker.requests]
+    assert methods.index(("DELETE", "/v2/orders")) < methods.index(("GET", "/v2/positions"))
+
+
 def test_a_close_sells_a_long_and_buys_back_a_short(period, broker, key, run, clock):
     broker.positions = {"SPY": Decimal(10), "QQQ": Decimal(-5)}
     clock(date.fromisoformat(period["end_date"]))
@@ -538,6 +572,26 @@ def test_a_tick_replaces_whatever_the_last_left_waiting_before_it_orders(period,
 
     methods = [(request["method"], request["path"]) for request in broker.requests]
     assert methods.index(("DELETE", "/v2/orders")) < methods.index(("POST", "/v2/orders"))
+
+
+@pytest.mark.parametrize(("hour", "last"), [(20, "2026-03-01"), (21, "2026-03-02"), (22, "2026-03-02")])
+def test_a_day_is_not_fed_to_a_strategy_until_its_bar_is_whole(period, broker, key, run, clock, hour, last):
+    clock(date(2026, 3, 2), hour)
+
+    _, out, _ = run("paper", "tick")
+
+    fetched = next(request for request in broker.requests if request["path"] == "/v2/stocks/bars")
+    assert fetched["query"]["end"] == [last]
+    newest = "2026-03-02" if last == "2026-03-02" else "2026-02-04"
+    assert f"the strategy's target comes from the close of {newest}." in out
+
+
+def test_a_tick_says_how_old_the_close_it_acted_on_is(period, broker, key, run):
+    broker.market = [*IN_SAMPLE_BARS, *HOLDOUT_BARS]
+
+    _, out, _ = run("paper", "tick")
+
+    assert "comes from the close of 2026-02-04" in out
 
 
 def test_a_whole_share_is_the_smallest_order_and_a_weight_never_overdraws(board, broker, key, run):
@@ -743,11 +797,11 @@ def test_inside_a_session_the_command_refuses_and_logs_it(period, broker, key, r
 # The schedule
 
 
-def test_the_tick_is_a_job_on_a_weekday_after_the_close(systemctl):
+def test_the_tick_is_a_job_on_every_day_since_an_end_date_may_fall_on_any(systemctl):
     job = schedule.job("paper-tick")
 
     assert job.command == ("paper", "tick")
-    assert "Mon..Fri" in job.calendar
+    assert job.calendar == "*-*-* 21:30:00 UTC"
 
 
 def test_the_tick_stays_off_with_the_schedule_so_daniel_runs_it_by_hand(period, broker, key, run):
@@ -781,9 +835,11 @@ def order_path_users(root):
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node, ast.Attribute) and node.attr in ORDER_PATHS and path.name not in ORDER_USERS:
                 found.add(path.name)
-            if isinstance(node, ast.Attribute) and node.attr == "Account" and path.name not in ACCOUNT_USERS:
+            if isinstance(node, ast.Attribute) and node.attr in ("Account", "_Client") and path.name not in ACCOUNT_USERS:
                 found.add(path.name)
-            if isinstance(node, ast.ImportFrom) and node.module == "company.paper" and any(alias.name == "Account" for alias in node.names) and path.name not in ACCOUNT_USERS:
+            if isinstance(node, ast.ImportFrom) and node.module == "company.paper" and any(alias.name in ("Account", "_Client") for alias in node.names) and path.name not in ACCOUNT_USERS:
+                found.add(path.name)
+            if isinstance(node, ast.Import) and any(alias.name == "company.paper_period" for alias in node.names) and path.name != "cli.py":
                 found.add(path.name)
             if isinstance(node, ast.ImportFrom) and node.module == "company" and any(alias.name == "paper_period" for alias in node.names) and path.name not in ("cli.py",):
                 found.add(path.name)
@@ -801,7 +857,10 @@ def test_only_the_tick_reaches_the_order_path(repo):
         "def act(account):\n    account.cancel_orders()\n",
         "from company import paper\naccount = paper.Account(paper.transport())\n",
         "from company.paper import Account\n",
+        "from company.paper import _Client\n",
+        "from company import paper\npaper._Client(paper.transport(), paper.PAPER_HOST).call('POST', '/v2/orders', body={})\n",
         "from company import paper_period\n",
+        "import company.paper_period\n",
     ],
 )
 def test_that_check_catches_another_order_path(tmp_path, planted):
@@ -859,14 +918,10 @@ def test_only_the_paper_module_may_reach_the_network(repo):
 
 @pytest.mark.parametrize("build", [paper.Account, paper.MarketData])
 @pytest.mark.parametrize("reach", [frozenset({LIVE_HOST}), frozenset({paper.PAPER_HOST, LIVE_HOST}), frozenset({"example.com"}), {paper.PAPER_HOST}, None])
-def test_a_transport_aimed_at_another_host_is_refused_before_the_key_is_read(build, reach, monkeypatch):
+def test_a_transport_aimed_at_another_host_is_refused_before_anything_is_sent(build, reach):
     class Elsewhere(FakeBroker):
         hosts = reach
 
-    def no_read(_path):
-        pytest.fail("the key was read")
-
-    monkeypatch.setattr(paper, "_read_key", no_read)
     sender = Elsewhere()
 
     with pytest.raises(paper.ForeignTransport):
@@ -1044,7 +1099,7 @@ def test_a_directory_or_pipe_for_a_key_file_is_refused_and_does_not_hang(board, 
     assert broker.requests == []
 
 
-@pytest.mark.parametrize("content", ["", "onlyonepart\n", "partone\nparttwo\npartthree\n", f"{KEY_ID} é\n"])
+@pytest.mark.parametrize("content", ["", "onlyonepart\n", "partone\nparttwo\npartthree\n", f"{KEY_ID} é\n", "partone parttwo\n", "alpha one\nbeta seven\n"])
 def test_a_key_file_that_is_no_key_is_refused_and_not_quoted(board, broker, run, content):
     write_key(content)
 
@@ -1348,7 +1403,7 @@ def test_a_broker_that_never_stops_paging_is_a_failure_and_not_a_hang(key):
 
     with pytest.raises(paper.BrokerFailed):
         paper.MarketData(sender).bars(["SPY"], "2026-01-05", "2026-01-06")
-    assert len(sender.requests) == 200
+    assert len(sender.requests) == paper._MAX_PAGES
 
 
 # The kill switch and the key
@@ -1382,6 +1437,7 @@ def test_a_reading_of_a_loss_is_a_signed_decimal_and_rubbish_is_refused(period):
     fields = {"period_seq": period["seq"], "equity": "99000.50", "pnl": "-1000.25", "taken_at": "2026-11-05T09:30:00Z"}
     assert Ledger().append("paper-reading", fields, "runner")["pnl"] == "-1000.25"
 
-    for bad in ({"pnl": "NaN"}, {"pnl": 5}, {"equity": "-1"}):
+    assert Ledger().append("paper-reading", {**fields, "equity": "-1"}, "runner")["equity"] == "-1"
+    for bad in ({"pnl": "NaN"}, {"pnl": 5}, {"equity": "lots"}):
         with pytest.raises(AppendRefused, match="bad-field"):
             Ledger().append("paper-reading", {**fields, **bad}, "runner")

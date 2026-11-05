@@ -27,13 +27,12 @@ KEY_ID_HEADER = "APCA-API-KEY-ID"
 SECRET_HEADER = "APCA-API-SECRET-KEY"
 BARS_SOURCE = "broker:iex"
 ACTIVE = "ACTIVE"
-LABEL = "PAPER, no real money"
 
 _TIMEOUT_SECONDS = 30
 _MAX_RESPONSE_BYTES = 64_000_000
 _MAX_KEY_BYTES = 4096
 _BARS_PAGE = 10_000
-_MAX_PAGES = 200
+_MAX_PAGES = 50
 _KEY_PART = re.compile(r"[!-~]+")
 _HOW = "create the free paper account at the broker, save its key id and secret on two lines in that file, and `chmod 600` it"
 
@@ -86,6 +85,12 @@ def transport() -> Transport:
     return HttpsTransport()
 
 
+def money(amount: Decimal) -> str:
+    """A paper figure as a command prints it."""
+    text = f"{abs(amount):,.2f}"
+    return f"-${text}" if amount < 0 and text != "0.00" else f"${text}"
+
+
 def _key_file_problem(found: os.stat_result) -> str | None:
     if not stat.S_ISREG(found.st_mode):
         return "is not a file"
@@ -114,7 +119,7 @@ def _read_key(path: Path) -> tuple[str, str]:
         raise KeyUnavailable(f"the paper key at {path} cannot be read: {error.strerror}") from None
     finally:
         os.close(fd)
-    parts = content.decode("utf-8", "replace").split()
+    parts = [line.strip() for line in content.decode("utf-8", "replace").splitlines() if line.strip()]
     if len(parts) != 2 or not all(_KEY_PART.fullmatch(part) for part in parts):
         raise KeyUnavailable(f"the paper key at {path} is not a key id and a secret on two lines")
     return parts[0], parts[1]
@@ -125,7 +130,7 @@ class _Client:
 
     def __init__(self, sender: Transport, host: str, key_file: Path | None = None):
         reach = getattr(sender, "hosts", None)
-        if host not in HOSTS or not isinstance(reach, frozenset) or not reach <= HOSTS:
+        if not isinstance(reach, frozenset) or not reach <= HOSTS:
             raise ForeignTransport("that transport is aimed at a host other than the paper broker's, so no key was read and nothing was sent")
         self.sender, self.host = sender, host
         self.key_file = paths.paper_key() if key_file is None else key_file
@@ -182,8 +187,8 @@ class PlacedOrder:
 class Account:
     """The paper account, on the paper host alone."""
 
-    def __init__(self, sender: Transport, key_file: Path | None = None):
-        self._client = _Client(sender, PAPER_HOST, key_file)
+    def __init__(self, sender: Transport):
+        self._client = _Client(sender, PAPER_HOST)
 
     def read(self) -> AccountState:
         answer = self._client.call("GET", "/v2/account")

@@ -517,6 +517,16 @@ def registration_of(events: list[dict], period_or_verdict: dict) -> dict:
     return next(event for event in events if event["seq"] == period_or_verdict["registration_seq"])
 
 
+def bet_of(registration: dict) -> str:
+    """The bet whose cell wrote a registration."""
+    return registration["writer"].removeprefix(CELL_PREFIX)
+
+
+def config_hash_of(events: list[dict], period: dict) -> str:
+    """The configuration a period's verdict named, which is what it trades."""
+    return next(event["config_hash"] for event in events if event["seq"] == period["verdict_seq"])
+
+
 def _paper_readings(events: list[dict], period_seq: int) -> list[dict]:
     return [event for event in _of_kind(events, "paper-reading") if event["period_seq"] == period_seq]
 
@@ -554,7 +564,7 @@ def paper_results(events: list[dict]) -> list[PaperResult]:
     for period in _of_kind(events, "paper-opened"):
         # The contract asks only that a seq exists, and a page must not fall over a period citing something else.
         registration = next((event for event in _of_kind(events, "strategy-registered") if event["seq"] == period["registration_seq"]), None)
-        bet, strategy = (registration["writer"].removeprefix(CELL_PREFIX), registration["strategy"]) if registration else ("unknown", "unknown")
+        bet, strategy = (bet_of(registration), registration["strategy"]) if registration else ("unknown", "unknown")
         readings = _paper_readings(events, period["seq"])
         closed = next((event for event in _of_kind(events, "paper-closed") if event["period_seq"] == period["seq"]), None)
         results.append(PaperResult(period, bet, strategy, readings[-1] if readings else None, closed))

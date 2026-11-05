@@ -251,7 +251,7 @@ An `append-refused` event's writer is the code writer making the append, or `tre
 - A field ending in `_at` is a UTC timestamp like `2026-11-05T09:30:00Z`, and one ending in `_date` is a date like `2026-11-05`.
 - `bet` is a bet's id (lower-case letters, digits and hyphens), and `session` a session's UUID.
 - `message` is the Discord id of Daniel's word, as a string of digits.
-- `equity` is a decimal string from zero up, and `pnl` a decimal string that may start with a minus: both are paper figures and never money.
+- `equity` and `pnl` are decimal strings that may start with a minus, since a short position can lose more than an account holds: both are paper figures and never money.
 - `amount` is a decimal string from zero up, always with `currency`, and `cost` is a decimal string from zero up in US dollars, so a refund is a positive `amount` of kind `refund`.
 - `minutes` is a number from zero up.
 - `week_start` is the UTC time a seven-day window opens.
@@ -584,7 +584,7 @@ A pull reads that list from the file as it stands, each entry checked, since it 
 `settings init` writes the paper key's entry by default, `{"name": "paper", "rotation": "move-key", "key_file": "paper.key"}`, so a pull rotates it with no step of Daniel's.
 The key is read by the paper module from the key file at use, and passed to no session and no log.
 The key file is `paper.key` in Daniel's config directory: the key id and the secret on two lines, which a file anyone but its owner can reach, a link, or anything but a file refuses unread.
-`company paper check` makes one read-only call to the paper host, writes nothing, and prints the account's status and equity; with no key it says what to do and exits non-zero.
+`company paper check` makes one read-only call to the paper host, writes nothing, and prints the account's status and equity; with no key it says what to do and exits non-zero, and with the kill switch pulled it makes no call, as a tick does not.
 
 The schedule is systemd user timers behind a runner that tests replace, installed disabled, with its jobs listed in code in `schedule.JOBS`.
 The runner is the `systemctl` first on `PATH`, and the suite puts one there that fails any test that did not choose a stub.
@@ -709,7 +709,7 @@ Crypto and prediction markets count as trading under the same rule.
   A cell registers through its `register_strategy` tool, which reads the data, fills in `data_hash`, and refuses a missing or malformed field, or a source it cannot read or whose data does not hold every universe symbol on each bar of both periods, with at least two bars in each.
   A `period` is `{start, end}` in days, and a `cost_model` or `slippage_model` is `{bps_per_turnover}` from 0 to 10,000.
   A `data_source` is `fixture:<name>`, read from `market-data/<name>.jsonl` in the company home, or `broker:iex`, the paper broker's free daily bars, split-adjusted, which the tool fetches at the registration and keeps in `market-data/broker/<data_hash>.jsonl`, where no `fixture:` name can reach them.
-  Either way it is one `{date, symbols}` bar on each line, whose `symbols` hold each symbol's fields, `close` among them, every later run reads those bytes, and `broker:iex` makes no further call.
+  Either way it is one `{date, symbols}` bar on each line, whose `symbols` hold each symbol's fields, `close` among them, and every later run and the verdict read those bytes, with no further call; only a paper tick fetches again.
   A holdout on `broker:iex` must end before today, since a day's bar is not whole until the day ends, and with no key, or a broker that fails, the registration is refused with `data-unavailable:no-key` or `data-unavailable:broker-failed`.
   `paper_days` is from 1 to 3,650, which keeps every end date one a date can hold.
   The holdout must begin after the in-sample period ends.
@@ -766,9 +766,9 @@ Crypto and prediction markets count as trading under the same rule.
 - **A tick is the one order path.**
   Only code places orders, in `company paper tick`, on the paper host, and no company tool can: the tools hold `paper.MarketData` alone, never load `paper_period.py`, and a test fails on any other module that reaches `paper.Account` or its order methods.
   Each tick reads the account, whose status must be `ACTIVE`, and logs `paper-reading`, whose `pnl` is against the period's first reading, so the first tick is the base.
-  Then it closes the period if the equity is past the kill, measured from the period's highest reading at a tick, with `drawdown-kill`, or if today is on or after the end date, with `end-date`; neither needs the bars or the strategy.
+  Then it closes the period if the equity is past the kill, measured from the period's highest reading at a tick, or is not above zero, with `drawdown-kill`, or if today is on or after the end date, with `end-date`; neither needs the bars or the strategy.
   To close, it cancels what waits, places an order against every position, and only then logs `paper-closed`, so a failed order leaves the period open for the next tick.
-  Otherwise it fetches the broker's bars since the in-sample period began, whatever source the registration names, leaves out any day lacking a universe symbol, and feeds them one at a time to the kept configuration, in the same sandbox and under the same time limit, as the verdict did, and takes its answer on the newest bar as the target.
+  Otherwise it fetches the broker's bars since the in-sample period began, whatever source the registration names, up to the last whole day, which is today only from 21:00 UTC, leaves out any day lacking a universe symbol, says the date of the close it acted on, and feeds them one at a time to the kept configuration, in the same sandbox and under the same time limit, as the verdict did, and takes its answer on the newest bar as the target.
   A strategy that fails there closes the period with `strategy-failed:<kind>`, and only that kind is recorded; a sandbox that does not start closes nothing and places nothing.
   It cancels what waits, so that a second tick before the market opens replaces the first's orders and does not double them, then places market orders for the day, sells first, in whole shares rounded towards zero, priced at the newest bar's close, for each symbol of the account or the target that differs; a symbol outside the target is sold, and a position crossing zero only closes on this tick and turns on the next, since the broker may refuse more against shares not yet sold.
   A tick refuses with the kill switch pulled, the ledger broken, the settings changed, or inside a session, looks for the kill switch once more before each order, and takes `paper.lock`, so a second tick at once is refused.
@@ -781,7 +781,7 @@ Crypto and prediction markets count as trading under the same rule.
   Nothing the cell produces is sold, published or shown as advice, since a personalized recommendation to buy or sell is a high-risk use under Anthropic's usage policy and regulated advice is off limits.
 - **No path to a live account.**
   The paper module refuses a transport that says it can reach any other host, before the key is read, and the real transport refuses any other host itself, follows no redirect and uses no proxy.
-  The scan fails on the live host and on the broker's credential variables and key shapes anywhere but its own files, and on the paper hosts or the broker's headers outside the paper module and the documents.
+  The scan fails on the live host, on any other host of the broker's but its documentation's, and on the broker's credential variables and key shapes anywhere but its own files, and on the paper hosts or the broker's headers outside the paper module and the documents.
   Market data comes from a fixture or the broker's free IEX bars, fetched by code at registration and hashed into the ledger; a cell never holds the key or a network path.
 
 ## Outreach rules
@@ -946,7 +946,7 @@ It tests through the `company` command or the company tools over stdio, using a 
 Its guards are in `tests/harness/`: each Python process has an audit hook on sockets and on Daniel's real paths, and a `claude` and a `systemctl` first on `PATH` fail the test.
 The launcher's allow-list strips the guard from a session's environment, as it must, so the seam is in the test's own executable and never in the company's code: the stub's wrapper notes the environment it was given, then sets the guard and the blocker again for the stub and the company tools it starts.
 Its scan, `tests/scan_rules.py`, walks every tracked file for what the runtime section bans; `docs/design.md`, `docs/first-run.md` and the research may name a banned variable, setting or flag and any URL, but no file but the scan's own may hold a real key's shape, a model vendor's host or SDK import, the live broker host or a broker's credential variable.
-Every test of the broker runs on a fake transport, through `paper.transport`, the one seam, so nothing in the suite has made a real call to it.
+No test reaches the broker: a command takes a fake transport through `paper.transport`, the company tools' server is handed one, and the real transport's own tests stand in for its connection, so nothing in the suite has made a real call to it.
 
 ## Phases
 

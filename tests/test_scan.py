@@ -4,9 +4,9 @@ import shutil
 import subprocess
 
 import pytest
-from scan_rules import scan, tracked_files
+from scan_rules import PAPER_HOSTS, scan, tracked_files
 
-from company import banned
+from company import banned, paper
 
 # Assembled, so that no secret scanner mistakes this file for holding a real key.
 ANTHROPIC_KEY = "sk-ant-" + "api03-" + "x1y2z3" * 8
@@ -54,6 +54,10 @@ PLANTS = [
     ("extra-usage-setting", "overage_enabled = True"),
     ("live-broker-host", f"host = '{LIVE_HOST}'"),
     ("live-broker-host", f"host = '{LIVE_HOST.upper()}'"),
+    ("other-broker-host", "host = 'broker-api.alpaca.markets'"),
+    ("other-broker-host", "host = 'stream.data.alpaca.markets'"),
+    ("other-broker-host", "host = 'data.sandbox.alpaca.markets'"),
+    ("broker-key-variable", "ALPACA_SECRET_KEY=x"),
     ("broker-key-variable", "APCA_API_KEY_ID=x"),
     ("broker-key-variable", 'os.environ["APCA_API_SECRET_KEY"]'),
     ("broker-key-variable", "APCA_API_BASE_URL=x"),
@@ -260,6 +264,21 @@ def test_only_the_scan_itself_is_exempt(copy, plant):
     assert rules_found(copy, "tests/test_something_else.py") == {"model-key-variable"}
 
 
-@pytest.mark.parametrize("name", ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "APCA_API_BASE_URL"])
+def test_the_scan_allows_the_hosts_the_paper_module_uses_and_those_alone():
+    assert set(PAPER_HOSTS) == paper.HOSTS
+
+
+@pytest.mark.parametrize("path", ["src/company/paper.py", "src/company/planted.py", "docs/design.md", "README.md"])
+def test_another_host_of_the_brokers_is_caught_everywhere(copy, plant, path):
+    plant(path, "broker-api.alpaca.markets")
+    assert "other-broker-host" in rules_found(copy, path)
+
+
+def test_the_documents_may_cite_the_brokers_documentation(copy, plant):
+    plant("docs/design.md", "docs.alpaca.markets")
+    assert "other-broker-host" not in rules_found(copy, "docs/design.md")
+
+
+@pytest.mark.parametrize("name", ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "APCA_API_BASE_URL", "ALPACA_SECRET_KEY"])
 def test_no_variable_of_the_brokers_may_reach_a_session(name):
     assert banned.is_banned(name)

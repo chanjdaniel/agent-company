@@ -486,7 +486,7 @@ def _paper_check(args) -> int:
     except paper.PaperFailed as failed:
         print(f"company: the paper account was not read: {failed}.", file=sys.stderr)
         return EXIT_REFUSED
-    print(f"{paper.LABEL}: the paper account's status is {state.status}, and its equity is ${state.equity:,.2f}.")
+    print(f"PAPER, no real money: the paper account's status is {state.status}, and its equity is {paper.money(state.equity)}.")
     return EXIT_OK
 
 
@@ -501,7 +501,7 @@ def _paper_tick(args) -> int:
         print(f"company: refused: {refused}. The paper tick did not run.", file=sys.stderr)
         return EXIT_REFUSED
     except (paper_period.TickRefused, paper.PaperFailed, AppendRefused, LedgerBroken, OSError) as stopped:
-        print(f"company: the paper tick stopped here, with no real money involved: {stopped}. What it wrote stands.", file=sys.stderr)
+        print(f"company: the paper tick stopped here, with no real money involved: {str(stopped).rstrip('.')}. What it wrote stands.", file=sys.stderr)
         return EXIT_REFUSED
     return EXIT_OK
 

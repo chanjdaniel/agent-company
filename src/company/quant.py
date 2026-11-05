@@ -300,7 +300,7 @@ def _check_periods_unspent(events: list[dict], fields: dict, writer: str) -> Non
 def _locked() -> Iterator[None]:
     """One registration or backtest at a time, so that two sessions cannot both spend a budget's last run.
 
-    The strategy's time limit bounds how long this is held.
+    The strategy's time limit bounds how long this is held, and at a registration on the broker's bars, the call's own limits.
     """
     paths.home().mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(paths.home() / "quant.lock", os.O_RDWR | os.O_CREAT, 0o600)
@@ -689,7 +689,7 @@ def _open_waiting(ledger: Ledger) -> dict | None:
         return None
     registration = treasurer.registration_of(events, verdict_event)
     end_date = (times.now().date() + timedelta(days=registration["paper_days"])).isoformat()
-    bet = registration["writer"].removeprefix(treasurer.CELL_PREFIX)
+    bet = treasurer.bet_of(registration)
     promise = f"The paper period of strategy {registration['strategy']} closes by {end_date}."
     promised = ledger.append("promise-recorded", {"promise": promise, "due_date": end_date, "bet": bet}, "runner")
     fields = {"registration_seq": registration["seq"], "verdict_seq": verdict_event["seq"], "end_date": end_date, "drawdown_kill": registration["acceptance"]["max_drawdown"], "promise_seq": promised["seq"]}

@@ -8,6 +8,7 @@ import contextlib
 import fcntl
 import os
 from collections.abc import Callable, Iterator
+from datetime import datetime, time, timedelta
 from decimal import ROUND_DOWN, Decimal
 
 from company import kill_state, paper, paths, quant, times, treasurer
@@ -17,6 +18,8 @@ DRAWDOWN_KILL = "drawdown-kill"
 END_DATE = "end-date"
 _STRATEGY_FAILED = "strategy-failed"
 _BUY, _SELL = "buy", "sell"
+# New York's close in winter, and an hour after it in summer: a day's bar is not whole before this.
+_DAY_WHOLE_AT = time(21, 0)
 
 Say = Callable[[str], None]
 
@@ -38,11 +41,6 @@ def _one_tick() -> Iterator[None]:
         yield
     finally:
         os.close(fd)
-
-
-def _money(amount: Decimal) -> str:
-    text = f"{abs(amount):,.2f}"
-    return f"-${text}" if amount < 0 and text != "0.00" else f"${text}"
 
 
 def _place(ledger: Ledger, account: paper.Account, period: dict, symbol: str, side: str, quantity: Decimal, say: Say) -> None:
@@ -100,10 +98,11 @@ def _rebalance(ledger: Ledger, account: paper.Account, period: dict, targets: di
         _place(ledger, account, period, symbol, side, quantity, say)
 
 
-def _bars_for(registration: dict, market: paper.MarketData, today: str) -> list[dict]:
-    """Only days that hold every symbol, as a backtest's do: a strategy was never tried on anything else."""
+def _bars_for(registration: dict, market: paper.MarketData, now: datetime) -> list[dict]:
+    """Only whole days that hold every symbol, as a backtest's do: a strategy was never tried on anything else."""
     universe = registration["universe"]
-    bars = market.bars(universe, registration["in_sample"]["start"], today)
+    last = now.date() if now.time() >= _DAY_WHOLE_AT else now.date() - timedelta(days=1)
+    bars = market.bars(universe, registration["in_sample"]["start"], last.isoformat())
     return [bar for bar in bars if all(symbol in bar["symbols"] for symbol in universe)]
 
 
@@ -111,9 +110,9 @@ def tick(account: paper.Account, market: paper.MarketData, seconds: float, say: 
     """One tick of the open period, if there is one; raises `TickRefused`, `paper.PaperFailed` or a ledger's refusal, and what was written stands."""
     with _one_tick():
         ledger = Ledger()
-        held = kill_state.refusal(ledger.read())
-        if held:
-            raise TickRefused(f"{held}, so `{kill_state.RESUME}` comes first")
+        refusal = kill_state.refusal(ledger.read())
+        if refusal:
+            raise TickRefused(f"{refusal}, so `{kill_state.RESUME}` comes first")
         period = treasurer.open_period(ledger.read()) or quant.open_waiting_period()
         if period is None:
             say("PAPER, no real money: no paper period is open, so this tick did nothing.")
@@ -132,25 +131,23 @@ def _run(ledger: Ledger, account: paper.Account, market: paper.MarketData, perio
     fields = {"period_seq": period["seq"], "equity": format(equity, "f"), "pnl": format(pnl, "f"), "taken_at": times.stamp(now)}
     ledger.append("paper-reading", fields, "runner")
     drawdown = treasurer.paper_drawdown(events, period["seq"], equity)
-    say(f"PAPER results, no real money: period {period['seq']}, equity {_money(equity)}, profit and loss {_money(pnl)}, drawdown {float(drawdown) * 100:.2f}%.")
-    if treasurer.past_drawdown_kill(drawdown, period):
+    say(f"PAPER results, no real money: period {period['seq']}, equity {paper.money(equity)}, profit and loss {paper.money(pnl)}, drawdown {float(drawdown) * 100:.2f}%.")
+    # An account with nothing left has nothing to size a position on, whatever its registered kill.
+    if equity <= 0 or treasurer.past_drawdown_kill(drawdown, period):
         _close(ledger, account, period, DRAWDOWN_KILL, equity, say)
         return
     if now.date().isoformat() >= period["end_date"]:
         _close(ledger, account, period, END_DATE, equity, say)
         return
-    bars = _bars_for(registration, market, now.date().isoformat())
+    bars = _bars_for(registration, market, now)
     if not bars:
         raise TickRefused("the broker has no day holding every symbol of this strategy, so this tick placed nothing")
     try:
-        targets = quant.paper_targets(registration, _config_hash(events, period), bars, seconds)
+        targets = quant.paper_targets(registration, treasurer.config_hash_of(events, period), bars, seconds)
     except quant.StrategyFailed as failed:
         _close(ledger, account, period, f"{_STRATEGY_FAILED}:{failed.kind}", equity, say)
         return
     except quant.NoConfinement as absent:
         raise TickRefused(f"the strategy's sandbox did not start ({absent.reason}), so this tick placed nothing") from None
+    say(f"PAPER, no real money: the strategy's target comes from the close of {bars[-1]['date']}.")
     _rebalance(ledger, account, period, targets, equity, bars[-1], say)
-
-
-def _config_hash(events: list[dict], period: dict) -> str:
-    return next(event["config_hash"] for event in events if event["seq"] == period["verdict_seq"])
