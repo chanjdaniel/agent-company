@@ -13,7 +13,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from session_checks import events
+from session_checks import events, wait_for
 from usage_records import SETTINGS_INIT, TEAM, transcript_line, week_reading
 
 from company import audit, goals, paths, schedule, times, tools, views
@@ -114,7 +114,7 @@ def config_run(registration_seq, **figures):
 
 
 def test_an_audit_starts_on_the_auditors_model_in_a_fresh_workspace_with_the_ledger_and_the_transcript(audited, stub):
-    seen = {"do": "run", "command": ["/bin/sh", "-c", "cat ledger.jsonl; echo ---; ls transcripts"]}
+    seen = {"do": "run", "command": ["/bin/sh", "-c", "cat ledger.jsonl; echo ---; ls transcripts; echo ---; cat transcripts/*"]}
 
     done, cell = audited(seen)
 
@@ -125,15 +125,15 @@ def test_an_audit_starts_on_the_auditors_model_in_a_fresh_workspace_with_the_led
     assert workspace.parent == paths.workspaces().resolve()
     started = events("session-started")[-1]
     assert started["role"] == "auditor"
-    assert started["audited"] == [cell["run"]]
+    assert started["audited_runs"] == [cell["run"]]
     assert workspace.name == started["run"]
     assert "bet" not in started
     listed = stub.runs()[-1]["stdout"]
-    ledger_copy, names = listed.split("---\n")
+    ledger_copy, names, transcript = listed.split("---\n")
     assert json.loads(ledger_copy.splitlines()[-1])["seq"] == started["seq"] - 1
     assert names.strip() == f"{cell['run']}.jsonl"
     kept = paths.runs() / cell["run"] / "transcript.jsonl"
-    assert (workspace / "transcripts" / f"{cell['run']}.jsonl").read_bytes() == kept.read_bytes()
+    assert transcript == kept.read_text()
     assert REPORTED in kept.read_text()
 
 
@@ -212,6 +212,19 @@ def test_the_model_the_audited_session_ran_on_counts_even_if_the_setting_moved(c
     assert len(stub.session_calls()) == before
 
 
+@pytest.mark.parametrize("name", ["claude-opus-5-5[1m]", "opus", "opus[1m]", "CLAUDE-OPUS-5-5", "claude-opus-4-8"])
+def test_another_name_for_the_cells_model_or_its_family_is_the_same_model(company, stub, cell_run, name):
+    cell = cell_run()
+    assert company("settings", "set", "auditor_model", name).returncode == 0
+    before = len(stub.session_calls())
+
+    done = company("audit", cell["run"])
+
+    assert done.returncode == 1
+    assert audit.RECORDED_GAP in done.stdout
+    assert len(stub.session_calls()) == before
+
+
 def test_an_auditor_session_started_by_hand_is_refused_on_the_cells_model_too(company, stub, board):
     assert company("settings", "set", "auditor_model", "claude-opus-5-5").returncode == 0
 
@@ -251,7 +264,7 @@ def test_a_session_still_running_is_refused(company, stub, board):
     subjects = list(Ledger().read())
 
     with pytest.raises(audit.NotAuditable) as refused:
-        audit.subjects(subjects, ["open-run"])
+        audit.subjects(subjects, ("open-run",))
 
     assert refused.value.reason == "not-ended"
 
@@ -506,6 +519,58 @@ def test_a_result_a_verdict_shows_waits_for_daniel(company, stub, cell_run):
     assert_waits(company)
 
 
+@pytest.mark.parametrize(
+    ("figure", "said"),
+    [
+        ({"skew": 0.31}, "a skew of 0.31"),
+        ({"kurtosis": 3.7}, "a kurtosis of 3.7"),
+        ({"n_returns": 251}, "over 251 returns"),
+    ],
+)
+def test_any_figure_a_config_run_holds_is_shown(company, stub, cell_run, figure, said):
+    config_run(registration(), **figure)
+    cell = cell_run(said=said)
+    stub.play(claim_step(cell["session"], said, next(iter(figure.values()))))
+
+    assert company("audit", cell["run"]).returncode == 0
+
+    assert_waits(company)
+
+
+def test_the_trials_a_verdict_holds_are_shown(company, stub, cell_run):
+    registered = registration()
+    verdict = {"registration_seq": registered, "config_hash": "c", "passed": False, "failed_tests": [], "deflated_sharpe": 0.1, "holdout_return": 0.1, "max_drawdown": 0.1, "trials": 37, "config_run_seqs": [], "holdout_hash": "h"}
+    Ledger().append("verdict", verdict, "treasurer")
+    said = "It took 37 trials."
+    cell = cell_run(said=said)
+    stub.play(claim_step(cell["session"], said, 37))
+
+    assert company("audit", cell["run"]).returncode == 0
+
+    assert_waits(company)
+
+
+@pytest.mark.parametrize(
+    ("said", "quote", "value"),
+    [
+        ("A Sharpe of 11.50 it was.", "1.5", 1.5),
+        ("A Sharpe of 2.40 it was.", "Sharpe of 2", 2),
+        ("A Sharpe of 2.40 it was.", ".40 it was", 0.4),
+        ("A Sharpe of 2.40 it was.", "40 it was", 40),
+        ("A Sharpe of 2.40 it was.", "Sharpe of 2.4", 2.4),
+        ("Its Sharpe of 2.40 it was.", "ts Sharpe of 2.40", 2.4),
+    ],
+)
+def test_a_quote_cut_out_of_the_middle_of_a_word_or_a_number_waits_for_daniel(company, stub, cell_run, said, quote, value):
+    cell = cell_run(said=said)
+    stub.play(claim_step(cell["session"], quote, value))
+
+    assert company("audit", cell["run"]).returncode == 0
+
+    assert len(events("finding")) == 1
+    assert_waits(company)
+
+
 def test_a_percent_of_a_recorded_fraction_is_shown(company, stub, cell_run):
     config_run(registration(), total_return=0.1234)
     said = "The backtest returned 12.3%."
@@ -624,6 +689,18 @@ def test_a_daniels_word_stopped_before_its_pause_is_finished_by_the_check_though
     assert company("treasurer", "check").returncode == 0
 
     assert len(events("finding-confirmed")) == 1
+    assert events("cell-paused")[-1]["cause_seq"] == seq
+
+
+def test_finishing_daniels_word_is_not_called_the_codes(company, stub, cell_run):
+    cell = cell_run()
+    fields = {"rubric": audit.UNSHOWN_RESULT, "summary": "s", "evidence": "e", "bet": "alpha", "session": cell["session"], "claim": {"quote": REPORTED, "value": 2.4}}
+    seq = Ledger().append("finding", fields, "auditor")["seq"]
+    Ledger().append("finding-confirmed", {"finding_seq": seq}, "board")
+
+    done = company("treasurer", "check")
+
+    assert "confirmed by code" not in done.stdout
     assert events("cell-paused")[-1]["cause_seq"] == seq
 
 
@@ -767,6 +844,71 @@ def test_a_recorded_auditor_that_tries_to_write_elsewhere_is_refused_and_logged(
     ]
 
 
+def tool_use(name, identifier="toolu_1"):
+    return {"type": "tool_use", "id": identifier, "name": name, "input": {"file_path": "/elsewhere"}}
+
+
+def test_a_recorded_auditor_that_tries_a_built_in_write_has_it_logged(audited, stub):
+    calls = [tool_use("Write", "toolu_1"), tool_use("Bash", "toolu_2"), tool_use("Read", "toolu_3"), tool_use("mcp__company__record_finding", "toolu_4")]
+
+    done, _ = audited({"do": "reply", "request": "r9", "output": 10, "content": calls})
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    # What refuses it is `--tools` and the settings, which only a real session can prove: ticket 13's probe.
+    assert "Write" not in stub.argument("--tools").split(",")
+    started = events("session-started")[-1]
+    refused = events("append-refused")
+    assert [(event["tool"], event["reason"], event["attempted_writer"], event["session"]) for event in refused] == [
+        ("write", "tool-not-in-role", "auditor", started["session"]),
+        ("bash", "tool-not-in-role", "auditor", started["session"]),
+    ]
+    assert refused[-1]["seq"] < events("session-ended")[-1]["seq"]
+
+
+def test_the_auditors_whole_ledger_copy_does_not_outlive_its_session(audited, stub):
+    audited()
+
+    workspace = Path(stub.session_calls()[-1]["cwd"])
+    assert workspace.is_dir()
+    assert not (workspace / "ledger.jsonl").exists()
+    assert not (workspace / "transcripts").exists()
+
+
+def test_the_copy_goes_even_if_the_auditors_launcher_died(company, stub, cell_run):
+    cell = cell_run()
+    stub.play({"do": "hang"})
+    launch = subprocess.Popen([COMPANY, "audit", cell["run"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    wait_for(lambda: any("hanging" in line for line in stub.progress()))
+    workspace = Path(stub.session_calls()[-1]["cwd"])
+    assert (workspace / "ledger.jsonl").exists()
+    launch.kill()
+    launch.wait()
+    stub.play()
+
+    assert company("session", "start", "probe").returncode == 0
+
+    assert events("session-stopped")[-1]["reason"] == "launcher-gone"
+    assert not (workspace / "ledger.jsonl").exists()
+    assert not (workspace / "transcripts").exists()
+
+
+def test_an_auditor_given_nothing_to_audit_leaves_its_workspace_alone(company, stub, board):
+    workspace = paths.workspaces() / "ws"
+    workspace.mkdir(parents=True)
+    (workspace / "ledger.jsonl").write_text("a cell's view\n")
+    stub.play()
+
+    assert company("session", "start", "auditor", "--workspace", str(workspace)).returncode == 0
+
+    assert (workspace / "ledger.jsonl").read_text() == "a cell's view\n"
+
+
+def test_a_cells_view_is_left_in_place_for_it(company, stub, cell_run):
+    cell_run()
+
+    assert (Path(stub.session_calls()[-1]["cwd"]) / "ledger.jsonl").exists()
+
+
 def test_the_auditors_settings_deny_the_ledger_and_keep_it_in_its_workspace(audited, stub):
     audited()
 
@@ -857,6 +999,24 @@ def test_the_full_pass_is_every_cell_session_of_the_last_seven_days():
     assert audit.full_pass(given, now) == ["week-old", "new"]
 
 
+def test_an_audits_findings_are_its_own_sessions_and_no_others():
+    session = "bbbbbbbb-0000-4000-8000-000000000000"
+    other = "cccccccc-0000-4000-8000-000000000000"
+    started = {"kind": "session-started", "writer": "launcher", "session": session}
+    finding = {"kind": "finding", "writer": "auditor", "rubric": "r", "summary": "s", "evidence": "e"}
+    given = [
+        {**finding, "seq": 1},
+        {**started, "seq": 2},
+        {**finding, "seq": 3},
+        {**finding, "seq": 4, "writer": "treasurer"},
+        {"kind": "session-note", "writer": "probe", "session": other, "seq": 5},
+        {"kind": "session-ended", "writer": "launcher", "session": session, "seq": 6},
+        {**finding, "seq": 7},
+    ]
+
+    assert audit.findings_of(given, session) == 1
+
+
 def test_the_sample_and_the_full_pass_are_jobs(company, systemctl):
     assert ("audit", "--sample", "--scheduled") in [job.command for job in schedule.JOBS]
     assert ("audit", "--full", "--scheduled") in [job.command for job in schedule.JOBS]
@@ -882,7 +1042,7 @@ def test_the_full_pass_by_hand_audits_every_run_in_one_session(company, stub, ce
     done = company("audit", "--full")
 
     assert done.returncode == 0, done.stdout + done.stderr
-    assert events("session-started")[-1]["audited"] == [first["run"], second["run"]]
+    assert events("session-started")[-1]["audited_runs"] == [first["run"], second["run"]]
     assert [event["bet"] for event in events("finding")] == ["alpha", "beta"]
     assert "Findings from this audit: 2" in done.stdout
 
@@ -903,7 +1063,7 @@ def test_the_sample_job_starts_a_session_with_the_schedule_on_and_uses_no_word(c
     started = events("session-started")[-1]
     assert started["role"] == "auditor"
     assert started["gate"] == "schedule"
-    assert started["audited"] == [cell["run"]]
+    assert started["audited_runs"] == [cell["run"]]
 
 
 def test_the_full_pass_job_with_nothing_to_audit_starts_nothing_and_fails_nothing(company, stub, schedule_on):
@@ -955,7 +1115,7 @@ def test_a_job_finds_the_claude_install_resolved_on_the_blockers_path(company, s
 
     assert fired.returncode == 0, fired.stdout + fired.stderr
     assert len(stub.session_calls()) == before + 1
-    assert events("session-started")[-1]["audited"] == [cell["run"]]
+    assert events("session-started")[-1]["audited_runs"] == [cell["run"]]
 
 
 def test_an_install_finding_no_claude_says_so_and_writes_the_units_without_it(company, systemctl, monkeypatch, tmp_path):

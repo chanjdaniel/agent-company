@@ -25,7 +25,7 @@ _HIDDEN_FIELDS = ("evidence_seqs",)
 
 def cell_view(events: list[dict], bet: str) -> list[dict]:
     """The events a cell of this bet may read, in order; each cites only earlier ones, so one pass finds them all."""
-    writer = f"{contract.CELL_PREFIX}{bet}"
+    writer = contract.cell_writer(bet)
     sessions: set[str] = set()
     registrations: set[int] = set()
     periods: set[int] = set()

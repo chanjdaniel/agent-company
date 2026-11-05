@@ -110,6 +110,11 @@ def _is_paused_for(events: list[dict], seq: int) -> bool:
     return any(event["cause_seq"] == seq for event in treasurer.of_kind(events, "cell-paused"))
 
 
+def _is_settled(events: list[dict], seq: int, bet: str | None) -> bool:
+    """Whether a finding has all a confirmation brings: its word, and on a bet its pause."""
+    return _is_confirmed(events, seq) and (not bet or _is_paused_for(events, seq))
+
+
 def _confirm_and_pause(ledger: Ledger, events: list[dict], seq: int, bet: str | None, reason: str, writer: str, message: str | None = None) -> None:
     """The confirmation and its cell's pause, each only if an earlier step did not write it, so that one stopped part way is finished by the next.
 
@@ -134,24 +139,27 @@ def confirm_finding(seq: int, message: str | None = None) -> dict:
         if finding is None:
             raise _refusal(ledger, "finding-confirmed", "no-such-finding", f"event {seq} is no finding")
         bet = finding.get("bet")
-        if _is_confirmed(events, seq) and (not bet or _is_paused_for(events, seq)):
+        if _is_settled(events, seq, bet):
             raise _refusal(ledger, "finding-confirmed", "already-confirmed", f"finding {seq} is already confirmed")
         _confirm_and_pause(ledger, events, seq, bet, _finding_reason(finding), "board", message)
         return finding
 
 
 def confirm_by_code() -> list[dict]:
-    """Confirm each finding whose claim code agrees with, and finish what a stopped run left; returns the findings this confirmed."""
+    """Confirm each finding whose claim code agrees with, and finish what a stopped run left; returns those confirmed by code, not by Daniel."""
     with _one_at_a_time():
         ledger = Ledger()
         events = ledger.read()
         confirmed = []
         for finding in treasurer.of_kind(events, "finding"):
             seq, bet = finding["seq"], finding.get("bet")
-            if "claim" not in finding or (_is_confirmed(events, seq) and (not bet or _is_paused_for(events, seq))):
+            if "claim" not in finding or _is_settled(events, seq, bet):
                 continue
-            if _is_confirmed(events, seq) or audit.code_confirms(events, finding):
-                _confirm_and_pause(ledger, events, seq, bet, _finding_reason(finding), "treasurer")
+            word = next((event for event in treasurer.of_kind(events, "finding-confirmed") if event["finding_seq"] == seq), None)
+            if word is None and not audit.code_confirms(events, finding):
+                continue
+            _confirm_and_pause(ledger, events, seq, bet, _finding_reason(finding), "treasurer")
+            if word is None or word["writer"] == "treasurer":
                 confirmed.append(finding)
         return confirmed
 

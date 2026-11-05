@@ -76,7 +76,7 @@ def _record_finding(server: "Server", arguments: dict) -> dict:
         raise _BadArguments
     if claim is not None and (rubric != audit.UNSHOWN_RESULT or not audit.is_claim(claim)):
         raise _BadArguments
-    if session not in server.audited:
+    if session not in server.audited_sessions:
         raise _BadArguments("not-audited")
     # The audited session's bet is the ledger's word, so that no finding can pause any other cell.
     bet = audit.bet_of_session(server.ledger.read(), session)
@@ -198,7 +198,7 @@ _FINDING = Tool(
             "claim": {
                 "type": "object",
                 "description": "Only for an `unshown-result`: a reply's words that state a figure no record shows.",
-                "properties": {"quote": {"type": "string", "description": "The reply's own words."}, "value": {"type": "number", "description": "The figure, as those words write it."}},
+                "properties": {"quote": {"type": "string", "description": "The reply's own words, whole, exactly as it wrote them."}, "value": {"type": "number", "description": "The figure, as those words write it."}},
                 "required": ["quote", "value"],
             },
         },
@@ -214,14 +214,14 @@ _UNKNOWN_KIND = "unknown-tool"
 
 def writer_of(role: str, bet: str | None) -> str:
     """The writer a session's tools write as."""
-    return f"{contract.CELL_PREFIX}{bet}" if role == "cell" else role
+    return contract.cell_writer(bet) if role == "cell" and bet else role
 
 
 class Server:
     """The tools one session may call, with its writer fixed."""
 
-    def __init__(self, role: str, bet: str | None, session: str, backtest_seconds: float = 0, market_data: paper.MarketData | None = None, audited: tuple[str, ...] = ()):
-        self.role, self.session, self.backtest_seconds, self.market_data, self.audited = role, session, backtest_seconds, market_data, audited
+    def __init__(self, role: str, bet: str | None, session: str, backtest_seconds: float = 0, market_data: paper.MarketData | None = None, audited_sessions: tuple[str, ...] = ()):
+        self.role, self.session, self.backtest_seconds, self.market_data, self.audited_sessions = role, session, backtest_seconds, market_data, audited_sessions
         self.writer = writer_of(role, bet)
         self.ledger = Ledger()
 
@@ -307,12 +307,12 @@ def main() -> int:
     parser.add_argument("--bet")
     parser.add_argument("--backtest-seconds", type=float, default=0, help="A strategy's time limit, from Daniel's settings.")
     parser.add_argument("--paper-key", help="Where the paper key is, for the broker's bars at a registration; no tool reads it otherwise.")
-    parser.add_argument("--audited", action="append", default=[], help="A session this Auditor was given; a finding may name no other.")
+    parser.add_argument("--audited-session", action="append", default=[], help="A session this Auditor was given; a finding may name no other.")
     args = parser.parse_args()
     if args.role == "cell" and not args.backtest_seconds > 0:
         parser.error("a cell's server needs its strategy time limit, --backtest-seconds")
     market_data = paper.MarketData(paper.transport(), Path(args.paper_key)) if args.paper_key else None
-    serve(Server(args.role, args.bet, args.session, args.backtest_seconds, market_data, tuple(args.audited)), sys.stdin, sys.stdout)
+    serve(Server(args.role, args.bet, args.session, args.backtest_seconds, market_data, tuple(args.audited_session)), sys.stdin, sys.stdout)
     return 0
 
 

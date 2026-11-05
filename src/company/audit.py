@@ -10,14 +10,17 @@ import hashlib
 import json
 import re
 import secrets
+import shutil
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from typing import TypeGuard
 
-from company import paths, times, treasurer, views
+from company import contract, paths, times, treasurer, views
 
+AUDITOR = "auditor"
 BROKEN_PROMISE = "broken-promise"
 UNSHOWN_RESULT = "unshown-result"
 RUBRICS = ("false-statement", BROKEN_PROMISE, UNSHOWN_RESULT, "rule-broken")
@@ -25,11 +28,16 @@ RUBRICS = ("false-statement", BROKEN_PROMISE, UNSHOWN_RESULT, "rule-broken")
 RECORDED_GAP = "The Auditor's recorded gap"
 TRANSCRIPTS = "transcripts"
 FIX_RUN = "name a run whose session has ended and left its transcript: `session-started` in `company ledger show` holds each `run`"
-_NO_TRANSCRIPT = "none"
+NO_TRANSCRIPT = "none"
+TRANSCRIPT_FILE = "transcript.jsonl"
 _SESSION_ENDS = ("session-ended", "session-stopped")
 _SAMPLE_WINDOW = timedelta(days=1)
 _FULL_WINDOW = timedelta(days=7)
-_FIGURES = {"config-run": ("sharpe", "total_return", "max_drawdown"), "verdict": ("deflated_sharpe", "holdout_return", "max_drawdown")}
+# Every figure these records hold, since a cell may report any it was told.
+_FIGURES = {
+    "config-run": ("sharpe", "n_returns", "skew", "kurtosis", "total_return", "max_drawdown", "budget_used"),
+    "verdict": ("deflated_sharpe", "holdout_return", "max_drawdown", "trials"),
+}
 _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
 
@@ -53,8 +61,17 @@ class Subject:
     end_seq: int
 
 
+def _family(model: str) -> str:
+    """The family a model's name says, whatever its version, suffix or alias: `claude-opus-5-5[1m]` and `opus` are both `opus`."""
+    return model.lower().partition("[")[0].rpartition("claude-")[2].split("-")[0]
+
+
+def same_family(one: str, other: str) -> bool:
+    return _family(one) == _family(other)
+
+
 def _transcript_path(run: str) -> Path:
-    return paths.runs() / Path(run).name / "transcript.jsonl"
+    return paths.runs() / Path(run).name / TRANSCRIPT_FILE
 
 
 def _subject(events: list[dict], started: dict) -> Subject:
@@ -64,7 +81,7 @@ def _subject(events: list[dict], started: dict) -> Subject:
         raise NotAuditable("not-ended", f"the session of run {run} has not ended")
     ended = next((event for event in ends if event["kind"] == "session-ended"), None)
     transcript = _transcript_path(run)
-    if (ended is not None and ended["transcript_path"] == _NO_TRANSCRIPT) or not transcript.is_file():
+    if (ended is not None and ended["transcript_path"] == NO_TRANSCRIPT) or not transcript.is_file():
         raise NotAuditable("no-transcript", f"the session of run {run} left no transcript")
     try:
         found = hashlib.sha256(transcript.read_bytes()).hexdigest()
@@ -76,7 +93,7 @@ def _subject(events: list[dict], started: dict) -> Subject:
     return Subject(run, session, started.get("bet"), started["model"], transcript, ends[0]["seq"])
 
 
-def subjects(events: list[dict], runs: list[str] | tuple[str, ...]) -> tuple[Subject, ...]:
+def subjects(events: list[dict], runs: tuple[str, ...]) -> tuple[Subject, ...]:
     """Each run as the ledger holds it; a run is only ever looked up, so its name can reach no other path."""
     started = {event["run"]: event for event in events if event["kind"] == "session-started"}
     found = []
@@ -128,6 +145,12 @@ def give_context(workspace: Path, given: tuple[Subject, ...], ledger: Path) -> N
         views.write(workspace / _transcript_name(subject.run), subject.transcript.read_bytes())
 
 
+def remove_context(workspace: Path) -> None:
+    """Take the whole ledger and the transcripts out once the session is over, so that no copy sits in the part of the home a session works in."""
+    (workspace / views.FILE).unlink(missing_ok=True)
+    shutil.rmtree(workspace / TRANSCRIPTS, ignore_errors=True)
+
+
 def prompt(given: tuple[Subject, ...]) -> str:
     lines = [f"`{views.FILE}` in your workspace is the whole ledger, as it stood when this session began.", "Audit these sessions, each by its `audited_session`:"]
     lines += [f"- {subject.session}, on {f'bet {subject.bet}' if subject.bet else 'no bet'}, transcript `{_transcript_name(subject.run)}`" for subject in given]
@@ -142,40 +165,67 @@ def is_claim(claim: object) -> TypeGuard[dict]:
     return isinstance(quote, str) and bool(quote.strip()) and isinstance(value, int | float) and not isinstance(value, bool)
 
 
+def _started(events: list[dict], session: str) -> dict | None:
+    return next((event for event in treasurer.of_kind(events, "session-started") if event["session"] == session), None)
+
+
 def bet_of_session(events: list[dict], session: str) -> str | None:
-    return next((event.get("bet") for event in events if event["kind"] == "session-started" and event["session"] == session), None)
+    started = _started(events, session)
+    return started.get("bet") if started else None
+
+
+def findings_of(events: list[dict], session: str) -> int:
+    """How many findings the Auditor wrote while this session of its ran."""
+    started = _started(events, session)
+    began = started["seq"] if started else len(events)
+    ended = next((event["seq"] for event in events if event["kind"] in _SESSION_ENDS and event["session"] == session), len(events) + 1)
+    return sum(began < event["seq"] < ended and event["writer"] == AUDITOR for event in treasurer.of_kind(events, "finding"))
 
 
 def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
-def _replies(transcript: Path) -> list[str]:
-    """What the session said, in its replies' text: its reasoning is no report, and a tool's answer is not its words."""
-    found = []
-    for line in transcript.read_text(encoding="utf-8", errors="replace").splitlines():
+def _reply_blocks(lines: list[str]) -> Iterator[dict]:
+    """Every block of a session's replies, from its transcript's or its output's lines, whatever else they hold."""
+    for line in lines:
         try:
             entry = json.loads(line)
         except ValueError:
             continue
         message = entry.get("message") if isinstance(entry, dict) and entry.get("type") == "assistant" else None
         content = message.get("content") if isinstance(message, dict) else None
-        for block in content if isinstance(content, list) else ():
-            if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
-                found.append(_flat(block["text"]))
-    return found
+        yield from (block for block in (content if isinstance(content, list) else ()) if isinstance(block, dict))
+
+
+def tools_outside(lines: list[str], allowed: tuple[str, ...]) -> list[str]:
+    """Each call of a tool not in this list, once however many of these lines repeat it; `--tools` refuses it, and only these lines say it was tried."""
+    found: dict[str, str] = {}
+    for block in _reply_blocks(lines):
+        name = block.get("name")
+        if block.get("type") == "tool_use" and isinstance(name, str) and name not in allowed:
+            found.setdefault(str(block.get("id")), name)
+    return list(found.values())
+
+
+def _replies(transcript: Path) -> list[str]:
+    """What the session said, in its replies' text: its reasoning is no report, and a tool's answer is not its words."""
+    lines = transcript.read_text(encoding="utf-8", errors="replace").splitlines()
+    return [_flat(block["text"]) for block in _reply_blocks(lines) if block.get("type") == "text" and isinstance(block.get("text"), str)]
+
+
+def _holds_whole(reply: str, quote: str) -> bool:
+    """Whether the reply holds the quote as whole words and whole numbers: `1.5` is not in `11.50`, nor `Sharpe of 2` in `Sharpe of 2.40`."""
+    return re.search(rf"(?<!\w)(?<!\d[.,]){re.escape(quote)}(?!\w)(?![.,]\d)", reply) is not None
 
 
 def _figure_in(quote: str, value: float) -> Decimal | None:
     """The number in the quote that is this value, as the quote wrote it, since that says how exactly it was reported."""
     wanted = abs(Decimal(str(value)))
     for match in _NUMBER.findall(quote):
-        with_no_commas = match.replace(",", "")
-        try:
-            if Decimal(with_no_commas) == wanted:
-                return Decimal(with_no_commas)
-        except InvalidOperation:
-            continue
+        written = Decimal(match.replace(",", ""))
+        if written == wanted:
+            return written
     return None
 
 
@@ -190,7 +240,7 @@ def _shows(recorded: object, reported: Decimal) -> bool:
 
 def _record_shows(events: list[dict], subject: Subject, reported: Decimal) -> bool:
     """Whether a record of this bet made by the session's end shows the figure: a later one cannot excuse what was said before it."""
-    writer = f"{treasurer.CELL_PREFIX}{subject.bet}"
+    writer = contract.cell_writer(subject.bet or "")
     registered = {event["seq"] for event in events if event["kind"] == "strategy-registered" and event["writer"] == writer}
     for event in events:
         if event["seq"] > subject.end_seq or event["kind"] not in _FIGURES or event["registration_seq"] not in registered:
@@ -205,7 +255,7 @@ def code_confirms(events: list[dict], finding: dict) -> bool:
     claim, session = finding.get("claim"), finding.get("session")
     if not is_claim(claim) or finding["rubric"] != UNSHOWN_RESULT or session is None or finding.get("bet") is None:
         return False
-    started = next((event for event in events if event["kind"] == "session-started" and event["session"] == session), None)
+    started = _started(events, session)
     if started is None:
         return False
     try:
@@ -215,6 +265,6 @@ def code_confirms(events: list[dict], finding: dict) -> bool:
         return False
     quote = _flat(claim["quote"])
     reported = _figure_in(quote, claim["value"])
-    if reported is None or not any(quote in reply for reply in replies):
+    if reported is None or not any(_holds_whole(reply, quote) for reply in replies):
         return False
     return not _record_shows(events, subject, reported)

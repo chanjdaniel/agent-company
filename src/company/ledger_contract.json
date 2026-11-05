@@ -33,7 +33,7 @@
     "refund": {"group": "Money", "writers": ["treasurer"], "required": ["amount", "currency", "source", "record"], "optional": ["bet"]},
     "fee": {"group": "Money", "writers": ["treasurer"], "required": ["amount", "currency", "source", "record"], "optional": ["bet"]},
     "spend": {"group": "Money", "writers": ["treasurer"], "required": ["amount", "currency", "source", "record"], "optional": ["bet"]},
-    "session-started": {"group": "Sessions", "writers": ["launcher"], "required": ["session", "role", "model", "run", "gate", "account_used", "company_used", "reading_seq"], "optional": ["bet", "audited"]},
+    "session-started": {"group": "Sessions", "writers": ["launcher"], "required": ["session", "role", "model", "run", "gate", "account_used", "company_used", "reading_seq"], "optional": ["bet", "audited_runs"]},
     "session-ended": {"group": "Sessions", "writers": ["launcher"], "required": ["session", "exit", "transcript_path", "transcript_hash", "weight"], "optional": []},
     "session-stopped": {"group": "Sessions", "writers": ["launcher"], "required": ["session", "reason"], "optional": ["elapsed_minutes", "weight"]},
     "session-note": {"group": "Sessions", "writers": ["cell:<bet>", "probe"], "required": ["session", "text"], "optional": []},

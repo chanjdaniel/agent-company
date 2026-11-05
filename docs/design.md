@@ -287,7 +287,7 @@ A kind that a later ticket finds it needs joins this table and the contract in t
 | `refund` | Money | `treasurer` | `amount`, `currency`, `source`, `record` | `bet` |
 | `fee` | Money | `treasurer` | `amount`, `currency`, `source`, `record` | `bet` |
 | `spend` | Money | `treasurer` | `amount`, `currency`, `source`, `record` | `bet` |
-| `session-started` | Sessions | `launcher` | `session`, `role`, `model`, `run`, `gate`, `account_used`, `company_used`, `reading_seq` | `bet`, `audited` |
+| `session-started` | Sessions | `launcher` | `session`, `role`, `model`, `run`, `gate`, `account_used`, `company_used`, `reading_seq` | `bet`, `audited_runs` |
 | `session-ended` | Sessions | `launcher` | `session`, `exit`, `transcript_path`, `transcript_hash`, `weight` | |
 | `session-stopped` | Sessions | `launcher` | `session`, `reason` | `elapsed_minutes`, `weight` |
 | `session-note` | Sessions | `cell:<bet>`, `probe` | `session`, `text` | |
@@ -347,8 +347,8 @@ Notes on single kinds:
 - `session-note` is a cell's or the probe's free text, so it is kept out of the strategy session's view, since that session never talks to a cell; that view still holds a cell's registrations and proposals, which it reads as data.
 - `verdict`'s `failed_tests` names each test failed, `overfitting`, `holdout` or `max_drawdown`; `max_drawdown` is the worse of the backtest's and the holdout's; `holdout_hash` is the hash of the holdout's returns, as `returns_hash` is of a backtest's; and a strategy that failed or took no position on the holdout has `holdout_failure`, the kind of failure with none of its words (`timed-out`, `crashed`, `ended-early`, `bad-output`, `not-finite` or `no-position`), and null for `holdout_return` and `holdout_hash`.
 - `session-started`'s `gate` is `go:<seq>` or `schedule`, and a `go-given` word's launches left are its `sessions` minus the `session-started` events citing it.
-  `audited` lists the runs an Auditor's session was given.
-- `launch-refused`'s `check` is the governor's step that refused (`ledger`, `kill`, `settings`, `go`, `pause`, `reading`, `floor` or `share`, and a scheduled session with the schedule off is refused at `go`) or, written by the launcher, its own (`goal`, `settings`, `binary`, `load-form`, `workspace`, `kill` or `ledger`); its `reason` starts with a code, such as `stale`, followed by a sentence, and `fix` is what to do about it.
+  `audited_runs` lists the runs an Auditor's session was given.
+- `launch-refused`'s `check` is the governor's step that refused (`ledger`, `kill`, `settings`, `go`, `pause`, `reading`, `floor` or `share`, and a scheduled session with the schedule off is refused at `go`) or, written by the launcher, its own (`goal`, `audit`, `settings`, `model`, `binary`, `load-form`, `workspace`, `kill` or `ledger`); its `reason` starts with a code, such as `stale`, followed by a sentence, and `fix` is what to do about it.
 - `pull` on `kill-pulled` and `kill-step` is the pull's own id, the name of its file in `kill.state`.
 - `kill-pulled`'s `pulled_at` is when the pull began, and its `ts` when the ledger took it, which comes after the pull's actions and may be at the resume.
 - `kill-step`'s `step` is `hold`, `stop-session`, `schedule` or `rotation`; its `target` names what the step acted on, such as the session, `timers` or the account; and its `result` is `stopped`, `turned-off`, `moved-aside`, `no-key`, `held-no-record` or `failed`.
@@ -607,7 +607,7 @@ A job that then fails, by exiting non-zero or by raising, is logged as `job-fail
 A job that keeps failing logs each time, so a charge due every five minutes can log often; the digest gives each job one line.
 A job killed by a signal, or a service that never starts, logs nothing, and only the journal has it.
 A unit carries `COMPANY_HOME`, `COMPANY_CONFIG` and `CLAUDE_CONFIG_DIR` as they stand, and the `claude` that `company schedule install` or `enable` resolved, as `COMPANY_CLAUDE_BIN`, since the user manager's own path may not have it.
-With none to carry, the command says so and writes the units all the same, and a job that starts a session is refused until it runs again with one.
+With none to carry, the command says so and writes the units all the same, and a job that starts a session looks on the user manager's own path and is refused with `no-binary` if it is not there.
 Until gate C opens the schedule, the kill switch's self-test, `company paper tick`, `company treasurer check`, `company treasurer charge`, the daily audit sample, the weekly audit pass, the batch, the strategy session and the retro run by Daniel's command.
 
 ## The six loops
@@ -869,8 +869,10 @@ The gap is known and accepted, and it is revisited at each retro.
 It refuses a run the ledger does not name, one still open, one with no transcript, and one whose transcript no longer matches the hash in its `session-ended`.
 
 - Its rubric is false statements (`false-statement`), broken promises (`broken-promise`), a result the records do not show (`unshown-result`), and a rule broken (`rule-broken`).
-- It refuses to start on `cell_model` or on the model the audited session ran on, citing the gap above; that holds for `company session start auditor` too, which is given no run and so can record no finding.
+- It refuses to start on `cell_model` or on the model the audited session ran on, citing the gap above; a model counts as the same by its family, so `opus`, `claude-opus-5-5[1m]` and `claude-opus-4-8` are all `claude-opus-5-5`'s, and that holds for `company session start auditor` too, which is given no run and so can record no finding.
 - It has read-only file tools and only its `record_finding` tool, in a fresh workspace holding `ledger.jsonl`, the whole ledger, and `transcripts/<run>.jsonl`, with the rubric in its goal text.
+  Those copies are removed when its session ends, or at the next launch if its launcher died, and the run's own record keeps the transcript.
+- A call it made to a tool outside its list is refused by `--tools`, and at the session's end the launcher logs each such call it finds in the session's output and transcript as `append-refused`, with the tool's name in lower case and the reason `tool-not-in-role`.
 - It has no web read, so it checks a citation to the ledger and not an outside URL, which Daniel checks in the batch.
 - Its findings go only to Daniel's digest and the ledger; no cell has them in its ledger view.
 - Its daily sample and weekly full pass are schedule jobs, `audit-sample` at 01:00 UTC and `audit-full` on Mondays at 02:00 UTC, so they run only once gate C opens; until then they run by Daniel's command.
@@ -879,7 +881,7 @@ It refuses a run the ledger does not name, one still open, one with no transcrip
 
 **What code confirms.**
 A finding of `unshown-result` may carry a `claim`, a reply's words and the figure in them.
-Code confirms it when those words are in the text of one of the session's replies, its reasoning not counting, the figure is in those words, and no `config-run` or `verdict` of that bet's registrations, by the session's end, shows that figure, rounded or cut to the digits reported, as itself or as a percent.
+Code confirms it when those words, as whole words and whole numbers, are in the text of one of the session's replies, its reasoning not counting, the figure is in those words, and no figure on a `config-run` or `verdict` of that bet's registrations, by the session's end, is within one unit of the last digit reported, as itself or as a percent.
 That the words report a result is still the Auditor's reading, so the pause is lifted as any other is.
 On any doubt it does not confirm, and the finding waits, since a wrong pause costs more than a wait.
 `company audit` and `company treasurer check` make this check, writing `finding-confirmed` and `cell-paused` as `treasurer`, so a check stopped part way is finished by the next.

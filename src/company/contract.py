@@ -12,6 +12,12 @@ _NAME = re.compile(r"[a-z0-9][a-z0-9_:-]{0,63}")
 _BET = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 _CELL_WRITER = "cell:<bet>"
 CELL_PREFIX = "cell:"
+
+
+def cell_writer(bet: str) -> str:
+    """The writer a cell of this bet writes as."""
+    return f"{CELL_PREFIX}{bet}"
+
 OUTSIDE_ACTIONS_SCOPE = "outside-actions"
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _DISCORD_ID = re.compile(r"[0-9]{1,32}")

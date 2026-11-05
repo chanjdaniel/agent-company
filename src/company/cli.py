@@ -42,7 +42,7 @@ def _refused_inside_a_session(ledger: Ledger, kind: str, writer: str) -> bool:
     context = {"tool": "ledger-append", **({"session": session} if contract.UUID.fullmatch(session) else {})}
     with contextlib.suppress(LedgerBroken, OSError):
         ledger.refuse(kind, writer, "inside-a-session", context)
-    print("company: refused: an agent reaches the ledger only through its company tools. Nothing was appended.", file=sys.stderr)
+    print("company: refused: an agent reaches the ledger only through its company tools. Nothing was done.", file=sys.stderr)
     return True
 
 
@@ -498,7 +498,7 @@ def _audit(args) -> int:
     if not runs:
         print("Nothing to audit: no cell's session with a transcript ended in that time.")
         return EXIT_OK
-    answer = launcher.start("auditor", scheduled=args.scheduled, audited=tuple(runs))
+    answer = launcher.start("auditor", scheduled=args.scheduled, audited_runs=tuple(runs))
     code = _session_exit(answer)
     if isinstance(answer, governor.Refused):
         return code
@@ -513,8 +513,7 @@ def _report_findings(session: str) -> None:
     except (LedgerBroken, OSError) as error:
         print(f"company: this audit's findings cannot be counted: {error}. See `company ledger verify`.", file=sys.stderr)
         return
-    began = next((event["seq"] for event in events if event["kind"] == "session-started" and event["session"] == session), len(events))
-    print(f"Findings from this audit: {sum(event['kind'] == 'finding' and event['seq'] > began for event in events)}. `company digest` shows each.")
+    print(f"Findings from this audit: {audit.findings_of(events, session)}. `company digest` shows each.")
 
 
 def _governor_check(args) -> int:
@@ -592,7 +591,7 @@ def _unit_environment() -> dict[str, str]:
     """What the units carry for a job that starts a session; with none of it, say what that job will do."""
     found = launcher.unit_environment()
     if not found:
-        print(f"company: no `claude` is on PATH here, so a job that starts a session will be refused with no-binary. Install it, or set {launcher.BINARY_VARIABLE}, and run this again.", file=sys.stderr)
+        print(f"company: {launcher.UNITS_HAVE_NO_BINARY}.", file=sys.stderr)
     return found
 
 

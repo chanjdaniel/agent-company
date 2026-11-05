@@ -85,7 +85,6 @@ _MAX_WEIGHT = "max-weight"
 _SIGNALLED = "launcher-signalled"
 _GONE = "launcher-gone"
 _KILLED = "kill-switch"
-_NO_TRANSCRIPT = "none"
 _SESSION_ENDS = ("session-ended", "session-stopped")
 
 
@@ -112,6 +111,13 @@ def binary() -> str | None:
     chosen = os.environ.get(BINARY_VARIABLE)
     found = chosen if chosen else shutil.which("claude")
     return os.path.abspath(found) if found else None
+
+
+# For a command that writes the units, and finds nothing for them to carry.
+UNITS_HAVE_NO_BINARY = (
+    f"no `claude` is on PATH here, so a job that starts a session will look on the user manager's own path, and be refused with no-binary if it is not there. "
+    f"Install it, or set {BINARY_VARIABLE}, and run this again"
+)
 
 
 def unit_environment() -> dict[str, str]:
@@ -177,21 +183,24 @@ def session_settings(workspace: Path) -> dict:
     }
 
 
-def _mcp_config(role: str, bet: str | None, session: str, backtest_seconds: float | None = None, audited: tuple[str, ...] = ()) -> dict:
+def _mcp_config(role: str, bet: str | None, session: str, backtest_seconds: float | None = None, audited_sessions: tuple[str, ...] = ()) -> dict:
     # `-P`: this starts in the workspace, and with the working directory on its path a file there could run as this code.
     arguments = ["-P", "-m", "company.tools", "--role", role, "--session", session, *(("--bet", bet) if bet else ())]
     # On the command line, as the role and bet are, so that the server needs no path to Daniel's settings.
     # A cell's server reaches the broker's bars for a registration, so it is told where the key is, and of Daniel's directory nothing more.
     arguments += ["--backtest-seconds", str(backtest_seconds), "--paper-key", str(paths.paper_key())] if backtest_seconds is not None else []
     # On the command line too, so that a finding can name only a session this Auditor was given.
-    arguments += [argument for session_audited in audited for argument in ("--audited", session_audited)]
+    arguments += [argument for audited in audited_sessions for argument in ("--audited-session", audited)]
     server = {"type": "stdio", "command": sys.executable, "args": arguments, "env": {"COMPANY_HOME": str(paths.home()), SESSION_VARIABLE: session}}
     return {"mcpServers": {"company": server}}
 
 
+def _allowed_tools(role: str) -> tuple[str, ...]:
+    return (*ROLE_BUILT_INS[role], *(f"mcp__company__{name}" for name in tools.ROLE_TOOLS[role]))
+
+
 def _command(claude: str, role: str, session: str, model: str, mcp: Path, session_file: Path) -> list[str]:
     built_in = ROLE_BUILT_INS[role]
-    company_tools = [f"mcp__company__{name}" for name in tools.ROLE_TOOLS[role]]
     # The prompt goes on stdin, so that none of these flags that take many values can swallow it.
     return [
         claude, "-p",
@@ -204,7 +213,7 @@ def _command(claude: str, role: str, session: str, model: str, mcp: Path, sessio
         "--permission-mode", "dontAsk",
         "--model", model,
         "--tools", ",".join(built_in),
-        "--allowedTools", ",".join((*built_in, *company_tools)),
+        "--allowedTools", ",".join(_allowed_tools(role)),
     ]  # fmt: skip
 
 
@@ -225,13 +234,13 @@ def _audited(runs: tuple[str, ...]) -> tuple[audit.Subject, ...]:
 
 def _check_independent(loaded: dict, model: str, given: tuple[audit.Subject, ...]) -> None:
     """The Auditor's independence is a different model and no more, so nothing short of that may start."""
-    if model not in {settings.text(loaded, "cell_model"), *(subject.model for subject in given)}:
+    if not any(audit.same_family(model, other) for other in (settings.text(loaded, "cell_model"), *(subject.model for subject in given))):
         return
     reason = (
-        f"same-model: the Auditor's model {model} is the audited cell's, and a different Claude model is the only independence it has: "
+        f"same-model: the Auditor's model {model} is the audited cell's, by name or by family, and a different Claude model is the only independence it has: "
         f'see "{audit.RECORDED_GAP}" in docs/design.md'
     )
-    raise _Refuse("model", reason, f"{settings.SET} auditor_model <a Claude model other than {model}>")
+    raise _Refuse("model", reason, f"{settings.SET} auditor_model <a Claude model of another family than {model}>")
 
 
 def _give_context(role: str, bet: str | None, workspace: Path, given: tuple[audit.Subject, ...]) -> None:
@@ -402,8 +411,8 @@ def _keep_transcript(session: str, run_dir: Path) -> tuple[str, str]:
     """Copy the transcript into the company home, where it outlives Claude Code's clean-up; its path and hash."""
     source = _transcript_source(session)
     if source is None:
-        return _NO_TRANSCRIPT, _NO_TRANSCRIPT
-    copy = run_dir / "transcript.jsonl"
+        return audit.NO_TRANSCRIPT, audit.NO_TRANSCRIPT
+    copy = run_dir / audit.TRANSCRIPT_FILE
     shutil.copyfile(source, copy)
     return str(copy), hashlib.sha256(copy.read_bytes()).hexdigest()
 
@@ -524,6 +533,16 @@ def stop_session(found: Running) -> bool:
     return stopped
 
 
+def _close_auditor(ledger: Ledger, session: str, run_dir: Path, workspace: Path, audited_runs: list | tuple) -> None:
+    """Log what an Auditor tried outside its tools, and take its copies away; a session given nothing to audit leaves its workspace as it was."""
+    lines = _lines(run_dir / "output.jsonl") + _lines(run_dir / audit.TRANSCRIPT_FILE)
+    context = {"session": session}
+    for name in audit.tools_outside(lines, _allowed_tools("auditor")):
+        ledger.refuse("tool-call", audit.AUDITOR, "tool-not-in-role", {**context, "tool": name.lower()})
+    if audited_runs:
+        audit.remove_context(workspace)
+
+
 def _close_if_gone(ledger: Ledger, started: dict) -> None:
     run_dir = paths.runs() / Path(started["run"]).name
     state = _session_state(run_dir / "session.json")
@@ -542,6 +561,8 @@ def _close_if_gone(ledger: Ledger, started: dict) -> None:
     elapsed = _elapsed_minutes(started["ts"])
     if elapsed is not None:
         fields["elapsed_minutes"] = elapsed
+    if started["role"] == audit.AUDITOR:
+        _close_auditor(ledger, started["session"], run_dir, paths.workspaces() / Path(started["run"]).name, started.get("audited_runs", ()))
     ledger.append("session-stopped", fields, "launcher")
 
 
@@ -583,7 +604,7 @@ class _Launch:
     command: list[str]
     max_minutes: Fraction
     max_weight: Fraction
-    audited: tuple[str, ...]
+    audited_runs: tuple[str, ...]
 
 
 def _prepare(admitted: governor.Admitted, prompt: str, chosen: str | None, audited_runs: tuple[str, ...]) -> _Launch:
@@ -618,8 +639,8 @@ def _prepare(admitted: governor.Admitted, prompt: str, chosen: str | None, audit
     mcp, session_file = run_dir / "mcp.json", run_dir / "settings.json"
     _write_json(mcp, _mcp_config(role, bet, session, backtest_seconds, tuple(subject.session for subject in given)))
     _write_json(session_file, session_settings(workspace))
-    told = "".join(f"\n{part}\n" for part in (audit.prompt(given) if given else "", prompt) if part)
-    (run_dir / "prompt.txt").write_text(goal.text + told)
+    task = "".join(f"\n{part}\n" for part in (audit.prompt(given) if given else "", prompt) if part)
+    (run_dir / "prompt.txt").write_text(goal.text + task)
     command = _command(claude, role, session, model, mcp, session_file)
     return _Launch(role, bet, session, run, run_dir, workspace, model, command, max_minutes, max_weight, audited_runs)
 
@@ -637,8 +658,8 @@ def _log_start(launch: _Launch, admitted: governor.Admitted) -> None:
     }
     if launch.bet:
         fields["bet"] = launch.bet
-    if launch.audited:
-        fields["audited"] = list(launch.audited)
+    if launch.audited_runs:
+        fields["audited_runs"] = list(launch.audited_runs)
     Ledger().append("session-started", fields, "launcher")
 
 
@@ -700,7 +721,7 @@ def _watch(process: subprocess.Popen, launch: _Launch, signalled: list[int]) -> 
 
 
 def _finish(launch: _Launch, process: subprocess.Popen, stopped: str | None, began: float) -> Finished:
-    transcript_path, transcript_hash = _NO_TRANSCRIPT, _NO_TRANSCRIPT
+    transcript_path, transcript_hash = audit.NO_TRANSCRIPT, audit.NO_TRANSCRIPT
     unlogged = None
     try:
         transcript_path, transcript_hash = _keep_transcript(launch.session, launch.run_dir)
@@ -709,6 +730,8 @@ def _finish(launch: _Launch, process: subprocess.Popen, stopped: str | None, beg
     weight = float(_weight(launch.session, launch.run_dir))
     ledger = Ledger()
     try:
+        if launch.role == audit.AUDITOR:
+            _close_auditor(ledger, launch.session, launch.run_dir, launch.workspace, launch.audited_runs)
         if stopped:
             elapsed = round((time.monotonic() - began) / 60, 3)
             ledger.append("session-stopped", {"session": launch.session, "reason": stopped, "elapsed_minutes": elapsed, "weight": weight}, "launcher")
@@ -747,15 +770,15 @@ def _charge_at_the_end() -> None:
         print(f"company: the charge at this session's end did not run: {error}", file=sys.stderr)
 
 
-def start(role: str, bet: str | None = None, prompt: str = "", workspace: str | None = None, scheduled: bool = False, audited: tuple[str, ...] = ()) -> Finished | governor.Refused:
-    """Run one session from admission to its end; a refused launch starts nothing. `audited` names the runs an Auditor is given."""
+def start(role: str, bet: str | None = None, prompt: str = "", workspace: str | None = None, scheduled: bool = False, audited_runs: tuple[str, ...] = ()) -> Finished | governor.Refused:
+    """Run one session from admission to its end; a refused launch starts nothing. `audited_runs` names the runs an Auditor is given."""
     with _launch_lock():
         close_gone_sessions()
         admitted = governor.admit(role, bet, scheduled)
         if isinstance(admitted, governor.Refused):
             return admitted
         try:
-            launch = _prepare(admitted, prompt, workspace, audited)
+            launch = _prepare(admitted, prompt, workspace, audited_runs)
         except _Refuse as refusal:
             return _refuse(role, bet, refusal)
         # Preparing takes seconds, and the kill switch may have been pulled since the governor looked.
