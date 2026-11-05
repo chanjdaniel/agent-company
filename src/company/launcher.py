@@ -30,6 +30,7 @@ from company import (
     governor,
     kill_state,
     paths,
+    schedule,
     settings,
     times,
     tools,
@@ -72,6 +73,7 @@ _LAUNCHER_GRACE_SECONDS = 5
 _TICK_SECONDS = 0.05
 _WEIGHT_EVERY_SECONDS = 0.5
 _HELP_TIMEOUT_SECONDS = 30
+_CHARGE_TIMEOUT_SECONDS = 120
 _FIX_LOAD_FORM = (
     "update Claude Code to a version whose help lists these flags, and check the design's form again; "
     "never load user settings in its place"
@@ -294,24 +296,25 @@ def group_alive(group: int) -> bool:
     return False
 
 
-def _gone_within(seconds: float, alive: Callable[[], bool]) -> bool:
+def _ends_within(seconds: float, holds: Callable[[], bool]) -> bool:
+    """Whether `holds` stops being true in this time."""
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        if not alive():
+        if not holds():
             return True
         time.sleep(_TICK_SECONDS)
-    return not alive()
+    return not holds()
 
 
 def stop_group(group: int) -> bool:
     """Stop a session's whole process group: ask, wait, then kill what is left; whether it has all gone."""
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(group, signal.SIGTERM)
-    if _gone_within(GRACE_SECONDS, lambda: group_alive(group)):
+    if _ends_within(GRACE_SECONDS, lambda: group_alive(group)):
         return True
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(group, signal.SIGKILL)
-    return _gone_within(_KILLED_GONE_SECONDS, lambda: group_alive(group))
+    return _ends_within(_KILLED_GONE_SECONDS, lambda: group_alive(group))
 
 
 def _transcript_source(session: str) -> Path | None:
@@ -343,11 +346,15 @@ def _keep_transcript(session: str, run_dir: Path) -> tuple[str, str]:
     return str(copy), hashlib.sha256(copy.read_bytes()).hexdigest()
 
 
+def _open_launch_lock() -> int:
+    paths.home().mkdir(parents=True, exist_ok=True, mode=0o700)
+    return os.open(paths.home() / "launch.lock", os.O_RDWR | os.O_CREAT, 0o600)
+
+
 @contextlib.contextmanager
 def _launch_lock() -> Iterator[None]:
     """One launch decides at a time, so that two cannot both spend a word's last launch."""
-    paths.home().mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(paths.home() / "launch.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fd = _open_launch_lock()
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
@@ -357,18 +364,17 @@ def _launch_lock() -> Iterator[None]:
 
 def wait_for_launches(seconds: float) -> bool:
     """Wait until no launch is deciding, so that what was admitted before a pull has started; whether that happened."""
-    paths.home().mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(paths.home() / "launch.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fd = _open_launch_lock()
+
+    def deciding() -> bool:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        return False
+
     try:
-
-        def locked() -> bool:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return True
-            return False
-
-        return _gone_within(seconds, locked)
+        return _ends_within(seconds, deciding)
     finally:
         os.close(fd)
 
@@ -381,6 +387,15 @@ def _open_sessions(events: list[dict]) -> list[dict]:
 def _elapsed_minutes(started_ts: str) -> float | None:
     started = times.parse_stamp(started_ts)
     return None if started is None else round((times.now() - started) / timedelta(minutes=1), 3)
+
+
+def _session_state(path: Path) -> dict:
+    """What a run's `session.json` says, or nothing if it says nothing usable."""
+    try:
+        state = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
 
 
 def _still_its_group(state: dict) -> bool:
@@ -409,8 +424,8 @@ def running_sessions() -> list[Running]:
     """
     found = []
     for path in paths.runs().glob("*/session.json"):
+        state = _session_state(path)
         try:
-            state = json.loads(path.read_text())
             group = state["group"] if _still_its_group(state) else None
             pid = state.get("launcher", -1)
             alive = pid != os.getpid() and _alive(pid, state.get("launcher_started"))
@@ -428,7 +443,7 @@ def stop_session(found: Running) -> bool:
     """
     stopped = found.group is None or stop_group(found.group)
     pid = found.launcher
-    if pid is not None and not _gone_within(_LAUNCHER_GRACE_SECONDS, lambda: _alive(pid, found.launcher_started)):
+    if pid is not None and not _ends_within(_LAUNCHER_GRACE_SECONDS, lambda: _alive(pid, found.launcher_started)):
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.kill(pid, signal.SIGKILL)
     return stopped
@@ -436,10 +451,7 @@ def stop_session(found: Running) -> bool:
 
 def _close_if_gone(ledger: Ledger, started: dict) -> None:
     run_dir = paths.runs() / Path(started["run"]).name
-    try:
-        state = json.loads((run_dir / "session.json").read_text())
-    except (OSError, ValueError):
-        state = {}
+    state = _session_state(run_dir / "session.json")
     if _alive(state.get("launcher", -1), state.get("launcher_started")):
         return
     # Its launcher has gone, so nothing watches its limits: it must not run on unwatched.
@@ -632,6 +644,18 @@ def _run(launch: _Launch, process: subprocess.Popen) -> Finished:
     return _finish(launch, process, stopped, began)
 
 
+def _charge_at_the_end() -> None:
+    """A session's end is when the schedule's charge is due, since the timer's next firing could fall after the window's reset.
+
+    The job makes its own check, so with the schedule off it does nothing; if this fails, the timer's next firing does the same.
+    """
+    command = [sys.executable, "-P", "-m", "company", "schedule", "run", schedule.CHARGE_JOB]
+    try:
+        subprocess.run(command, capture_output=True, timeout=_CHARGE_TIMEOUT_SECONDS, check=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"company: the charge at this session's end did not run: {error}", file=sys.stderr)
+
+
 def start(role: str, bet: str | None = None, prompt: str = "", workspace: str | None = None, scheduled: bool = False) -> Finished | governor.Refused:
     """Run one session from admission to its end; a refused launch starts nothing."""
     with _launch_lock():
@@ -659,4 +683,6 @@ def start(role: str, bet: str | None = None, prompt: str = "", workspace: str | 
                 Ledger().append("session-stopped", {"session": launch.session, "reason": "not-started"}, "launcher")
             return _refuse(role, bet, _Refuse("binary", f"no-start: `claude` could not start: {error.strerror}", f"check {launch.command[0]}"))
         _record_processes(launch, process.pid)
-    return _run(launch, process)
+    finished = _run(launch, process)
+    _charge_at_the_end()
+    return finished

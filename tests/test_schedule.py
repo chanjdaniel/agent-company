@@ -8,6 +8,7 @@ import subprocess
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from session_checks import events
 from usage_records import (
     ALPHA,
     record_reading,
@@ -18,11 +19,6 @@ from usage_records import (
 
 from company import paths, schedule
 from company.ledger import Ledger
-
-
-def events(kind=None):
-    found = Ledger().read()
-    return found if kind is None else [event for event in found if event["kind"] == kind]
 
 
 def turned_on(systemctl):
@@ -182,6 +178,26 @@ def test_a_failed_enable_turns_it_off_again_and_logs_that(company, board, system
     assert events("schedule-disabled")[-1]["reason"] == "enable-failed"
     assert "The schedule is off." in company("schedule", "list").stdout
     assert systemctl.calls()[-1].startswith("--user disable --now")
+
+
+def test_a_failed_enable_turns_the_timers_off_even_if_the_ledger_cannot_say_so(company, company_home, board, systemctl):
+    systemctl.fail("enable")
+    systemctl.after("enable", f"echo 'not a head' > '{company_home}/ledger.head'")
+
+    assert company("schedule", "enable", "--message", "1234").returncode == 1
+
+    assert systemctl.calls()[-1].startswith("--user disable --now")
+
+
+def test_a_pull_landing_during_an_enable_leaves_the_timers_off(company, company_home, board, systemctl):
+    systemctl.after("enable", f"echo '{{}}' > '{company_home}/kill.state'")
+
+    done = company("schedule", "enable", "--message", "1234")
+
+    assert done.returncode == 1
+    assert "pulled" in done.stderr
+    assert systemctl.calls()[-1].startswith("--user disable --now")
+    assert "The schedule is off." in company("schedule", "list").stdout
 
 
 def test_enable_is_refused_on_a_broken_ledger(company, company_home, board, systemctl):
@@ -385,6 +401,27 @@ def test_the_charge_runs_at_a_sessions_end(charge_job, board, transcripts):
     before = events()
     assert "not due" in charge_job().stdout
     assert events() == before
+
+
+def test_a_session_on_an_open_schedule_is_charged_as_it_ends_with_no_timer_firing(company, stub, board, on_schedule):
+    # A timer's next firing could fall after the window's reset, so the launcher does not leave this to the timer.
+    stub.play({"do": "reply", "request": "r1", "output": 50_000})
+
+    done = company("session", "start", "probe")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    started, charged = events("session-started")[-1], events("resource-charged")
+    assert [event["line"] for event in charged] == ["overhead"]
+    assert charged[-1]["seq"] > started["seq"]
+    assert charged[-1]["seq"] > events("session-ended")[-1]["seq"]
+
+
+def test_a_session_with_the_schedule_off_is_not_charged_as_it_ends(company, stub, board):
+    stub.play({"do": "reply", "request": "r1", "output": 50_000})
+
+    assert company("session", "start", "probe").returncode == 0
+
+    assert events("resource-charged") == []
 
 
 def test_the_charge_runs_for_a_session_stopped_as_well(charge_job, board, transcripts):

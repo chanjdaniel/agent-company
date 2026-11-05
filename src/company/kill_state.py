@@ -27,21 +27,21 @@ def present() -> bool:
     return True
 
 
-def read() -> dict | None:
-    """The pull's record, or None with no file; a file that is no record reads as an empty one."""
+def read() -> list[dict] | None:
+    """The record of each pull since the last resume, or None with no file; a file that is no record reads as one empty pull."""
     if not present():
         return None
     try:
-        record = json.loads(_path().read_bytes())
-    except (OSError, ValueError):
-        return {}
-    return record if isinstance(record, dict) else {}
+        pulls = json.loads(_path().read_bytes())["pulls"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return [{}]
+    return pulls if isinstance(pulls, list) and pulls and all(isinstance(pull, dict) for pull in pulls) else [{}]
 
 
-def write(record: dict) -> None:
+def write(pulls: list[dict]) -> None:
     paths.home().mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = _path().with_name("kill.state.new")
-    temporary.write_text(json.dumps(record))
+    temporary.write_text(json.dumps({"pulls": pulls}))
     temporary.replace(_path())
 
 

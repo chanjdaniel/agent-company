@@ -45,11 +45,13 @@ class Job:
         return self.due is None or self.due(events, now)
 
 
+CHARGE_JOB = "treasurer-charge"
 # Each later ticket adds its own job here, and nothing else turns one on.
 JOBS = (
     Job("kill-self-test", ("kill", "--self-test"), "daily"),
-    # Every five minutes, since a window is counted whole only by a charge after its last session and before its reset.
-    Job("treasurer-charge", ("treasurer", "charge"), "*:0/5", treasurer.charge_due),
+    # A window is counted whole only by a charge after its last session and before its reset. The launcher fires this at
+    # each session's end; the timer catches a window's last minutes, and a session whose launcher died.
+    Job(CHARGE_JOB, ("treasurer", "charge"), "*:0/5", treasurer.charge_due),
 )
 
 
@@ -133,6 +135,13 @@ def timers_off() -> int:
     return len(timers)
 
 
+def _turn_back_off(ledger: Ledger, reason: str) -> None:
+    """The timers go first, so that a ledger that cannot take the word leaves nothing on."""
+    with contextlib.suppress(ScheduleFailed):
+        timers_off()
+    ledger.append("schedule-disabled", {"reason": reason}, "board")
+
+
 def enable(message: str) -> dict:
     """Daniel's word: install what is listed, log it, and turn the timers on; a failure turns them off again and logs that."""
     ledger = Ledger()
@@ -147,10 +156,12 @@ def enable(message: str) -> dict:
     try:
         _systemctl("enable", "--now", *map(_timer_name, JOBS))
     except ScheduleFailed:
-        ledger.append("schedule-disabled", {"reason": "enable-failed"}, "board")
-        with contextlib.suppress(ScheduleFailed):
-            timers_off()
+        _turn_back_off(ledger, "enable-failed")
         raise
+    # A pull turns off what is on when it runs, so one that landed since the check above missed these.
+    if kill_state.present():
+        _turn_back_off(ledger, "kill-switch-pulled")
+        raise ScheduleRefused(f"the kill switch was pulled during this, so `{kill_state.RESUME}` comes first")
     return event
 
 

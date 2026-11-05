@@ -316,23 +316,18 @@ def _outside_accounts(settings: dict, key: str) -> None:
 
 
 def accounts_for_kill() -> tuple[list, str | None]:
-    """The accounts for the kill switch to rotate, and what is wrong with the file they came from.
+    """The accounts for the kill switch to rotate, as the file stands, and why there are none if it cannot be read.
 
-    A pull must not be stopped by the very tamper it may be answering, so a file that fails its digest, or a ledger that
-    cannot say, still gives its list as it stands, and each entry is checked. It can name only files in this directory.
+    This takes no lock and asks no ledger, since a pull must not wait on either, nor be stopped by the very tamper it may
+    be answering. So each entry is checked by `account_problem`, and can name only files in this directory.
     """
-    problem = None
-    try:
-        return load().get("outside_accounts", []), None
-    except SettingsMissing:
-        return [], None
-    except (SettingsRefused, LedgerBroken, OSError) as error:
-        problem = f"the settings are not checked, so their list is used as it stands: {error}"
     try:
         value = json.loads(_path().read_bytes()).get("outside_accounts", [])
+    except FileNotFoundError:
+        return [], None
     except (OSError, ValueError, AttributeError) as error:
-        return [], f"{problem}; and it cannot be read: {error}"
-    return (value, problem) if isinstance(value, list) else ([], problem)
+        return [], f"the settings cannot be read, so no account was rotated: {error}"
+    return (value, None) if isinstance(value, list) else ([], "the settings hold no list of outside accounts, so none was rotated")
 
 
 # Every setting the file may hold, with what `init` and `set` check it by.

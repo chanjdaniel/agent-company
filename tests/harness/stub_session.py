@@ -97,12 +97,17 @@ class Systemctl:
         binary.write_text(
             "#!/bin/sh\n"
             f"printf '%s\\n' \"$*\" >> {here}/calls\n"
+            f'if [ -e {here}/after-"$2" ]; then . {here}/after-"$2"; fi\n'
             f'if [ -e {here}/fail-"$2" ]; then echo "$2 failed" >&2; exit 1; fi\n'
         )
         binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
 
     def fail(self, verb):
         (self.directory / f"fail-{verb}").touch()
+
+    def after(self, verb, shell):
+        """Run this shell text when `verb` is called, as something happening at that moment would."""
+        (self.directory / f"after-{verb}").write_text(shell + "\n")
 
     def calls(self):
         path = self.directory / "calls"

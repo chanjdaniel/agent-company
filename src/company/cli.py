@@ -367,7 +367,11 @@ def _kill(args) -> int:
     for step in pulled.steps:
         print(f"{step.step} {step.target}: {step.result}" + (f" ({step.detail})" if step.detail else ""))
     if pulled.unlogged:
-        print(f"company: {pulled.unlogged}. The company home's kill file holds the record until `company resume`.", file=sys.stderr)
+        print(f"company: {pulled.unlogged}.", file=sys.stderr)
+    if pulled.unkept:
+        print(f"company: {pulled.unkept}.", file=sys.stderr)
+    elif pulled.unlogged:
+        print("The company home's kill file holds the record, and `company resume` writes it.", file=sys.stderr)
     print("Every launch is refused until `company resume`.")
     return EXIT_OK if pulled.clean else EXIT_REFUSED
 
@@ -380,12 +384,14 @@ def _resume(args) -> int:
     except (killswitch.ResumeRefused, AppendRefused, LedgerBroken, OSError) as refused:
         print(f"company: refused: {refused}. Nothing was resumed.", file=sys.stderr)
         return EXIT_REFUSED
-    print(f"Resumed: {len(resumed)} pull closed, and launches may start again.")
+    print(f"Resumed: pulls closed, {len(resumed)}; launches may start again.")
     print(f"The schedule stays off until `{schedule.ENABLE}`, and a key moved aside stays moved until you regenerate it.")
     return EXIT_OK
 
 
 def _schedule_install(args) -> int:
+    if _refused_inside_a_session(Ledger(), "schedule-install", "board"):
+        return EXIT_REFUSED
     try:
         schedule.install()
     except schedule.ScheduleFailed as failed:
@@ -412,6 +418,8 @@ def _schedule_enable(args) -> int:
 
 
 def _schedule_disable(args) -> int:
+    if _refused_inside_a_session(Ledger(), "schedule-disabled", "board"):
+        return EXIT_REFUSED
     try:
         event = schedule.disable(args.reason)
     except schedule.ScheduleFailed as failed:

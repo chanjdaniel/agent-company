@@ -1,8 +1,8 @@
 """The kill switch: `pull` stops every session, turns off the schedule and rotates each outside account.
 
-Every action comes before any ledger write, and each failure is a reported step that stops nothing else, since a pull
-has to work when the ledger cannot: `Ledger.append` raises on a broken end.
-What the ledger could not take stays in the kill file, and `resume` writes it once the ledger can.
+Every action comes before any ledger write, and takes no lock of the ledger's, and each failure is a reported step that
+stops nothing else, since a pull has to work when the ledger cannot: `Ledger.append` raises on a broken end.
+What the ledger has not taken stays in the kill file, step by step, and `resume` writes it before it lifts the hold.
 """
 
 import contextlib
@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -23,13 +24,20 @@ from pathlib import Path
 from company import kill_state, launcher, schedule, settings, times
 from company.ledger import AppendRefused, Ledger, LedgerBroken
 
+HOLD = "hold"
+STOP_SESSION = "stop-session"
+SCHEDULE = "schedule"
+ROTATION = "rotation"
+
 STOPPED = "stopped"
 FAILED = "failed"
 TURNED_OFF = "turned-off"
 MOVED_ASIDE = "moved-aside"
 NO_KEY = "no-key"
 _UNNAMED = "<unnamed>"
+_UNKNOWN = "unknown"
 _LAUNCH_WAIT_SECONDS = 60
+_LEDGER_WAIT_SECONDS = 30
 _RECORD_FAILURES = (AppendRefused, LedgerBroken, OSError, ValueError, KeyError)
 
 
@@ -48,19 +56,30 @@ class Step:
 
 @dataclass(frozen=True)
 class Pulled:
-    """What a pull did. `seq` is its `kill-pulled`, and `unlogged` what the ledger could not take."""
+    """What a pull did. `seq` is its `kill-pulled`; `unlogged` is what the ledger has not taken, and `unkept` why the file could not hold it."""
 
     steps: tuple[Step, ...]
     seq: int | None
     unlogged: str | None
+    unkept: str | None
 
     @property
     def clean(self) -> bool:
-        return self.unlogged is None and all(step.result != FAILED for step in self.steps)
+        return self.unlogged is None and self.unkept is None and all(step.result != FAILED for step in self.steps)
 
 
 class ResumeRefused(Exception):
     """Nothing was resumed, and the hold stands if there was one."""
+
+
+def _leave_a_sessions_group() -> None:
+    """A company tool runs in its session's process group, which the pull signals, so a pull from there steps out first.
+
+    Whatever calls this then finishes the pull, and the tool's server ends on its own when its session's end closes its input.
+    """
+    with contextlib.suppress(OSError):
+        if any(found.group == os.getpgrp() for found in launcher.running_sessions()):
+            os.setsid()
 
 
 def _stop_sweep() -> list[Step]:
@@ -68,9 +87,9 @@ def _stop_sweep() -> list[Step]:
     for found in launcher.running_sessions():
         try:
             stopped = launcher.stop_session(found)
-            steps.append(Step("stop-session", found.session, STOPPED if stopped else FAILED, None if stopped else "something is still running in its process group"))
+            steps.append(Step(STOP_SESSION, found.session, STOPPED if stopped else FAILED, None if stopped else "something is still running in its process group"))
         except Exception as error:  # noqa: BLE001 - one session's failure must not spare the next.
-            steps.append(Step("stop-session", found.session, FAILED, str(error)))
+            steps.append(Step(STOP_SESSION, found.session, FAILED, str(error)))
     return steps
 
 
@@ -78,25 +97,23 @@ def _last_sweep() -> list[Step]:
     """Wait out any launch admitted before the pull, and stop what it started; the launch also stops itself on the file."""
     steps = []
     if not launcher.wait_for_launches(_LAUNCH_WAIT_SECONDS):
-        steps.append(Step("stop-session", "launch-lock", FAILED, "a launch still holds its lock, and stops itself on the kill file when it starts"))
-    steps += _stop_sweep()
-    launcher.close_gone_sessions()
-    return steps
+        steps.append(Step(STOP_SESSION, "launch-lock", FAILED, "a launch still holds its lock, and stops itself on the kill file when it starts"))
+    return steps + _stop_sweep()
 
 
 def _schedule_off() -> list[Step]:
-    return [Step("schedule", "timers", TURNED_OFF, f"{schedule.timers_off()} installed")]
+    return [Step(SCHEDULE, "timers", TURNED_OFF, f"{schedule.timers_off()} installed")]
 
 
 def _move_key(account: dict) -> Step:
-    """The key file goes aside, so nothing can use it, and only Daniel can regenerate it at the broker."""
+    """The key file goes aside, so nothing can use it, and only Daniel can regenerate it at the provider."""
     source = settings.key_path(account)
     aside = source.with_name(f"{source.name}.revoked-{times.now().strftime('%Y%m%dT%H%M%SZ')}")
     try:
         source.rename(aside)
     except FileNotFoundError:
-        return Step("rotation", account["name"], NO_KEY, f"{source} is not there, so nothing can use it")
-    return Step("rotation", account["name"], MOVED_ASIDE, f"moved to {aside.name}: regenerate the key at the provider")
+        return Step(ROTATION, account["name"], NO_KEY, f"{source} is not there, so nothing can use it")
+    return Step(ROTATION, account["name"], MOVED_ASIDE, f"moved to {aside.name}: regenerate the key at the provider")
 
 
 _ROTATIONS: dict[str, Callable[[dict], Step]] = {settings.MOVE_KEY: _move_key}
@@ -107,16 +124,16 @@ def _rotate(account) -> Step:
     target = target if isinstance(target, str) and target else _UNNAMED
     problem = settings.account_problem(account)
     if problem:
-        return Step("rotation", target, FAILED, problem)
+        return Step(ROTATION, target, FAILED, problem)
     try:
         return _ROTATIONS[account["rotation"]](account)
     except Exception as error:  # noqa: BLE001 - one account's failure must not spare the next.
-        return Step("rotation", target, FAILED, str(error))
+        return Step(ROTATION, target, FAILED, str(error))
 
 
 def _rotate_accounts() -> list[Step]:
     accounts, problem = settings.accounts_for_kill()
-    return [*([Step("rotation", "settings", FAILED, problem)] if problem else []), *map(_rotate, accounts)]
+    return [*([Step(ROTATION, "settings", FAILED, problem)] if problem else []), *map(_rotate, accounts)]
 
 
 def _attempt(step: str, target: str, action: Callable[[], list[Step]]) -> list[Step]:
@@ -126,77 +143,111 @@ def _attempt(step: str, target: str, action: Callable[[], list[Step]]) -> list[S
         return [Step(step, target, FAILED, str(error))]
 
 
-def _record(record: dict, steps: list[Step]) -> tuple[int | None, str | None]:
-    """Write the pull in the ledger, and keep in the file how far that got."""
-    seq = record.get("seq")
-    fields = {key: record[key] for key in ("by", "reason", "loop") if key in record}
+def _settings_step() -> list[Step]:
+    """Whether the list just used is the one Daniel wrote; this reads the ledger, so it comes after every action."""
+    try:
+        settings.load()
+    except settings.SettingsMissing:
+        return []
+    except (settings.SettingsRefused, LedgerBroken, OSError) as error:
+        return [Step(ROTATION, "settings", FAILED, f"the settings are not checked, so their list was used as it stands: {error}")]
+    return []
+
+
+def _note_schedule_off(ledger: Ledger, seq: int) -> None:
+    if schedule.enabled(ledger.read()):
+        ledger.append("schedule-disabled", {"reason": f"kill-switch: event {seq}"}, "killswitch")
+
+
+def _pull_fields(record: dict) -> dict:
+    """The record as `kill-pulled` holds it; a file that was no record still gets its pull written."""
+    optional = {key: record[key] for key in ("pulled_at", "loop") if key in record}
+    return {"by": record.get("by", _UNKNOWN), "reason": record.get("reason", _UNKNOWN), **optional}
+
+
+def _record(record: dict) -> str | None:
+    """Write what the ledger lacks of this pull, noting in `record` how far it got, so that this is safe to run again."""
     try:
         ledger = Ledger()
-        if seq is None:
-            seq = ledger.append("kill-pulled", fields, "killswitch")["seq"]
-        for step in steps:
-            ledger.append("kill-step", step.fields(), "killswitch")
-        if schedule.enabled(ledger.read()):
-            ledger.append("schedule-disabled", {"reason": f"kill-switch: event {seq}"}, "killswitch")
+        if record.get("seq") is None:
+            record["seq"] = ledger.append("kill-pulled", _pull_fields(record), "killswitch")["seq"]
+        steps = record.get("steps", [])
+        for fields in steps[record.get("logged", 0) :]:
+            ledger.append("kill-step", fields, "killswitch")
+            record["logged"] = record.get("logged", 0) + 1
+        _note_schedule_off(ledger, record["seq"])
     except _RECORD_FAILURES as error:
-        return seq, f"the ledger could not take the pull: {error}"
-    return seq, None
+        return f"the ledger could not take the pull: {error}"
+    return None
 
 
-def _keep(record: dict) -> str | None:
+def _keep(pulls: list[dict]) -> str | None:
     try:
-        kill_state.write(record)
-    except OSError as error:
+        kill_state.write(pulls)
+    # A write-up still waiting on the ledger's lock may change a record while this reads it.
+    except (OSError, RuntimeError) as error:
         return f"the kill file could not be written: {error}"
     return None
 
 
+def _write_up(pulls: list[dict], record: dict, steps: list[Step]) -> str | None:
+    """Everything after the actions that needs the ledger, whose lock may be held for good by something frozen."""
+    launcher.close_gone_sessions()
+    found = _settings_step()
+    steps.extend(found)
+    record["steps"].extend(step.fields() for step in found)
+    return next((problem for problem in map(_record, pulls) if problem), None)
+
+
+def _within(seconds: float, work: Callable[[], str | None]) -> str | None:
+    """Run `work` and give its answer, or say that it has not answered; it goes on in the background meanwhile."""
+    answers: list[str | None] = []
+    thread = threading.Thread(target=lambda: answers.append(work()), daemon=True)
+    thread.start()
+    thread.join(seconds)
+    return answers[0] if answers else f"the ledger did not answer in {seconds} seconds, so its lock is held"
+
+
 def pull(by: str, reason: str, loop: str | None = None) -> Pulled:
     """Stop everything now, and hold every launch until `resume`; a loop's red line calls this, and names itself."""
-    record = {"by": by, "reason": reason, "at": times.stamp(times.now()), **({"loop": loop} if loop else {})}
-    kept = _keep(record)
-    steps = [Step("hold", "kill-file", FAILED, kept)] if kept else []
-    steps += _attempt("stop-session", "sessions", _stop_sweep)
-    steps += _attempt("schedule", "timers", _schedule_off)
-    steps += _attempt("rotation", "settings", _rotate_accounts)
+    _leave_a_sessions_group()
+    record: dict = {"by": by, "reason": reason, "pulled_at": times.stamp(times.now()), **({"loop": loop} if loop else {}), "steps": []}
+    pulls = [*(kill_state.read() or []), record]
+    held = _keep(pulls)
+    steps = [Step(HOLD, "kill-file", FAILED, held)] if held else []
+    steps += _attempt(STOP_SESSION, "sessions", _stop_sweep)
+    steps += _attempt(SCHEDULE, "timers", _schedule_off)
+    steps += _attempt(ROTATION, "settings", _rotate_accounts)
     # Last, since this may wait for a launch that is still deciding, and nothing above should wait with it.
-    steps += _attempt("stop-session", "sessions", _last_sweep)
-    seq, unlogged = _record(record, steps)
-    kept = _keep({**record, "seq": seq, "unlogged": unlogged, "steps": [step.fields() for step in steps]})
-    return Pulled(tuple(steps), seq, unlogged or kept)
-
-
-def _late_fields(record: dict) -> dict:
-    """A pull's record, when the ledger takes it only at the resume, saying when it really happened."""
-    by = record.get("by") if isinstance(record.get("by"), str) else "unknown"
-    reason = record.get("reason") if isinstance(record.get("reason"), str) else "unknown"
-    at = record.get("at", "an unknown time")
-    return {**record, "by": by, "reason": f"{reason} (pulled at {at}, and logged at the resume)"}
-
-
-def _late_steps(record: dict) -> list[Step]:
-    steps = record.get("steps")
-    if not isinstance(steps, list):
-        return []
-    return [Step(**step) for step in steps if isinstance(step, dict) and {"step", "target", "result"} <= set(step) <= {"step", "target", "result", "detail"}]
+    steps += _attempt(STOP_SESSION, "sessions", _last_sweep)
+    record["steps"] = [step.fields() for step in steps]
+    _keep(pulls)
+    unlogged = _within(_LEDGER_WAIT_SECONDS, lambda: _write_up(pulls, record, steps))
+    return Pulled(tuple(steps), record.get("seq"), unlogged, _keep(pulls))
 
 
 def resume(message: str | None = None) -> list[dict]:
-    """Daniel's word: close every open pull, and clear the hold; the schedule stays off, and a moved key stays moved."""
+    """Daniel's word: write what the ledger lacks, close every open pull, and clear the hold.
+
+    The schedule stays off, and a moved key stays moved.
+    """
     ledger = Ledger()
-    verification = ledger.verify()
-    if not verification.ok:
+    if not ledger.verify().ok:
         raise ResumeRefused("the ledger is broken, so see `company ledger verify`; the hold stands")
-    record = kill_state.read()
-    if record is not None and record.get("seq") is None:
-        _, unlogged = _record(_late_fields(record), _late_steps(record))
+    records = kill_state.read()
+    for record in records or []:
+        unlogged = _record(record)
         if unlogged:
+            with contextlib.suppress(OSError):
+                kill_state.write(records or [])
             raise ResumeRefused(f"{unlogged}; the hold stands")
     pulls = kill_state.open_pulls(ledger.read())
-    if not pulls and record is None:
+    if not pulls and records is None:
         raise ResumeRefused("the kill switch is not pulled")
+    if pulls:
+        _note_schedule_off(ledger, pulls[-1]["seq"])
     fields = {"message": message} if message else {}
-    resumed = [ledger.append("resumed", {"kill_seq": pull_event["seq"], **fields}, "board") for pull_event in pulls]
+    resumed = [ledger.append("resumed", {"kill_seq": event["seq"], **fields}, "board") for event in pulls]
     kill_state.clear()
     return resumed
 
@@ -341,9 +392,14 @@ def _run_self_test(root: Path) -> list[Check]:
         group = pids[0]
         return [Check("a stub session started with a child", True), *_kill_checks(root, company, group, launch)]
     finally:
+        # A signal first, since a launcher that is told stops its session, however far that session got.
         if launch.poll() is None:
-            launch.kill()
-            launch.wait()
+            launch.terminate()
+            try:
+                launch.wait(_TEST_WAIT_SECONDS)
+            except subprocess.TimeoutExpired:
+                launch.kill()
+                launch.wait()
         if group is not None and launcher.group_alive(group):
             with contextlib.suppress(OSError):
                 os.killpg(group, signal.SIGKILL)

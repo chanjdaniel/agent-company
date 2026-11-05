@@ -1,6 +1,7 @@
 """`company kill` and `company resume`: everything stops at once, and nothing starts until Daniel says so.
 
 Each test runs the installed command on the real clock, with the stub session and a stub `systemctl`.
+A loop's red line is code, so those tests call `killswitch.pull` as a loop will, and so do the few that need a shorter wait.
 """
 
 import contextlib
@@ -15,33 +16,13 @@ import time
 from pathlib import Path
 
 import pytest
+from session_checks import events, pid_is_running, wait_for
+from usage_records import TEAM, start_session
 
 from company import killswitch, launcher, paths, settings
 from company.ledger import Ledger
 
 COMPANY = Path(sys.executable).parent / "company"
-
-
-def events(kind=None):
-    found = Ledger().read()
-    return found if kind is None else [event for event in found if event["kind"] == kind]
-
-
-def wait_for(condition, seconds=20):
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        if condition():
-            return
-        time.sleep(0.02)
-    raise AssertionError("it did not happen in time")
-
-
-def pid_is_running(pid):
-    try:
-        text = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:
-        return False
-    return text.rsplit(")", 1)[1].split()[0] != "Z"
 
 
 def progress(stub, key):
@@ -98,7 +79,7 @@ def test_the_ledger_says_who_pulled_it_and_each_steps_result(company, running):
     assert pulled[0]["by"] == "daniel"
     assert pulled[0]["reason"] == "it looks wrong"
     assert pulled[0]["writer"] == "killswitch"
-    assert pulled[0]["ts"]
+    assert pulled[0]["pulled_at"] <= pulled[0]["ts"]
     assert "loop" not in pulled[0]
     session = events("session-started")[-1]["session"]
     assert step(session)["step"] == "stop-session"
@@ -275,7 +256,7 @@ def test_a_ledger_event_alone_holds_every_launch_even_with_the_file_gone(company
 
 
 def test_the_file_alone_holds_every_launch_when_the_ledger_could_not_take_the_pull(company, board):
-    (paths.home() / "kill.state").write_text(json.dumps({"by": "daniel", "reason": "r", "at": "2026-11-05T00:00:00Z", "steps": []}))
+    (paths.home() / "kill.state").write_text(json.dumps({"pulls": [{"by": "daniel", "reason": "r", "pulled_at": "2026-11-05T00:00:00Z", "steps": []}]}))
 
     assert "kill check" in company("governor", "check", "probe").stdout
 
@@ -352,7 +333,7 @@ def test_a_session_cannot_pull_or_resume_it(company, board, monkeypatch):
     monkeypatch.setenv("COMPANY_SESSION", "aaaaaaaa-0000-4000-8000-000000000000")
     before = events("resumed")
 
-    for args in (("resume",), ("kill",), ("schedule", "enable", "--message", "1")):
+    for args in (("resume",), ("kill",), ("schedule", "enable", "--message", "1"), ("schedule", "disable"), ("schedule", "install")):
         done = company(*args)
         assert done.returncode == 1, args
         assert "Nothing" in done.stderr
@@ -360,7 +341,7 @@ def test_a_session_cannot_pull_or_resume_it(company, board, monkeypatch):
     monkeypatch.delenv("COMPANY_SESSION")
     assert events("resumed") == before
     assert len(events("kill-pulled")) == 1
-    assert [event["attempted_kind"] for event in events("append-refused")] == ["resumed", "kill-pulled", "schedule-enabled"]
+    assert [event["attempted_kind"] for event in events("append-refused")] == ["resumed", "kill-pulled", "schedule-enabled", "schedule-disabled", "schedule-install"]
 
 
 # The schedule, from the kill switch
@@ -558,7 +539,7 @@ def test_it_stops_sessions_on_a_broken_ledger(company, company_home, stub, board
     assert not key_of("paper").exists()
     assert "could not take" in done.stderr
     assert "stop-session" in done.stdout
-    record = json.loads((company_home / "kill.state").read_text())
+    record = json.loads((company_home / "kill.state").read_text())["pulls"][-1]
     assert record["by"] == "daniel"
     assert record["reason"] == "with a broken ledger"
     assert {entry["step"] for entry in record["steps"]} >= {"stop-session", "schedule", "rotation"}
@@ -590,11 +571,160 @@ def test_the_resume_writes_what_the_ledger_could_not_take_at_the_pull(company, c
     pulled = events("kill-pulled")
     assert len(pulled) == 1
     assert pulled[0]["by"] == "daniel"
-    assert "cut" in pulled[0]["reason"]
-    assert "logged at the resume" in pulled[0]["reason"]
+    assert pulled[0]["reason"] == "cut"
+    assert pulled[0]["pulled_at"] <= pulled[0]["ts"]
     assert step("paper")["result"] == "moved-aside"
     assert events("resumed")[-1]["kill_seq"] == pulled[0]["seq"]
     assert not (company_home / "kill.state").exists()
+
+
+def test_a_resume_writes_no_step_a_second_time(company, board):
+    set_accounts(company, "paper")
+    key_of("paper").write_text("k")
+    company("kill")
+
+    assert company("resume").returncode == 0
+
+    assert len(events("kill-pulled")) == 1
+    assert step("paper")["result"] == "moved-aside"
+    assert step("timers")["result"] == "turned-off"
+
+
+def test_with_no_settings_file_there_is_nothing_to_rotate_and_no_failure(company):
+    done = company("kill")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert [event["step"] for event in events("kill-step")] == ["schedule"]
+
+
+def test_a_settings_file_that_cannot_be_read_is_reported_and_stops_nothing_else(company, stub, board):
+    launch = hung_session(stub)
+    (paths.config() / "settings.json").write_text("not json")
+
+    done = company("kill")
+
+    assert done.returncode == 1
+    assert "cannot be read" in done.stdout
+    assert not pid_is_running(progress(stub, "hanging"))
+    assert step("timers")["result"] == "turned-off"
+    launch.communicate(timeout=30)
+
+
+def test_a_ledger_that_stops_part_way_through_a_pull_gets_the_rest_at_the_resume(company, board, systemctl, monkeypatch):
+    # It took `kill-pulled` and no more, so the schedule's word in the ledger still said on.
+    assert company("schedule", "enable", "--message", "1234").returncode == 0
+    set_accounts(company, "paper")
+    key_of("paper").write_text("k")
+    real = Ledger.append
+
+    def full_after_the_first(self, kind, fields, writer, refusal_context=None):
+        if kind == "kill-step":
+            raise OSError("no space left")
+        return real(self, kind, fields, writer, refusal_context)
+
+    monkeypatch.setattr(Ledger, "append", full_after_the_first)
+    pulled = killswitch.pull("daniel", "part way")
+    monkeypatch.setattr(Ledger, "append", real)
+    assert "could not take" in pulled.unlogged
+    assert events("kill-step") == []
+
+    done = company("resume")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert len(events("kill-pulled")) == 1
+    assert step("paper")["result"] == "moved-aside"
+    assert step("timers")["result"] == "turned-off"
+    assert "The schedule is off." in company("schedule", "list").stdout
+    assert "schedule-off" in company("session", "start", "probe", "--scheduled").stdout
+
+
+def test_a_second_pull_on_a_broken_ledger_keeps_the_first_ones_record(company, company_home, board):
+    ledger, head = company_home / "ledger.jsonl", company_home / "ledger.head"
+    kept = ledger.read_bytes(), head.read_bytes()
+    head.write_text("not a head")
+    company("kill", "--reason", "first")
+    company("kill", "--reason", "second")
+    ledger.write_bytes(kept[0])
+    head.write_bytes(kept[1])
+
+    assert company("resume").returncode == 0
+
+    assert [event["reason"] for event in events("kill-pulled")] == ["first", "second"]
+    assert sorted(event["kill_seq"] for event in events("resumed")) == [event["seq"] for event in events("kill-pulled")]
+
+
+def test_a_resume_with_the_file_gone_still_leaves_the_schedule_off(company, company_home, board, systemctl, monkeypatch):
+    assert company("schedule", "enable", "--message", "1234").returncode == 0
+    real = Ledger.append
+
+    def no_steps(self, kind, fields, writer, refusal_context=None):
+        if kind == "kill-step":
+            raise OSError("no space left")
+        return real(self, kind, fields, writer, refusal_context)
+
+    monkeypatch.setattr(Ledger, "append", no_steps)
+    killswitch.pull("daniel", "part way")
+    monkeypatch.setattr(Ledger, "append", real)
+    (company_home / "kill.state").unlink()
+
+    assert company("resume").returncode == 0
+
+    assert "The schedule is off." in company("schedule", "list").stdout
+
+
+def test_a_frozen_lock_on_the_ledger_stops_no_action_and_the_pull_still_reports(company, board, systemctl, stub):
+    # Something holds the ledger's lock and never lets go, so a pull that waited for it would never move the key.
+    assert company("schedule", "enable", "--message", "1234").returncode == 0
+    set_accounts(company, "paper")
+    key_of("paper").write_text("k")
+    launch = hung_session(stub)
+    code = (
+        "from company import killswitch\n"
+        "killswitch._LEDGER_WAIT_SECONDS = 1\n"
+        "pulled = killswitch.pull('daniel', 'a frozen lock')\n"
+        "print(pulled.unlogged)\n"
+    )
+    lock = os.open(paths.home() / "ledger.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        # The launcher's end is the one write that can get ahead of this: it waits on the lock, and is killed in time.
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60, check=False)
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert "did not answer" in done.stdout
+        assert not key_of("paper").exists()
+        assert not pid_is_running(progress(stub, "hanging"))
+        assert any(call.startswith("--user disable --now") for call in systemctl.calls())
+    finally:
+        os.close(lock)
+    launch.communicate(timeout=30)
+    assert (paths.home() / "kill.state").exists()
+    record = json.loads((paths.home() / "kill.state").read_text())["pulls"][-1]
+    assert record["reason"] == "a frozen lock"
+
+
+def test_one_unreadable_session_record_spares_no_other_session(company, company_home, stub, board):
+    launch = hung_session(stub)
+    # The launcher died, so only the kill command can stop what it left.
+    launch.kill()
+    launch.communicate()
+    for name, text in (("a-list", "[]"), ("not-json", "{"), ("no-session", '{"group": 1}')):
+        (paths.runs() / name).mkdir()
+        (paths.runs() / name / "session.json").write_text(text)
+
+    done = company("kill")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert not any(pid_is_running(pid) for pid in [progress(stub, "hanging"), *progress(stub, "children")])
+
+
+def test_the_next_launch_is_not_stopped_by_an_unreadable_session_record(company, stub, board):
+    stub.play()
+    (paths.runs() / "a-list").mkdir(parents=True)
+    (paths.runs() / "a-list" / "session.json").write_text("[]")
+    start_session(TEAM, "probe", board)
+    Ledger().append("session-stopped", {"session": TEAM, "reason": "x"}, "launcher")
+
+    assert company("session", "start", "probe").returncode == 0
 
 
 # A loop's red line
@@ -631,6 +761,27 @@ def test_the_launcher_that_finished_a_session_can_pull_it_at_once(stub, board):
     assert done.returncode == 0, done.stdout + done.stderr
     assert time.monotonic() - began < 5, "it waited for itself"
     assert events("kill-pulled")[-1]["loop"] == "first-run"
+
+
+def test_a_pull_from_inside_a_sessions_own_group_finishes_every_step(company, stub, board, systemctl):
+    # A company tool runs in its session's group, and a pull signals that group, so it must step out first.
+    assert company("schedule", "enable", "--message", "1234").returncode == 0
+    set_accounts(company, "paper")
+    key_of("paper").write_text("k")
+    code = "from company import killswitch\nkillswitch.pull('a-tool', 'crossed a line', loop='honesty')\n"
+    environment = {name: os.environ[name] for name in ("COMPANY_HOME", "COMPANY_CONFIG", "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR", "HOME")}
+    environment["PATH"] = os.environ["PATH"]
+    stub.play({"do": "children", "count": 1}, {"do": "run", "command": [sys.executable, "-c", code], "env": environment}, {"do": "hang"})
+
+    done = company("session", "start", "probe")
+
+    assert done.returncode == 1
+    wait_for(lambda: any(event["kind"] == "kill-step" and event["step"] == "rotation" for event in events()))
+    wait_for(lambda: events("schedule-disabled"))
+    assert events("kill-pulled")[-1]["loop"] == "honesty"
+    assert step("paper")["result"] == "moved-aside"
+    assert not key_of("paper").exists()
+    assert not pid_is_running(progress(stub, "children")[0])
 
 
 # The self-test
