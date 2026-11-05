@@ -403,8 +403,10 @@ def test_the_charge_runs_at_a_sessions_end(charge_job, board, transcripts):
     assert events() == before
 
 
-def test_a_session_on_an_open_schedule_is_charged_as_it_ends_with_no_timer_firing(company, stub, board, on_schedule):
+def test_a_session_on_an_open_schedule_is_charged_as_it_ends_with_no_timer_firing(company, stub, board, on_schedule, transcripts):
     # A timer's next firing could fall after the window's reset, so the launcher does not leave this to the timer.
+    # Weight up to the reading, or a reply that falls in a later second than the reading leaves the share unreadable.
+    company_used_in_week(transcripts)
     stub.play({"do": "reply", "request": "r1", "output": 50_000})
 
     done = company("session", "start", "probe")
