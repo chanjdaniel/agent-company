@@ -2,7 +2,8 @@
 
 The company tools call this, so it runs in their process, outside the session's sandbox, where the agent's shell cannot reach.
 A strategy is code a cell wrote, so it runs in its own `bwrap` with no network, no writes and a time limit, and there is no other way to run one.
-It is given the in-sample bars one at a time, and the holdout never leaves this process: nothing here passes a holdout bar on.
+A backtest gives it the in-sample bars one at a time. Only the Treasurer's verdict gives it the holdout's too, once per registration,
+and what comes back of those is a run's figures, never its returns or a word the strategy wrote.
 """
 
 import contextlib
@@ -23,7 +24,7 @@ from datetime import date
 from pathlib import Path
 from typing import IO
 
-from company import paths
+from company import paths, treasurer
 from company.ledger import Ledger
 
 # Fixed, so that the sandbox's binary never comes from a path a caller chose. A test replaces this.
@@ -51,6 +52,8 @@ _OK, _FAILED = "ok", "failed"
 _TIMED_OUT = "timed-out"
 _ENDED = "ended-early"
 _BAD_OUTPUT = "bad-output"
+_NOT_FINITE = "not-finite"
+_LEDGER_ONLY = ("seq", "ts", "kind", "writer", "prev")
 
 
 class Refused(Exception):
@@ -62,7 +65,7 @@ class Refused(Exception):
 
 
 class Logged(Exception):
-    """A backtest of a registration did not run, and event `seq`, a `config-refused`, says why."""
+    """A run of a registration's configuration did not happen, and event `seq`, a `config-refused`, says why."""
 
     def __init__(self, reason: str, seq: int):
         super().__init__(reason)
@@ -460,22 +463,29 @@ def _run_once(configuration: _Configuration, registration: dict, bars: list[dict
         positions = _play(configuration, bars[:-1], registration["universe"], seconds)
     except _StrategyFailed as failed:
         return {"status": _FAILED, "failure": str(failed)[:MAX_FAILURE_CHARACTERS]}
-    cost = (registration["cost_model"]["bps_per_turnover"] + registration["slippage_model"]["bps_per_turnover"]) * _BASIS_POINT
-    measures = _measures(_returns(bars, positions, cost))
+    measures = _measures(_returns(bars, positions, _cost_per_turnover(registration)))
     if measures is None:
-        return {"status": _FAILED, "failure": "not-finite"}
+        return {"status": _FAILED, "failure": _NOT_FINITE}
     return {"status": _OK, **measures}
+
+
+def _cost_per_turnover(registration: dict) -> float:
+    return (registration["cost_model"]["bps_per_turnover"] + registration["slippage_model"]["bps_per_turnover"]) * _BASIS_POINT
 
 
 def _answer(run: dict, registration: dict, repeat: bool) -> dict:
     """What the cell is told of a run: the record's own numbers, all of them from the in-sample bars."""
-    ledger_only = ("seq", "ts", "kind", "writer", "prev")
     return {
         "event": run["seq"],
         "repeat": repeat,
         "budget": registration["max_configurations"],
-        **{name: value for name, value in run.items() if name not in ledger_only},
+        **{name: value for name, value in run.items() if name not in _LEDGER_ONLY},
     }
+
+
+def _refusal(ledger: Ledger, registration_seq: int, identity: str, reason: str) -> Logged:
+    fields = {"registration_seq": registration_seq, "config_hash": identity, "reason": reason}
+    return Logged(reason, ledger.append("config-refused", fields, "runner")["seq"])
 
 
 def run(arguments: dict, writer: str, seconds: float) -> dict:
@@ -497,8 +507,7 @@ def run(arguments: dict, writer: str, seconds: float) -> dict:
         seq = registration["seq"]
 
         def refuse(reason: str) -> Logged:
-            fields = {"registration_seq": seq, "config_hash": configuration.identity, "reason": reason}
-            return Logged(reason, ledger.append("config-refused", fields, "runner")["seq"])
+            return _refusal(ledger, seq, configuration.identity, reason)
 
         runs = _runs_of(events, seq)
         stored = next((event for event in runs if event["config_hash"] == configuration.identity), None)
@@ -520,3 +529,86 @@ def run(arguments: dict, writer: str, seconds: float) -> dict:
             raise refuse(absent.reason) from None
         fields = {"registration_seq": seq, "config_hash": configuration.identity, "budget_used": len(runs) + 1, **result}
         return _answer(ledger.append("config-run", fields, "runner"), registration, repeat=False)
+
+
+def _kept_configuration(registration_seq: int, identity: str) -> _Configuration | None:
+    """What the record's hash names, as kept when it ran; None if the file is gone or holds anything else, which then never runs."""
+    try:
+        kept = json.loads((paths.configurations() / str(registration_seq) / f"{identity}.json").read_text())
+        configuration = _checked_configuration(kept["code"], kept["parameters"])
+    except (OSError, ValueError, RecursionError, KeyError, TypeError, Refused):
+        return None
+    return configuration if configuration.identity == identity else None
+
+
+def _holdout_run(configuration: _Configuration, registration: dict, in_sample: list[dict], holdout: list[dict], seconds: float) -> dict:
+    """The holdout's figures for one configuration, or `{failure}`; raise `_NoConfinement` if no sandbox started.
+
+    The strategy is fed the in-sample bars first and the holdout's after them, as one run, so that what it looks back on is there:
+    a fresh start would leave a look-back flat through a short holdout, and flat passes a floor of zero. Only the holdout's positions earn.
+    It has the time per bar its backtest had. A failure keeps only its kind, since a strategy's own words could quote a holdout bar.
+    """
+    fed = [*in_sample, *holdout[:-1]]
+    limit = seconds * len(fed) / (len(in_sample) - 1)
+    try:
+        positions = _play(configuration, fed, registration["universe"], limit)
+    except _StrategyFailed as failed:
+        return {"failure": str(failed).partition(":")[0]}
+    measures = _measures(_returns(holdout, positions[len(in_sample) :], _cost_per_turnover(registration)))
+    return measures if measures is not None else {"failure": _NOT_FINITE}
+
+
+def _trials(events: list[dict], registration: dict) -> list[dict]:
+    """Every `config-run` of this cell's on these bars: a registration whose in-sample period overlaps this one's is the same search."""
+    related = {
+        event["seq"]
+        for event in _registrations(events)
+        if event["writer"] == registration["writer"]
+        and event["data_source"] == registration["data_source"]
+        and _overlap(event["in_sample"], registration["in_sample"])
+    }
+    return [event for event in events if event["kind"] == "config-run" and event["registration_seq"] in related]
+
+
+def verdict(arguments: dict, writer: str, seconds: float) -> dict:
+    """The Treasurer's verdict on the one configuration a cell names, once per registration, and what the cell may see of it.
+
+    Raise `Refused` if it may not be asked, with no verdict spent, and `Logged` once a `config-refused` has said why it cannot be given.
+    """
+    if set(arguments) - {"strategy", "configuration"}:
+        raise Refused("unknown-fields")
+    strategy, identity = arguments.get("strategy"), arguments.get("configuration")
+    if not isinstance(strategy, str) or not isinstance(identity, str):
+        raise Refused("bad-arguments")
+    with _locked():
+        ledger = Ledger()
+        events = ledger.read()
+        own = [event for event in _registrations(events) if _same_strategy(event, writer, strategy)]
+        if not own:
+            raise Refused("no-registration")
+        registration = own[-1]
+        seq = registration["seq"]
+        if any(event["kind"] == "verdict" and event["registration_seq"] == seq for event in events):
+            raise Refused("verdict-given")
+        chosen = next((event for event in _runs_of(events, seq) if event["config_hash"] == identity), None)
+        if chosen is None:
+            raise Refused("configuration-not-run")
+        if chosen["status"] != _OK:
+            raise Refused("configuration-failed")
+        try:
+            market = _market_data(registration["data_source"])
+        except Refused:
+            raise _refusal(ledger, seq, identity, "data-changed") from None
+        in_sample = _in_period(market, registration["in_sample"], registration["universe"])
+        holdout = _in_period(market, registration["holdout"], registration["universe"])
+        if market.data_hash != registration["data_hash"] or in_sample is None or holdout is None:
+            raise _refusal(ledger, seq, identity, "data-changed")
+        configuration = _kept_configuration(seq, identity)
+        if configuration is None:
+            raise _refusal(ledger, seq, identity, "configuration-lost")
+        try:
+            figures = _holdout_run(configuration, registration, in_sample, holdout, seconds)
+        except _NoConfinement as absent:
+            raise _refusal(ledger, seq, identity, absent.reason) from None
+        event = ledger.append("verdict", treasurer.verdict(registration, chosen, _trials(events, registration), figures), "treasurer")
+    return {"event": event["seq"], **{name: value for name, value in event.items() if name not in _LEDGER_ONLY}}

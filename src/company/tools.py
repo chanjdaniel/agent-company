@@ -49,6 +49,10 @@ def _run_backtest(server: "Server", arguments: dict) -> dict:
     return _result(json.dumps(quant.run(arguments, server.writer, server.backtest_seconds)))
 
 
+def _request_verdict(server: "Server", arguments: dict) -> dict:
+    return _result(json.dumps(quant.verdict(arguments, server.writer, server.backtest_seconds)))
+
+
 _NOTE = Tool(
     "note",
     "Write a note in the company's ledger, under this session.",
@@ -114,8 +118,25 @@ _BACKTEST = Tool(
     "config-run",
     _run_backtest,
 )
-TOOLS = {tool.name: tool for tool in (_NOTE, _REGISTER, _BACKTEST)}
-ROLE_TOOLS = {"probe": ("note",), "cell": ("note", "register_strategy", "run_backtest"), "strategy": (), "auditor": (), "retro": ()}
+_VERDICT = Tool(
+    "request_verdict",
+    "Ask the Treasurer for the verdict on one configuration you have run: once per registration, whatever it says. "
+    "It runs that configuration, outside this session, on the in-sample bars and then the holdout, as one run. "
+    "You are told the verdict's fields, and never the holdout's bars or returns, or anything the strategy said there. "
+    "Passing takes the deflated Sharpe ratio over every trial you ran on these in-sample bars, the holdout's return, and the worse of the two maximum drawdowns.",
+    {
+        "type": "object",
+        "properties": {
+            "strategy": {"type": "string"},
+            "configuration": {"type": "string", "description": "The `config_hash` of a run of this registration that did not fail."},
+        },
+        "required": ["strategy", "configuration"],
+    },
+    "verdict",
+    _request_verdict,
+)
+TOOLS = {tool.name: tool for tool in (_NOTE, _REGISTER, _BACKTEST, _VERDICT)}
+ROLE_TOOLS = {"probe": ("note",), "cell": ("note", "register_strategy", "run_backtest", "request_verdict"), "strategy": (), "auditor": (), "retro": ()}
 _UNKNOWN_KIND = "unknown-tool"
 
 
@@ -153,7 +174,7 @@ class Server:
         except quant.Refused as refused:
             return self._refused(tool.kind, name, refused.reason)
         except quant.Logged as logged:
-            return _result(f"Refused: {logged.reason}. The backtest did not run; event {logged.seq} in the ledger records why.", failed=True)
+            return _result(f"Refused: {logged.reason}. It did not run; event {logged.seq} in the ledger records why.", failed=True)
         except AppendRefused as refused:
             return _result(f"Refused: {refused}", failed=True)
         except (LedgerBroken, OSError) as error:

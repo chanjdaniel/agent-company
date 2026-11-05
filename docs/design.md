@@ -3,7 +3,7 @@
 This is the design the first slice builds, written 2026-11-04.
 It turns the research in [`docs/research/2026-11-02-org-and-profit-loops/`](research/2026-11-02-org-and-profit-loops/report.md) and Daniel's decisions into one document that later work is checked against.
 Where this document and the report or critique differ, this document holds; where this document and Daniel's word differ, Daniel's word holds, and this document is wrong.
-So far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the session launcher, the company tools' server with its note, registration and backtest tools, the goal texts, the kill switch, the schedule with its first two jobs, the quant cell's registration and backtest runner, the test suite with its guards and scan, and CI; nothing else here exists as code yet.
+So far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the session launcher, the company tools' server with its note, registration, backtest and verdict tools, the goal texts, the kill switch, the schedule with its first two jobs, the quant cell's registration, backtest runner and verdict, the test suite with its guards and scan, and CI; nothing else here exists as code yet.
 
 Words used throughout:
 
@@ -292,7 +292,7 @@ A kind that a later ticket finds it needs joins this table and the contract in t
 | `strategy-registered` | Quant | `cell:<bet>` | `strategy`, `universe`, `data_source`, `data_hash`, `in_sample`, `holdout`, `cost_model`, `slippage_model`, `max_configurations`, `acceptance` | `paper_days` |
 | `config-run` | Quant | `runner` | `registration_seq`, `config_hash`, `status`, `budget_used` | `sharpe`, `n_returns`, `skew`, `kurtosis`, `total_return`, `max_drawdown`, `returns_hash`, `failure` |
 | `config-refused` | Quant | `runner` | `registration_seq`, `config_hash`, `reason` | |
-| `verdict` | Quant | `treasurer` | `registration_seq`, `config_hash`, `passed`, `failed_tests`, `deflated_sharpe`, `holdout_return`, `max_drawdown`, `trials`, `config_run_seqs`, `holdout_hash` | |
+| `verdict` | Quant | `treasurer` | `registration_seq`, `config_hash`, `passed`, `failed_tests`, `deflated_sharpe`, `holdout_return`, `max_drawdown`, `trials`, `config_run_seqs`, `holdout_hash` | `holdout_failure` |
 | `paper-opened` | Quant | `runner` | `registration_seq`, `verdict_seq`, `end_date`, `drawdown_kill` | `promise_seq` |
 | `paper-order` | Quant | `runner` | `period_seq`, `symbol`, `side`, `quantity`, `broker_order_id`, `status` | |
 | `paper-reading` | Quant | `runner` | `period_seq`, `equity`, `pnl`, `taken_at` | |
@@ -337,6 +337,7 @@ Notes on single kinds:
   A chargeback is recorded as a `refund`.
 - `settings-changed` holds the changed keys' names and the new digest, not their values.
 - `session-note` is a cell's or the probe's free text, so it is kept out of the strategy session's view, since that session never talks to a cell; that view still holds a cell's registrations and proposals, which it reads as data.
+- `verdict`'s `failed_tests` names each test failed, `overfitting`, `holdout` or `max_drawdown`; `max_drawdown` is the worse of the backtest's and the holdout's; `holdout_hash` is the hash of the holdout's returns, as `returns_hash` is of a backtest's; and a strategy that failed on the holdout has `holdout_failure`, the kind of failure with none of its words, and null for `holdout_return` and `holdout_hash`.
 - `session-started`'s `gate` is `go:<seq>` or `schedule`, and a `go-given` word's launches left are its `sessions` minus the `session-started` events citing it.
 - `launch-refused`'s `check` is the governor's step that refused (`ledger`, `kill`, `settings`, `go`, `pause`, `reading`, `floor` or `share`, and a scheduled session with the schedule off is refused at `go`) or, written by the launcher, its own (`goal`, `settings`, `binary`, `load-form`, `workspace`, `kill` or `ledger`); its `reason` starts with a code, such as `stale`, followed by a sentence, and `fix` is what to do about it.
 - `pull` on `kill-pulled` and `kill-step` is the pull's own id, the name of its file in `kill.state`.
@@ -707,7 +708,7 @@ Crypto and prediction markets count as trading under the same rule.
   A registration cannot change once a `config-run` cites it.
 - **A holdout stays unseen, and is one registration's.**
   On one data source, a new in-sample period or holdout may not touch an earlier registration's holdout, and a new holdout may not touch an earlier registration's in-sample period, whichever cell wrote it.
-  So a new name for a strategy needs a holdout of its own, and cannot reset a budget on the old one; it may share an in-sample period, so the verdict must count a cell's trials on that period across its registrations.
+  So a new name for a strategy needs a holdout of its own, and cannot reset a budget on the old one; it may share an in-sample period, so the verdict counts a cell's trials on that period across its registrations.
   A registration that was replaced holds no period, since it ran nothing.
   The refusal tells a cell only which dates another registration holds, never its bars.
 - **Trial counting.**
@@ -730,7 +731,18 @@ Crypto and prediction markets count as trading under the same rule.
   A strategy that hangs, crashes, ends early or prints anything but its positions is a failed configuration, `status` `failed`, with a `failure` of `timed-out`, `crashed: <its error>`, `ended-early` or `bad-output: <what>`, and it counts against the budget.
   With no `bwrap`, or one that cannot start, nothing runs, and `config-refused` says `no-confinement` or `confinement-failed`, at no cost, since no code of the cell's ran.
 - **The holdout is never shown to the cell.**
-  The cell names one configuration, once per registration, and the Treasurer runs it on the holdout, then computes the deflated Sharpe ratio (Bailey and López de Prado, 2014) over the trials actually run, the holdout return and the maximum drawdown, from `config-run` records alone.
+  A cell's `request_verdict` tool names one configuration it has run that did not fail, by its `config_hash`, once per registration; a second request logs `append-refused` with `verdict-given`, and a run that failed or never ran spends no verdict.
+  The Treasurer runs the kept configuration in the same sandbox, feeding it the in-sample bars and then the holdout's as one run, so that what a strategy looks back on is there, since a fresh start would leave a look-back flat through a short holdout, and flat passes a return floor of zero.
+  Only the positions on holdout bars earn, from a flat start and at the registered costs, with the time per bar its backtest had.
+  The answer is the `verdict` event's fields and its number, the holdout's bars and returns are kept nowhere, and a strategy's failure there is recorded only by its kind, since its words could quote a holdout bar.
+  Data that no longer matches `data_hash`, a kept configuration that is not what its hash names, or a sandbox that does not start logs `config-refused`, with `data-changed`, `configuration-lost`, `no-confinement` or `confinement-failed`, and spends no verdict.
+- **The verdict is computed, and says which test failed.**
+  It passes when the deflated Sharpe ratio is at least `min_deflated_sharpe` (`overfitting`), the holdout's return is at least `min_holdout_return` (`holdout`) and the maximum drawdown is at most `max_drawdown` (`max_drawdown`).
+  The deflated Sharpe ratio is equation 2 of Bailey and López de Prado (2014) on the chosen `config-run`'s per-bar `sharpe`, `n_returns`, `skew` and `kurtosis`, against equation 1's threshold, which it computes from the number of trials and the variance of their Sharpe ratios, all read from the `config-run` records the verdict cites in `config_run_seqs`.
+  The trials are every `config-run` of that cell's on a registration with the same `data_source` and an overlapping in-sample period, failed ones too, each run counting as one, so `trials` may be more than one registration's budget.
+  The variance is the sample variance of the runs that have a ratio, and at least chance's over the chosen run's returns, `1 / (n_returns - 1)`, which goes beyond the paper: a failed run has no ratio, though its failure's text may have told the cell how it did, so a search hidden in failures, or in near-copies, would otherwise leave the threshold at nothing.
+  A figure that cannot be measured, from one return, with no spread in the estimate or past what a float holds, reads as a deflated Sharpe ratio of 0.
+  The maximum drawdown is the worse of the backtest's and the holdout's, so that a short holdout cannot hide what the backtest recorded.
   The report allowed the probability of backtest overfitting instead; this slice builds the deflated Sharpe ratio, because it needs only the records and the standard library.
 - **About three months of paper trading.**
   A passing verdict opens a paper period of `paper_days`, with an end date, a promise for that date, and the registration's `max_drawdown` as its drawdown kill, and the first tick on or after the end date closes it.
@@ -993,4 +1005,4 @@ The research's own sources, read 2026-11-02, are listed in `report.md` and `crit
 - US Federal Trade Commission, "CAN-SPAM Act: A Compliance Guide for Business", https://www.ftc.gov/business-guidance/resources/can-spam-act-compliance-guide-business
 - Alpaca docs: [paper trading](https://docs.alpaca.markets/docs/paper-trading), [market data](https://docs.alpaca.markets/docs/about-market-data-api)
 - Xu et al., "Harness²: Recursive Agent Harnessing for an Open World", 2026, https://arxiv.org/abs/2610.14224, with its reading in T189's report, section 5, in the agent team's records
-- Bailey and López de Prado, "The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting, and Non-Normality", Journal of Portfolio Management 40(5), 2014, https://doi.org/10.3905/jpm.2014.40.5.094 (citation confirmed through search results; ticket 09 reads the paper for the formula)
+- Bailey and López de Prado, "The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting, and Non-Normality", Journal of Portfolio Management 40(5), 2014, https://doi.org/10.3905/jpm.2014.40.5.094 (read 2026-11-05 at https://www.davidhbailey.com/dhbpapers/deflated-sharpe.pdf; the suite holds its numerical example)

@@ -39,7 +39,8 @@ from pathlib import Path
 import pytest
 from session_checks import events, pid_is_running, wait_for
 
-from company import paths, quant
+from company import paths, quant, treasurer
+from company.ledger import AppendRefused, Ledger
 
 SESSION = "eeeeeeee-0000-4000-8000-000000000000"
 HOLDOUT_MARKER = "HOLDOUT-MARKER-71f3"
@@ -1146,7 +1147,7 @@ def test_a_stub_cell_registers_and_runs_its_backtests_through_the_real_tools(cel
 
     assert done.returncode == 0, done.stdout + done.stderr
     listed = {tool["name"] for tool in stub.tool_lists()[-1]["result"]["tools"]}
-    assert {"note", "register_strategy", "run_backtest"} == listed
+    assert {"note", "register_strategy", "run_backtest", "request_verdict"} == listed
     allowed = stub.argument("--allowedTools").split(",")
     assert "mcp__company__register_strategy" in allowed
     assert "mcp__company__run_backtest" in allowed
@@ -1220,3 +1221,729 @@ def test_the_server_has_no_settings_path_and_needs_none(cell_session, stub):
 
     assert "COMPANY_CONFIG" not in stub.mcp_config()["mcpServers"]["company"]["env"]
     assert os.environ["COMPANY_CONFIG"] not in json.dumps(stub.mcp_config())
+
+
+# The verdict: the worked values
+#
+# The deflated Sharpe ratio is Z((SR - SR0) x sqrt(T - 1) / sqrt(1 - skew x SR + (kurtosis - 1) / 4 x SR^2)),
+# with SR0 = sqrt(V) x ((1 - g) x Zinv(1 - 1 / N) + g x Zinv(1 - 1 / (N x e))), Bailey and López de Prado's equations 1 and 2.
+#
+# By hand, one trial: SR 0.1 over T = 101 normal returns, with SR0 0 since one trial has nothing to pick from:
+#     0.1 x sqrt(100) / sqrt(1 - 0 + (3 - 1) / 4 x 0.01) = 1 / sqrt(1.005) = 0.99751, and Z(0.99751) = 0.84074.
+# By hand, two trials: Zinv(1 / 2) is 0, Zinv(1 - 1 / (2e)) = Zinv(0.81606) = 0.90045 and g = 0.57722, so with V = 0.04:
+#     SR0 = 0.2 x 0.57722 x 0.90045 = 0.10395, and on those returns (0.1 - 0.10395) x 10 / sqrt(1.005) = -0.03940, Z of which is 0.48429.
+#
+# The paper's own example: N = 100, a V of 1/2 a year and an SR of 2.5 a year over 250 bars a year, T = 1250, skew -3, kurtosis 10:
+#     SR0 is 0.1132 a bar, and the value 0.9004; with N = 46 the value is 0.9505.
+#
+# On the worked month, HOLD alone: SR 0.25825, T = 4, skew -0.49684, kurtosis 1.63251, one trial:
+#     1 + 0.49684 x 0.25825 + 0.63251 / 4 x 0.25825^2 = 1.13886, and 0.25825 x sqrt(3) / sqrt(1.13886) = 0.41916, Z of which is 0.66245.
+# Beside one failed trial there is no spread among the Sharpe ratios, so V is chance's, 1 / (T - 1) = 1 / 3:
+#     SR0 = sqrt(1 / 3) x 0.57722 x 0.90045 = 0.30008, and (0.25825 - 0.30008) x sqrt(3) / sqrt(1.13886) = -0.06789, Z of which is 0.47294.
+#
+# On the holdout, 7777.77 doubling and falling back, HOLD earns 1 - 0.0015 = 0.9985 and then -0.5:
+#     holdout_return: 1.9985 x 0.5 - 1 = -0.00075; drawdown 0.5.
+
+FIRST_DAYS = {"min_deflated_sharpe": 0, "min_holdout_return": -1, "max_drawdown": 1}
+HOLD_HOLDOUT_RETURNS = [1.0 - 0.0015, -0.5]
+HOLD_HOLDOUT_RETURN = -0.00075
+FAILS_ON_THE_HOLDOUT = """
+def decide(bar, parameters):
+    if bar["date"] > "2026-01-31":
+        {action}
+    return {{"SPY": 1.0}}
+"""
+
+
+def ask_verdict(tools, config, strategy="momentum"):
+    return tools.call("request_verdict", {"strategy": strategy, "configuration": config})
+
+
+def verdict_of(tools, config, strategy="momentum"):
+    """A verdict's answer, as the JSON the tool gave; a refusal has to be read with `ask_verdict`."""
+    answer = ask_verdict(tools, config, strategy)
+    assert not answer["isError"], answer
+    return json.loads(text_of(answer))
+
+
+def holdout_of(code, **changes):
+    """The verdict on one configuration, the only one its registration ran."""
+    tools = CellTools()
+    try:
+        assert not tools.register(**changes)["isError"]
+        ran = tools.backtest(code)
+        assert ran["status"] == "ok", ran
+        return verdict_of(tools, ran["config_hash"])
+    finally:
+        tools.close()
+
+
+def test_the_deflated_sharpe_ratio_matches_one_trial_worked_by_hand():
+    assert treasurer.deflated_sharpe(0.1, 101, 0, 3, threshold=0) == pytest.approx(0.84074, abs=1e-5)
+
+
+def test_the_expected_maximum_matches_two_trials_worked_by_hand():
+    threshold = treasurer.expected_maximum_sharpe(0.04, 2)
+
+    assert threshold == pytest.approx(0.10395, abs=1e-5)
+    assert treasurer.deflated_sharpe(0.1, 101, 0, 3, threshold) == pytest.approx(0.48429, abs=1e-5)
+
+
+@pytest.mark.parametrize(("trials", "threshold", "value"), [(100, 0.1132, 0.9004), (46, 0.1004, 0.9505)])
+def test_the_deflated_sharpe_ratio_matches_the_papers_own_example(trials, threshold, value):
+    found = treasurer.expected_maximum_sharpe(0.5 / 250, trials)
+
+    assert found == pytest.approx(threshold, abs=5e-5)
+    assert treasurer.deflated_sharpe(2.5 / math.sqrt(250), 1250, -3, 10, found) == pytest.approx(value, abs=5e-5)
+
+
+def test_more_trials_on_the_same_returns_give_a_lower_value():
+    values = [treasurer.deflated_sharpe(0.1, 101, 0, 3, treasurer.expected_maximum_sharpe(0.04, trials)) for trials in (1, 2, 5, 25, 100, 1000)]
+
+    assert values == sorted(values, reverse=True)
+    assert len(set(values)) == len(values)
+
+
+def test_one_trial_has_nothing_to_pick_from():
+    assert treasurer.expected_maximum_sharpe(0.04, 1) == 0
+
+
+@pytest.mark.parametrize(
+    ("sharpe", "n_returns", "skew", "kurtosis"),
+    [
+        pytest.param(0.5, 1, 0, 3, id="one return can show nothing"),
+        pytest.param(1.0, 100, 2.0, 5.0, id="no spread in the estimate, a two-point distribution's limit"),
+        pytest.param(1.0, 100, 4.0, 1.0, id="moments no distribution has"),
+        pytest.param(1e200, 100, 0, 1e300, id="past what a float holds"),
+    ],
+)
+def test_a_figure_that_cannot_be_measured_reads_as_no_confidence_at_all(sharpe, n_returns, skew, kurtosis):
+    assert treasurer.deflated_sharpe(sharpe, n_returns, skew, kurtosis, threshold=0) == 0
+
+
+def _run_record(sharpe, status="ok", n_returns=101):
+    fields = {"sharpe": sharpe, "n_returns": n_returns, "skew": 0, "kurtosis": 3} if status == "ok" else {}
+    return {"status": status, **fields}
+
+
+def test_the_variance_of_trials_is_the_spread_of_those_that_gave_a_ratio():
+    runs = [_run_record(0.0), _run_record(0.6), _run_record(0.0, status="failed"), _run_record(0.3)]
+    # The mean is 0.3, so the squares add to 0.09 + 0.09 + 0, and over two degrees of freedom that is 0.09.
+    assert treasurer.trials_variance(runs, n_returns=101) == pytest.approx(0.09)
+
+
+@pytest.mark.parametrize("runs", [[_run_record(0.3)], [_run_record(0.3), _run_record(0.3)], [_run_record(0.3), _run_record(0.3, status="failed")]])
+def test_trials_with_no_spread_vary_at_least_as_chance_does(runs):
+    """A failed run may have told its cell its figures in its failure, so a search hidden that way cannot leave the threshold at nothing."""
+    assert treasurer.trials_variance(runs, n_returns=101) == pytest.approx(1 / 100)
+
+
+def test_a_spread_past_what_a_float_holds_leaves_no_confidence():
+    runs = [_run_record(1e200), _run_record(-1e200), _run_record(1e200)]
+    assert treasurer.deflated_sharpe_of(_run_record(1e200), runs) == 0
+
+
+# The verdict: what the Treasurer computes
+
+
+def test_the_verdict_is_the_treasurers_with_the_worked_figures(registered):
+    ran = registered.backtest(HOLD)
+    answer = verdict_of(registered, ran["config_hash"])
+
+    event = events("verdict")[-1]
+    assert event["writer"] == "treasurer"
+    assert event["registration_seq"] == ran["registration_seq"]
+    assert event["config_hash"] == ran["config_hash"]
+    assert event["deflated_sharpe"] == pytest.approx(0.66245, abs=1e-5)
+    assert event["holdout_return"] == pytest.approx(HOLD_HOLDOUT_RETURN)
+    assert event["max_drawdown"] == pytest.approx(0.5)
+    assert event["trials"] == 1
+    assert event["config_run_seqs"] == [ran["event"]]
+    assert answer["event"] == event["seq"]
+
+
+def test_a_failed_trial_counts_and_the_same_returns_get_a_lower_value(market):
+    """The trials were run, and the failure's text could have told the cell how they did, so they count though they have no ratio."""
+    tools = CellTools()
+    try:
+        assert not tools.register()["isError"]
+        tools.backtest(strategy_doing("raise RuntimeError('how it did')"))
+        ran = tools.backtest(HOLD)
+        found = verdict_of(tools, ran["config_hash"])
+    finally:
+        tools.close()
+
+    assert found["trials"] == 2
+    assert found["deflated_sharpe"] == pytest.approx(0.47294, abs=1e-5)
+
+
+def test_every_trial_run_lowers_the_value_of_the_same_returns(market):
+    write_market("copy")
+    tools = CellTools()
+    try:
+        assert not tools.register(strategy="few", max_configurations=10)["isError"]
+        assert not tools.register(strategy="many", data_source="fixture:copy", max_configurations=10)["isError"]
+        few = tools.backtest(HOLD, strategy="few")
+        many = tools.backtest(HOLD, strategy="many")
+        for weight in (0.1, -0.5, 0.25, -1):
+            tools.backtest(SCALED, {"weight": weight}, strategy="many")
+        fewer, more = verdict_of(tools, few["config_hash"], "few"), verdict_of(tools, many["config_hash"], "many")
+    finally:
+        tools.close()
+
+    assert few["returns_hash"] == many["returns_hash"]
+    assert (fewer["trials"], more["trials"]) == (1, 5)
+    assert more["deflated_sharpe"] < fewer["deflated_sharpe"]
+
+
+def _with_later_holdouts():
+    return [*IN_SAMPLE_BARS, *HOLDOUT_BARS, bar("2026-03-02", 100), bar("2026-03-03", 101), bar("2026-04-01", 100), bar("2026-04-02", 101)]
+
+
+def test_a_cells_trials_on_the_in_sample_count_across_its_registrations(market):
+    """A new name with a holdout of its own gets a fresh budget on the same in-sample bars, and no fresh count."""
+    write_market("daily", _with_later_holdouts())
+    tools = CellTools()
+    try:
+        assert not tools.register(strategy="first")["isError"]
+        earlier = tools.backtest(FLAT, strategy="first")
+        assert not tools.register(strategy="second", holdout={"start": "2026-03-02", "end": "2026-03-03"})["isError"]
+        chosen = tools.backtest(HOLD, strategy="second")
+        found = verdict_of(tools, chosen["config_hash"], "second")
+    finally:
+        tools.close()
+
+    assert found["trials"] == 2
+    assert found["config_run_seqs"] == [earlier["event"], chosen["event"]]
+
+
+def test_an_in_sample_that_overlaps_shares_its_trials_too(market):
+    write_market("daily", _with_later_holdouts())
+    tools = CellTools()
+    try:
+        assert not tools.register(strategy="first")["isError"]
+        tools.backtest(FLAT, strategy="first")
+        moved = {"start": "2026-01-06", "end": "2026-01-09"}
+        assert not tools.register(strategy="second", in_sample=moved, holdout={"start": "2026-03-02", "end": "2026-03-03"})["isError"]
+        chosen = tools.backtest(HOLD, strategy="second")
+        found = verdict_of(tools, chosen["config_hash"], "second")
+    finally:
+        tools.close()
+
+    assert found["trials"] == 2
+
+
+def test_trials_on_other_bars_or_by_another_cell_do_not_count(market):
+    bars = [*_with_later_holdouts(), bar("2026-05-04", 100), bar("2026-05-05", 101)]
+    write_market("daily", bars)
+    write_market("elsewhere", bars)
+    tools, other = CellTools(), CellTools(bet="beta")
+    try:
+        assert not tools.register(strategy="first")["isError"]
+        tools.backtest(FLAT, strategy="first")
+        assert not tools.register(strategy="source", data_source="fixture:elsewhere")["isError"]
+        tools.backtest(FLAT, strategy="source")
+        march, april = {"start": "2026-03-02", "end": "2026-03-03"}, {"start": "2026-04-01", "end": "2026-04-02"}
+        assert not tools.register(strategy="later", in_sample=march, holdout=april)["isError"]
+        tools.backtest(FLAT, strategy="later")
+        assert not other.register(strategy="theirs", holdout={"start": "2026-05-04", "end": "2026-05-05"})["isError"]
+        other.backtest(FLAT, strategy="theirs")
+
+        chosen = tools.backtest(HOLD, strategy="first")
+        found = verdict_of(tools, chosen["config_hash"], "first")
+    finally:
+        tools.close()
+        other.close()
+
+    assert found["trials"] == 2
+
+
+def test_a_verdict_recomputes_from_the_records_it_cites(market):
+    tools = CellTools()
+    try:
+        assert not tools.register(max_configurations=5)["isError"]
+        chosen = tools.backtest(HOLD)
+        tools.backtest(HOLD_FIRST)
+        tools.backtest(SCALED, {"weight": -0.5})
+        tools.backtest(strategy_doing("raise RuntimeError('no')"))
+        found = verdict_of(tools, chosen["config_hash"])
+    finally:
+        tools.close()
+
+    event = events("verdict")[-1]
+    by_seq = {item["seq"]: item for item in events("config-run")}
+    cited = [by_seq[seq] for seq in event["config_run_seqs"]]
+    assert sorted(by_seq) == event["config_run_seqs"]
+    assert event["trials"] == len(cited) == 4
+
+    selected = next(item for item in cited if item["config_hash"] == event["config_hash"])
+    ratios = [item["sharpe"] for item in cited if item["status"] == "ok"]
+    mean = sum(ratios) / len(ratios)
+    spread = sum((ratio - mean) ** 2 for ratio in ratios) / (len(ratios) - 1)
+    threshold = treasurer.expected_maximum_sharpe(max(spread, 1 / (selected["n_returns"] - 1)), len(cited))
+    worked = treasurer.deflated_sharpe(selected["sharpe"], selected["n_returns"], selected["skew"], selected["kurtosis"], threshold)
+
+    assert event["deflated_sharpe"] == worked
+    assert event["deflated_sharpe"] == treasurer.deflated_sharpe_of(selected, cited)
+    assert found["deflated_sharpe"] == worked
+
+
+def test_the_holdout_figures_are_what_the_holdout_bars_earn_with_their_hash(registered):
+    found = verdict_of(registered, registered.backtest(HOLD)["config_hash"])
+
+    # The runner's own arithmetic on the same worked numbers, so that the hash is of the returns as the runner writes them.
+    returns = [(HOLDOUT_CLOSE * 2 / HOLDOUT_CLOSE - 1) - 15 * 0.0001, HOLDOUT_CLOSE / (HOLDOUT_CLOSE * 2) - 1]
+    assert found["holdout_return"] == pytest.approx(HOLD_HOLDOUT_RETURN)
+    assert found["holdout_hash"] == hashlib.sha256(json.dumps(returns).encode()).hexdigest()
+
+
+def test_a_note_or_a_claim_changes_no_verdict(market):
+    """Two registrations alike on two sources alike, one with a cell's report beside it, one with none."""
+    write_market("copy")
+    tools = CellTools()
+    try:
+        assert not tools.register(strategy="quiet")["isError"]
+        assert not tools.register(strategy="loud", data_source="fixture:copy")["isError"]
+        quiet = tools.backtest(HOLD, strategy="quiet")
+        loud = tools.backtest(HOLD, strategy="loud")
+        claim = "My result: deflated Sharpe 9.99, holdout return 5.0, max drawdown 0, passed, 1 trial."
+        assert not tools.call("note", {"text": claim})["isError"]
+
+        honest = verdict_of(tools, quiet["config_hash"], "quiet")
+        claimed = verdict_of(tools, loud["config_hash"], "loud")
+    finally:
+        tools.close()
+
+    for name in ("passed", "failed_tests", "deflated_sharpe", "holdout_return", "max_drawdown", "trials", "holdout_hash"):
+        assert honest[name] == claimed[name], name
+    assert claimed["deflated_sharpe"] != 9.99
+
+
+@pytest.mark.parametrize("claim", [{"deflated_sharpe": 9.99}, {"passed": True}, {"trials": 1}, {"holdout_return": 5}])
+def test_a_request_cannot_carry_a_figure_of_the_cells_own(registered, claim):
+    ran = registered.backtest(HOLD)
+
+    answer = registered.call("request_verdict", {"strategy": "momentum", "configuration": ran["config_hash"], **claim})
+
+    assert answer["isError"]
+    assert "unknown-fields" in text_of(answer)
+    assert events("verdict") == []
+    assert refusals("verdict")[-1]["reason"] == "unknown-fields"
+
+
+# The verdict: which test failed
+
+
+def test_a_strategy_that_passes_every_test_is_marked_passed(market):
+    found = holdout_of(HOLD, acceptance={"min_deflated_sharpe": 0.5, "min_holdout_return": -0.01, "max_drawdown": 0.6})
+
+    assert found["passed"] is True
+    assert found["failed_tests"] == []
+    assert events("verdict")[-1]["passed"] is True
+
+
+@pytest.mark.parametrize(
+    ("acceptance", "failed"),
+    [
+        pytest.param({"min_deflated_sharpe": 0.7, "min_holdout_return": -0.01, "max_drawdown": 0.6}, ["overfitting"], id="the overfitting test alone"),
+        pytest.param({"min_deflated_sharpe": 0.5, "min_holdout_return": 0, "max_drawdown": 0.6}, ["holdout"], id="the holdout alone"),
+        pytest.param({"min_deflated_sharpe": 0.5, "min_holdout_return": -0.01, "max_drawdown": 0.4}, ["max_drawdown"], id="the drawdown alone"),
+        pytest.param({"min_deflated_sharpe": 0.7, "min_holdout_return": 0, "max_drawdown": 0.4}, ["overfitting", "holdout", "max_drawdown"], id="all three"),
+    ],
+)
+def test_a_strategy_that_fails_a_test_is_marked_failed_and_the_verdict_says_which(market, acceptance, failed):
+    found = holdout_of(HOLD, acceptance=acceptance)
+
+    assert found["passed"] is False
+    assert found["failed_tests"] == failed
+    assert events("verdict")[-1]["failed_tests"] == failed
+
+
+def test_figures_exactly_at_the_registered_limits_pass(market):
+    """A flat strategy sits exactly on each limit here, and being at a limit is no failure."""
+    found = holdout_of(FLAT, acceptance={"min_deflated_sharpe": 0, "min_holdout_return": 0, "max_drawdown": 0})
+
+    assert found["holdout_return"] == 0
+    assert found["max_drawdown"] == 0
+    assert found["passed"] is True
+
+
+def test_the_drawdown_is_the_worse_of_the_in_sample_and_the_holdout(market):
+    """A short holdout must not hide what the backtest recorded: this one loses in-sample, and sits flat through the holdout."""
+    code = """
+def decide(bar, parameters):
+    return {"SPY": 1.0} if bar["date"] < "2026-01-31" else {}
+"""
+    found = holdout_of(code, acceptance={"min_deflated_sharpe": 0, "min_holdout_return": -1, "max_drawdown": 0.05})
+
+    assert found["max_drawdown"] == pytest.approx(0.10)
+    assert found["failed_tests"] == ["max_drawdown"]
+
+
+def test_a_strategy_keeps_what_it_learned_in_sample_into_the_holdout(market):
+    """A look-back would otherwise sit flat through a short holdout, and pass a return floor of zero by never trading."""
+    looks_back = """
+seen = 0
+def decide(bar, parameters):
+    global seen
+    seen += 1
+    return {"SPY": 1.0} if seen > 5 else {}
+"""
+    found = holdout_of(looks_back, acceptance=FIRST_DAYS)
+
+    assert found["holdout_return"] == pytest.approx(HOLD_HOLDOUT_RETURN)
+
+
+@pytest.mark.parametrize(
+    ("action", "failure"),
+    [
+        pytest.param("raise RuntimeError(str(bar))", "crashed", id="crash"),
+        pytest.param("return {'SPY': str(bar)}", "bad-output", id="rubbish"),
+        pytest.param("raise SystemExit(0)", "crashed", id="exit"),
+    ],
+)
+def test_a_strategy_that_fails_on_the_holdout_fails_its_verdict_and_says_only_how(market, action, failure):
+    tools = CellTools()
+    try:
+        assert not tools.register()["isError"]
+        ran = tools.backtest(FAILS_ON_THE_HOLDOUT.format(action=action))
+        assert ran["status"] == "ok"
+        found = verdict_of(tools, ran["config_hash"])
+        received = "".join(tools.received)
+    finally:
+        tools.close()
+
+    assert found["passed"] is False
+    assert "holdout" in found["failed_tests"]
+    assert found["holdout_failure"] == failure
+    assert found["holdout_return"] is None
+    assert found["holdout_hash"] is None
+    assert HOLDOUT_MARKER not in received
+    assert str(HOLDOUT_CLOSE) not in received
+    assert HOLDOUT_MARKER not in json.dumps(events())
+
+
+def test_a_strategy_that_hangs_on_the_holdout_fails_its_verdict(market):
+    tools = CellTools(seconds=1)
+    try:
+        assert not tools.register()["isError"]
+        ran = tools.backtest(FAILS_ON_THE_HOLDOUT.format(action="import time; time.sleep(600)"))
+        found = verdict_of(tools, ran["config_hash"])
+    finally:
+        tools.close()
+
+    assert found["holdout_failure"] == "timed-out"
+    assert "holdout" in found["failed_tests"]
+
+
+def test_the_holdout_run_has_the_time_per_bar_the_backtest_had(registered, monkeypatch):
+    """Four bars were backtested and seven are fed here, so a strategy that fit its limit is not failed for the longer run."""
+    ran = registered.backtest(FLAT)
+    limits = []
+    real_timer = threading.Timer
+
+    def noting(interval, function):
+        limits.append(interval)
+        return real_timer(interval, function)
+
+    monkeypatch.setattr(quant.threading, "Timer", noting)
+    quant.verdict({"strategy": "momentum", "configuration": ran["config_hash"]}, "cell:alpha", 8)
+
+    assert limits == [pytest.approx(14)]
+
+
+# The verdict: once per registration, and only for what ran
+
+
+def test_a_second_verdict_is_refused_and_logged(registered):
+    first = registered.backtest(HOLD)
+    second = registered.backtest(FLAT)
+    verdict_of(registered, first["config_hash"])
+
+    for config in (first["config_hash"], second["config_hash"]):
+        answer = ask_verdict(registered, config)
+
+        assert answer["isError"]
+        assert "verdict-given" in text_of(answer)
+
+    assert len(events("verdict")) == 1
+    assert [event["reason"] for event in refusals("verdict")] == ["verdict-given", "verdict-given"]
+    assert refusals("verdict")[-1]["attempted_writer"] == "cell:alpha"
+    assert refusals("verdict")[-1]["tool"] == "request_verdict"
+
+
+def test_two_requests_racing_get_one_verdict(market):
+    first, second = CellTools(), CellTools()
+    try:
+        assert not first.register()["isError"]
+        config = first.backtest(HOLD)["config_hash"]
+        answers = []
+        threads = [threading.Thread(target=lambda tool=tool: answers.append(ask_verdict(tool, config))) for tool in (first, second)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        first.close()
+        second.close()
+
+    assert sorted(answer["isError"] for answer in answers) == [False, True]
+    assert len(events("verdict")) == 1
+
+
+def test_a_new_name_cannot_buy_a_second_verdict_on_the_same_holdout(registered):
+    verdict_of(registered, registered.backtest(HOLD)["config_hash"])
+
+    answer = registered.register(strategy="again")
+
+    assert answer["isError"]
+    assert "holdout-already-held" in text_of(answer)
+
+
+def test_a_verdict_before_any_registration_is_refused_and_logged(tools):
+    answer = ask_verdict(tools, "0" * 64)
+
+    assert answer["isError"]
+    assert refusals("verdict")[-1]["reason"] == "no-registration"
+
+
+def test_a_verdict_on_another_cells_registration_is_refused(registered, market):
+    config = registered.backtest(HOLD)["config_hash"]
+    other = CellTools(bet="beta")
+    try:
+        answer = ask_verdict(other, config)
+    finally:
+        other.close()
+
+    assert answer["isError"]
+    assert refusals("verdict")[-1]["reason"] == "no-registration"
+    assert events("verdict") == []
+
+
+def test_a_configuration_never_run_cannot_be_named(registered):
+    registered.backtest(HOLD)
+
+    answer = ask_verdict(registered, quant.config_hash(FLAT, {}))
+
+    assert answer["isError"]
+    assert refusals("verdict")[-1]["reason"] == "configuration-not-run"
+    assert events("verdict") == []
+
+
+def test_a_configuration_run_only_under_another_registration_cannot_be_named(market):
+    write_market("daily", _with_later_holdouts())
+    tools = CellTools()
+    try:
+        assert not tools.register(strategy="first")["isError"]
+        config = tools.backtest(HOLD, strategy="first")["config_hash"]
+        assert not tools.register(strategy="second", holdout={"start": "2026-03-02", "end": "2026-03-03"})["isError"]
+        tools.backtest(FLAT, strategy="second")
+
+        answer = ask_verdict(tools, config, "second")
+    finally:
+        tools.close()
+
+    assert answer["isError"]
+    assert refusals("verdict")[-1]["reason"] == "configuration-not-run"
+
+
+def test_a_failed_configuration_cannot_be_named_and_spends_no_verdict(registered):
+    failed = registered.backtest(strategy_doing("raise RuntimeError('no')"))
+    good = registered.backtest(HOLD)
+
+    answer = ask_verdict(registered, failed["config_hash"])
+
+    assert answer["isError"]
+    assert refusals("verdict")[-1]["reason"] == "configuration-failed"
+    assert verdict_of(registered, good["config_hash"])["trials"] == 2
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param({}, id="nothing"),
+        pytest.param({"strategy": "momentum"}, id="no configuration"),
+        pytest.param({"configuration": "0" * 64}, id="no strategy"),
+        pytest.param({"strategy": 1, "configuration": "0" * 64}, id="a strategy that is no name"),
+        pytest.param({"strategy": "momentum", "configuration": ["0"]}, id="a configuration that is no hash"),
+    ],
+)
+def test_a_request_whose_arguments_name_nothing_is_refused(registered, arguments):
+    registered.backtest(HOLD)
+
+    answer = registered.call("request_verdict", arguments)
+
+    assert answer["isError"]
+    assert refusals("verdict")[-1]["reason"] == "bad-arguments"
+    assert events("verdict") == []
+
+
+# The verdict: what stops it, at no cost
+
+
+def test_data_changed_since_the_registration_gives_no_verdict_and_spends_none(registered, market):
+    config = registered.backtest(HOLD)["config_hash"]
+    original = market.read_text()
+    market.write_text(original + json.dumps(bar("2026-03-02", 1)) + "\n")
+
+    answer = ask_verdict(registered, config)
+
+    assert answer["isError"]
+    assert "did not run" in text_of(answer)
+    assert events("verdict") == []
+    assert events("config-refused")[-1]["reason"] == "data-changed"
+    assert events("config-refused")[-1]["config_hash"] == config
+
+    market.write_text(original)
+    assert verdict_of(registered, config)["trials"] == 1
+
+
+def test_data_gone_gives_no_verdict(registered, market):
+    config = registered.backtest(HOLD)["config_hash"]
+    market.unlink()
+
+    assert ask_verdict(registered, config)["isError"]
+    assert events("verdict") == []
+    assert events("config-refused")[-1]["reason"] == "data-changed"
+
+
+def test_with_no_bwrap_nothing_runs_on_the_holdout_and_no_verdict_is_spent(registered, monkeypatch, tmp_path):
+    config = registered.backtest(HOLD)["config_hash"]
+    monkeypatch.setattr(quant, "SYSTEM_PATH", str(tmp_path / "empty"))
+
+    with pytest.raises(quant.Logged) as refused:
+        quant.verdict({"strategy": "momentum", "configuration": config}, "cell:alpha", 5)
+
+    assert refused.value.reason == "no-confinement"
+    assert events("verdict") == []
+    # The tools' own server has the system's path, and asks again as if the machine were mended.
+    assert verdict_of(registered, config)["trials"] == 1
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        pytest.param(lambda path: path.unlink(), id="gone"),
+        pytest.param(lambda path: path.write_text("{"), id="not JSON"),
+        pytest.param(lambda path: path.write_text("[1]"), id="no object"),
+        pytest.param(lambda path: path.write_text(json.dumps({"code": HOLD})), id="no parameters"),
+        pytest.param(lambda path: path.write_text(json.dumps({"code": FLAT, "parameters": {}})), id="other code than the record names"),
+    ],
+)
+def test_a_kept_configuration_that_is_not_what_ran_is_never_run(registered, damage):
+    ran = registered.backtest(HOLD)
+    damage(paths.configurations() / str(ran["registration_seq"]) / f"{ran['config_hash']}.json")
+
+    answer = ask_verdict(registered, ran["config_hash"])
+
+    assert answer["isError"]
+    assert events("verdict") == []
+    assert events("config-refused")[-1]["reason"] == "configuration-lost"
+
+
+# The verdict: what the cell sees
+
+
+VERDICT_FIELDS = {"registration_seq", "config_hash", "passed", "failed_tests", "deflated_sharpe", "holdout_return", "max_drawdown", "trials", "config_run_seqs", "holdout_hash"}
+
+
+def _home_files_but_the_bars():
+    return [path for path in paths.home().rglob("*") if path.is_file() and path.parent.name != "market-data"]
+
+
+def _holds_a_holdout_figure(text):
+    """Whether the text holds a holdout bar's mark or price, or either of HOLD's returns on those bars."""
+    figures = (HOLDOUT_MARKER, str(HOLDOUT_CLOSE), json.dumps(HOLD_HOLDOUT_RETURNS[0]), json.dumps(HOLD_HOLDOUT_RETURNS[1]), "2026-02-03")
+    return [figure for figure in figures if figure in text]
+
+
+def test_after_its_verdict_the_cell_has_only_the_verdicts_fields(registered):
+    ran = registered.backtest(HOLD)
+    before = "".join(registered.received)
+    answer = ask_verdict(registered, ran["config_hash"])
+    told = json.loads(text_of(answer))
+
+    assert set(told) == {"event", *VERDICT_FIELDS}
+    event = events("verdict")[-1]
+    assert {name: told[name] for name in VERDICT_FIELDS} == {name: event[name] for name in VERDICT_FIELDS}
+    assert _holds_a_holdout_figure(before) == []
+    assert _holds_a_holdout_figure(json.dumps(answer)) == []
+
+
+def test_no_record_or_file_of_the_company_holds_a_holdout_figure_before_or_after(registered):
+    """A view of the ledger can show only what the ledger holds, and whatever view a later ticket builds shows none of this."""
+    ran = registered.backtest(HOLD)
+    assert all(_holds_a_holdout_figure(path.read_text()) == [] for path in _home_files_but_the_bars())
+
+    verdict_of(registered, ran["config_hash"])
+
+    assert all(_holds_a_holdout_figure(path.read_text()) == [] for path in _home_files_but_the_bars())
+
+
+def test_a_strategy_that_tries_to_say_a_holdout_bar_says_nothing(market):
+    """The one code handed a holdout bar is the cell's, in the sandbox, and it speaks only through positions and a failure."""
+    spy = """
+import sys
+def decide(bar, parameters):
+    if bar["date"] > "2026-01-31":
+        print(bar)
+        sys.stderr.write(str(bar))
+        raise RuntimeError("seen: " + str(bar))
+    return {}
+"""
+    tools = CellTools()
+    try:
+        assert not tools.register()["isError"]
+        ran = tools.backtest(spy)
+        verdict_of(tools, ran["config_hash"])
+        received = "".join(tools.received)
+    finally:
+        tools.close()
+
+    assert _holds_a_holdout_figure(received) == []
+    assert all(_holds_a_holdout_figure(path.read_text()) == [] for path in _home_files_but_the_bars())
+
+
+def test_only_the_treasurer_may_write_a_verdict(registered):
+    ran = registered.backtest(HOLD)
+    fields = {name: 1 for name in VERDICT_FIELDS} | {"registration_seq": ran["registration_seq"], "config_run_seqs": [ran["event"]]}
+
+    with pytest.raises(AppendRefused):
+        Ledger().append("verdict", fields, "cell:alpha")
+
+    assert events("verdict") == []
+
+
+def test_a_stub_cell_gets_its_verdict_through_the_real_tools(cell_session, stub):
+    config = quant.config_hash(HOLD, {})
+    done = cell_session(
+        {"do": "list-tools"},
+        {"do": "tool", "name": "register_strategy", "arguments": registration()},
+        {"do": "tool", "name": "request_verdict", "arguments": {"strategy": "momentum", "configuration": config}},
+        {"do": "tool", "name": "run_backtest", "arguments": {"strategy": "momentum", "code": HOLD}},
+        {"do": "tool", "name": "note", "arguments": {"text": "I expect 9.99."}},
+        {"do": "tool", "name": "request_verdict", "arguments": {"strategy": "momentum", "configuration": config}},
+        {"do": "tool", "name": "request_verdict", "arguments": {"strategy": "momentum", "configuration": config}},
+    )
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "request_verdict" in {tool["name"] for tool in stub.tool_lists()[-1]["result"]["tools"]}
+    assert "mcp__company__request_verdict" in stub.argument("--allowedTools").split(",")
+    _, too_early, _, _, given, second = stub.tool_results()
+    assert too_early["result"]["isError"]
+    assert json.loads(_tool_text(given))["deflated_sharpe"] == pytest.approx(0.66245, abs=1e-5)
+    assert second["result"]["isError"]
+    assert len(events("verdict")) == 1
+    assert events("verdict")[-1]["writer"] == "treasurer"
+    received = json.dumps(stub.tool_results())
+    assert HOLDOUT_MARKER not in received
+    assert str(HOLDOUT_CLOSE) not in received
+
+
+def test_only_a_cell_has_the_verdict_tool(company, stub, board, market):
+    stub.play({"do": "tool", "name": "request_verdict", "arguments": {"strategy": "momentum", "configuration": "0" * 64}})
+
+    assert company("session", "start", "probe").returncode == 0
+
+    assert stub.tool_results()[-1]["result"]["isError"]
+    assert refusals("verdict")[-1]["reason"] == "tool-not-in-role"

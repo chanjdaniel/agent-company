@@ -1,5 +1,7 @@
 """The Treasurer's numbers: pure functions over the ledger's events, the usage records and Daniel's settings."""
 
+import math
+import statistics
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -20,6 +22,9 @@ _MONTHS_PER_YEAR = 12
 CELL_PREFIX = "cell:"
 _MONEY_FIELDS = {"revenue": "revenue", "refund": "refunds", "fee": "fees", "spend": "spent"}
 _SESSION_ENDS = ("session-ended", "session-stopped")
+_EULER_MASCHERONI = 0.5772156649015329
+_NORMAL = statistics.NormalDist()
+OVERFITTING, HOLDOUT, MAX_DRAWDOWN = "overfitting", "holdout", "max_drawdown"
 
 
 @dataclass(frozen=True)
@@ -486,3 +491,81 @@ def week_charges_due(result: Share, events: list[dict]) -> list[dict]:
                 }
             )
     return due
+
+
+def expected_maximum_sharpe(variance: float, trials: int) -> float:
+    """The best per-bar Sharpe ratio chance alone would be expected to show among these trials: Bailey and López de Prado's equation 1."""
+    if trials < 2:
+        return 0.0
+    scale = (1 - _EULER_MASCHERONI) * _NORMAL.inv_cdf(1 - 1 / trials) + _EULER_MASCHERONI * _NORMAL.inv_cdf(1 - 1 / (trials * math.e))
+    return math.sqrt(variance) * scale
+
+
+def deflated_sharpe(sharpe: float, n_returns: int, skew: float, kurtosis: float, threshold: float) -> float:
+    """The confidence that a per-bar Sharpe ratio beats `threshold`, from 0 to 1: their equation 2, with `kurtosis` not excess.
+
+    What cannot be measured, from one return or with no spread in the estimate or past what a float holds, reads as no confidence.
+    """
+    if n_returns < 2:
+        return 0.0
+    spread = 1 - skew * sharpe + (kurtosis - 1) / 4 * sharpe * sharpe
+    if not 0 < spread < math.inf:
+        return 0.0
+    value = _NORMAL.cdf((sharpe - threshold) * math.sqrt(n_returns - 1) / math.sqrt(spread))
+    return value if math.isfinite(value) else 0.0
+
+
+def trials_variance(runs: list[dict], n_returns: int) -> float:
+    """The variance of the Sharpe ratios among these `config-run` records, and at least what chance gives over `n_returns`.
+
+    A failed run has no ratio, though its failure's text may have told the cell how it did, and near-copies have no spread;
+    the paper reads the spread from the trials, and this floor keeps either from leaving the threshold at nothing.
+    """
+    ratios = [run["sharpe"] for run in runs if run["status"] == "ok"]
+    chance = 1 / (n_returns - 1) if n_returns > 1 else 0.0
+    if len(ratios) < 2:
+        return chance
+    try:
+        return max(statistics.variance(ratios), chance)
+    except OverflowError:
+        return math.inf
+
+
+def deflated_sharpe_of(chosen: dict, runs: list[dict]) -> float:
+    """The deflated Sharpe ratio of the chosen `config-run`, given every `config-run` counted as a trial, itself among them."""
+    variance = trials_variance(runs, chosen["n_returns"])
+    return deflated_sharpe(chosen["sharpe"], chosen["n_returns"], chosen["skew"], chosen["kurtosis"], expected_maximum_sharpe(variance, len(runs)))
+
+
+def verdict(registration: dict, chosen: dict, runs: list[dict], holdout: dict) -> dict:
+    """A `verdict` event's fields, from the records alone and the holdout's figures, which hold `failure` if the strategy failed there.
+
+    The drawdown is the worse of the backtest's and the holdout's, so that a short holdout cannot hide what the backtest recorded.
+    """
+    acceptance = registration["acceptance"]
+    deflated = deflated_sharpe_of(chosen, runs)
+    failure = holdout.get("failure")
+    holdout_return = None if failure else holdout["total_return"]
+    drawdown = chosen["max_drawdown"] if failure else max(chosen["max_drawdown"], holdout["max_drawdown"])
+    failed = [
+        name
+        for name, held in (
+            (OVERFITTING, deflated >= acceptance["min_deflated_sharpe"]),
+            (HOLDOUT, holdout_return is not None and holdout_return >= acceptance["min_holdout_return"]),
+            (MAX_DRAWDOWN, drawdown <= acceptance["max_drawdown"]),
+        )
+        if not held
+    ]
+    return {
+        "registration_seq": registration["seq"],
+        "config_hash": chosen["config_hash"],
+        "passed": not failed,
+        "failed_tests": failed,
+        "deflated_sharpe": deflated,
+        "holdout_return": holdout_return,
+        "max_drawdown": drawdown,
+        "trials": len(runs),
+        "config_run_seqs": [run["seq"] for run in runs],
+        "holdout_hash": None if failure else holdout["returns_hash"],
+        **({"holdout_failure": failure} if failure else {}),
+    }
