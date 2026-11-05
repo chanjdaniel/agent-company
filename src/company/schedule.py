@@ -52,6 +52,8 @@ JOBS = (
     # A window is counted whole only by a charge after its last session and before its reset. The launcher fires this at
     # each session's end; the timer catches a window's last minutes, and a session whose launcher died.
     Job(CHARGE_JOB, ("treasurer", "charge"), "*:0/5", treasurer.charge_due),
+    # After New York's close in either season, so that the day's bar is whole.
+    Job("paper-tick", ("paper", "tick"), "Mon..Fri 21:30:00 UTC"),
 )
 
 

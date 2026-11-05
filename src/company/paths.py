@@ -3,6 +3,8 @@
 import os
 from pathlib import Path
 
+PAPER_KEY = "paper.key"
+
 
 def home() -> Path:
     """The company home: the ledger, session workspaces and the replay set."""
@@ -12,6 +14,11 @@ def home() -> Path:
 def config() -> Path:
     """Daniel's config directory: their settings and the paper key."""
     return Path(os.environ.get("COMPANY_CONFIG") or Path.home() / ".config/agent-company")
+
+
+def paper_key() -> Path:
+    """The paper account's key file, which only `paper.py` reads, and only when it is about to use it."""
+    return config() / PAPER_KEY
 
 
 def claude_directory() -> Path:

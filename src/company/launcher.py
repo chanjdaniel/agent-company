@@ -173,7 +173,8 @@ def _mcp_config(role: str, bet: str | None, session: str, backtest_seconds: floa
     # `-P`: this starts in the workspace, and with the working directory on its path a file there could run as this code.
     arguments = ["-P", "-m", "company.tools", "--role", role, "--session", session, *(("--bet", bet) if bet else ())]
     # On the command line, as the role and bet are, so that the server needs no path to Daniel's settings.
-    arguments += ["--backtest-seconds", str(backtest_seconds)] if backtest_seconds is not None else []
+    # A cell's server reaches the broker's bars for a registration, so it is told where the key is, and of Daniel's directory nothing more.
+    arguments += ["--backtest-seconds", str(backtest_seconds), "--paper-key", str(paths.paper_key())] if backtest_seconds is not None else []
     server = {"type": "stdio", "command": sys.executable, "args": arguments, "env": {"COMPANY_HOME": str(paths.home()), SESSION_VARIABLE: session}}
     return {"mcpServers": {"company": server}}
 

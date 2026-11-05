@@ -10,8 +10,9 @@ import json
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
-from company import contract, quant
+from company import contract, paper, quant
 from company.ledger import AppendRefused, Ledger, LedgerBroken
 
 _PARSE_ERROR = -32700
@@ -41,7 +42,7 @@ def _note(server: "Server", arguments: dict) -> dict:
 
 
 def _register_strategy(server: "Server", arguments: dict) -> dict:
-    event = quant.register(arguments, server.writer)
+    event = quant.register(arguments, server.writer, server.market_data)
     return _result(f"Registered as event {event['seq']}, with the data's hash {event['data_hash']}.")
 
 
@@ -81,7 +82,7 @@ _REGISTER = Tool(
         "properties": {
             "strategy": {"type": "string", "description": "Lower-case letters, digits, hyphens and underscores."},
             "universe": {"type": "array", "items": {"type": "string"}},
-            "data_source": {"type": "string"},
+            "data_source": {"type": "string", "description": f"`{paper.BARS_SOURCE}` for the paper broker's free daily bars, fetched now and kept, or `fixture:<name>`."},
             "in_sample": _PERIOD,
             "holdout": _PERIOD,
             "cost_model": _COST,
@@ -149,8 +150,8 @@ def writer_of(role: str, bet: str | None) -> str:
 class Server:
     """The tools one session may call, with its writer fixed."""
 
-    def __init__(self, role: str, bet: str | None, session: str, backtest_seconds: float = 0):
-        self.role, self.session, self.backtest_seconds = role, session, backtest_seconds
+    def __init__(self, role: str, bet: str | None, session: str, backtest_seconds: float = 0, market_data: paper.MarketData | None = None):
+        self.role, self.session, self.backtest_seconds, self.market_data = role, session, backtest_seconds, market_data
         self.writer = writer_of(role, bet)
         self.ledger = Ledger()
 
@@ -235,10 +236,12 @@ def main() -> int:
     parser.add_argument("--session", required=True)
     parser.add_argument("--bet")
     parser.add_argument("--backtest-seconds", type=float, default=0, help="A strategy's time limit, from Daniel's settings.")
+    parser.add_argument("--paper-key", help="Where the paper key is, for the broker's bars at a registration; no tool reads it otherwise.")
     args = parser.parse_args()
     if args.role == "cell" and not args.backtest_seconds > 0:
         parser.error("a cell's server needs its strategy time limit, --backtest-seconds")
-    serve(Server(args.role, args.bet, args.session, args.backtest_seconds), sys.stdin, sys.stdout)
+    market_data = paper.MarketData(paper.transport(), Path(args.paper_key)) if args.paper_key else None
+    serve(Server(args.role, args.bet, args.session, args.backtest_seconds, market_data), sys.stdin, sys.stdout)
     return 0
 
 

@@ -92,14 +92,16 @@ def test_with_no_systemctl_it_says_so(company, monkeypatch, tmp_path):
 # The job list
 
 
-def test_the_self_test_and_the_charge_are_jobs(company, systemctl):
+def test_the_self_test_the_charge_and_the_paper_tick_are_jobs(company, systemctl):
     assert ("kill", "--self-test") in [job.command for job in schedule.JOBS]
     assert ("treasurer", "charge") in [job.command for job in schedule.JOBS]
+    assert ("paper", "tick") in [job.command for job in schedule.JOBS]
     done = company("schedule", "list")
     assert done.returncode == 0, done.stderr
     assert "The schedule is off." in done.stdout
     assert "kill-self-test: `company kill --self-test`" in done.stdout
     assert "treasurer-charge: `company treasurer charge`" in done.stdout
+    assert "paper-tick: `company paper tick`" in done.stdout
 
 
 @pytest.mark.parametrize("name", JOB_NAMES)

@@ -20,18 +20,20 @@ import sys
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import IO
 
-from company import paths, treasurer
-from company.ledger import Ledger
+from company import paper, paths, times, treasurer
+from company.ledger import AppendRefused, Ledger, LedgerBroken
 
 # Fixed, so that the sandbox's binary never comes from a path a caller chose. A test replaces this.
 SYSTEM_PATH = "/usr/local/bin:/usr/bin:/bin"
 MAX_CODE_CHARACTERS = 1_000_000
 MAX_FAILURE_CHARACTERS = 300
 DEFAULT_PAPER_DAYS = 90
+# Past this a period would outlast any reader of it, and far past it no date can hold its end.
+MAX_PAPER_DAYS = 3650
 
 _NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _SYMBOL = re.compile(r"[A-Z0-9][A-Z0-9./-]{0,15}")
@@ -74,7 +76,7 @@ class Logged(Exception):
         self.reason, self.seq = reason, seq
 
 
-class _NoConfinement(Exception):
+class NoConfinement(Exception):
     """No sandbox started, so no code of the cell's ran, and the reason is no fault of the strategy's."""
 
     def __init__(self, reason: str):
@@ -82,7 +84,7 @@ class _NoConfinement(Exception):
         self.reason = reason
 
 
-class _StrategyFailed(Exception):
+class StrategyFailed(Exception):
     """The strategy did not give a position for every bar; `kind` says how, and only the message may hold the strategy's words."""
 
     def __init__(self, kind: str, detail: str | None = None):
@@ -163,7 +165,7 @@ _FIELD_CHECKS = {
     "slippage_model": _is_model,
     "max_configurations": _is_whole,
     "acceptance": _is_acceptance,
-    "paper_days": _is_whole,
+    "paper_days": lambda value: _is_whole(value) and value <= MAX_PAPER_DAYS,
 }
 
 
@@ -187,17 +189,61 @@ def _is_bar(bar) -> bool:
     return all(isinstance(fields, dict) and _is_number(fields.get("close")) and fields["close"] > 0 for fields in bar["symbols"].values())
 
 
-def _market_data(source: str) -> _Market:
-    """A data source's bars; raise `Refused` if it is no source this company has, or what it holds cannot be read as bars."""
+def _fixture_content(source: str) -> bytes:
     match = _FIXTURE.fullmatch(source)
     if match is None:
         raise Refused("data-unavailable:no-such-source")
+    return _read_bytes(paths.market_data() / f"{match['name']}.jsonl")
+
+
+def _read_bytes(path: Path) -> bytes:
     try:
-        content = (paths.market_data() / f"{match['name']}.jsonl").read_bytes()
+        return path.read_bytes()
     except FileNotFoundError:
         raise Refused("data-unavailable:no-such-source") from None
     except OSError:
         raise Refused("data-unavailable:unreadable") from None
+
+
+def _broker_copy(data_hash: str) -> Path:
+    """A registration's own copy of the broker's bars: in a folder of its own, so that no `fixture:` name can reach it."""
+    return paths.market_data() / "broker" / f"{data_hash}.jsonl"
+
+
+def _fetched_market(fields: dict, market_data: paper.MarketData | None) -> _Market:
+    """The broker's bars for what a registration names, fetched now and kept, so that each later run can check them by hash.
+
+    The day's own bar is not whole until it ends, so a period may not reach today.
+    """
+    if market_data is None:
+        raise Refused("data-unavailable:no-such-source")
+    if _days(fields["holdout"])[1] >= times.now().date():
+        raise Refused("data-unavailable:not-covered")
+    try:
+        bars = market_data.bars(fields["universe"], fields["in_sample"]["start"], fields["holdout"]["end"])
+    except paper.KeyUnavailable:
+        raise Refused("data-unavailable:no-key") from None
+    except paper.PaperFailed:
+        raise Refused("data-unavailable:broker-failed") from None
+    if not bars:
+        raise Refused("data-unavailable:not-covered")
+    content = "".join(json.dumps(bar, sort_keys=True, separators=(",", ":")) + "\n" for bar in bars).encode()
+    market = _market_of(content)
+    path = _broker_copy(market.data_hash)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.write_bytes(content)
+    return market
+
+
+def _registration_market(fields: dict, market_data: paper.MarketData | None) -> _Market:
+    """The bars a registration names, whichever provider holds them."""
+    if fields["data_source"] == paper.BARS_SOURCE:
+        return _fetched_market(fields, market_data)
+    return _market_of(_fixture_content(fields["data_source"]))
+
+
+def _market_of(content: bytes) -> _Market:
+    """What a source holds, as bars; raise `Refused` if it cannot be read as bars."""
     try:
         bars = [json.loads(line) for line in content.splitlines()]
         days = [date.fromisoformat(bar["date"]) for bar in bars]
@@ -237,11 +283,12 @@ def _same_strategy(event: dict, writer: str, strategy: str) -> bool:
 def _check_periods_unspent(events: list[dict], fields: dict, writer: str) -> None:
     """Keep each holdout unseen and one registration's: else a new name would reset a budget on it, or read it as in-sample.
 
+    This looks at the days alone, on every source: there is one market, and two sources may hold the same bars, so a name or a provider says nothing of what a source holds.
     A registration that was replaced ran nothing, so only the newest of each strategy holds its periods, and this one replaces its own.
     """
     standing = {(event["writer"], event["strategy"]): event for event in _registrations(events)}
     for earlier in standing.values():
-        if earlier["data_source"] != fields["data_source"] or _same_strategy(earlier, writer, fields["strategy"]):
+        if _same_strategy(earlier, writer, fields["strategy"]):
             continue
         if _overlap(fields["in_sample"], earlier["holdout"]) or _overlap(fields["holdout"], earlier["holdout"]):
             raise Refused("holdout-already-held")
@@ -264,7 +311,7 @@ def _locked() -> Iterator[None]:
         os.close(fd)
 
 
-def register(arguments: dict, writer: str) -> dict:
+def register(arguments: dict, writer: str, market_data: paper.MarketData | None = None) -> dict:
     """Log a cell's registration, with the data's hash filled in here; raise `Refused` if it may not stand.
 
     It may be replaced until its first run cites it, and the newest of a strategy's registrations is the one that counts.
@@ -276,10 +323,11 @@ def register(arguments: dict, writer: str) -> dict:
         own = (event for event in _registrations(events) if _same_strategy(event, writer, fields["strategy"]))
         if any(_runs_of(events, event["seq"]) for event in own):
             raise Refused("registration-closed")
-        market = _market_data(fields["data_source"])
+        # Before the bars, so that a registration that may not stand costs no call to the broker.
+        _check_periods_unspent(events, fields, writer)
+        market = _registration_market(fields, market_data)
         if _in_period(market, fields["in_sample"], fields["universe"]) is None or _in_period(market, fields["holdout"], fields["universe"]) is None:
             raise Refused("data-unavailable:not-covered")
-        _check_periods_unspent(events, fields, writer)
         return ledger.append("strategy-registered", {**fields, "data_hash": market.data_hash}, writer)
 
 
@@ -343,13 +391,13 @@ def _read_message(output: IO[bytes]) -> dict | None:
     if not line.endswith(b"\n"):
         if len(line) < _MAX_LINE_BYTES:
             return None
-        raise _StrategyFailed(_BAD_OUTPUT, "a line too long")
+        raise StrategyFailed(_BAD_OUTPUT, "a line too long")
     try:
         message = json.loads(line)
     except (ValueError, RecursionError):
-        raise _StrategyFailed(_BAD_OUTPUT, "not JSON") from None
+        raise StrategyFailed(_BAD_OUTPUT, "not JSON") from None
     if not isinstance(message, dict):
-        raise _StrategyFailed(_BAD_OUTPUT, "not an object")
+        raise StrategyFailed(_BAD_OUTPUT, "not an object")
     return message
 
 
@@ -361,35 +409,35 @@ def _send(given: IO[bytes], message: dict) -> None:
 def _positions(message: dict | None, universe: list[str]) -> dict[str, float]:
     """The target weights in one answer, which may together hold at most the account's whole value."""
     if message is None:
-        raise _StrategyFailed(_ENDED)
+        raise StrategyFailed(_ENDED)
     if set(message) == {"error"}:
-        raise _StrategyFailed(_CRASHED, message["error"])
+        raise StrategyFailed(_CRASHED, message["error"])
     positions = message.get("positions") if set(message) == {"positions"} else None
     if not isinstance(positions, dict) or not all(symbol in universe for symbol in positions):
-        raise _StrategyFailed(_BAD_OUTPUT, "not positions in the universe")
+        raise StrategyFailed(_BAD_OUTPUT, "not positions in the universe")
     for value in positions.values():
         # NaN and the infinities read as JSON numbers, and fail this too.
         if not isinstance(value, int | float) or isinstance(value, bool) or not abs(value) <= 1:
-            raise _StrategyFailed(_BAD_OUTPUT, "a position that is not a weight from -1 to 1")
+            raise StrategyFailed(_BAD_OUTPUT, "a position that is not a weight from -1 to 1")
     if sum(abs(value) for value in positions.values()) > 1 + _TOLERANCE:
-        raise _StrategyFailed(_BAD_OUTPUT, "positions past the account's whole value")
+        raise StrategyFailed(_BAD_OUTPUT, "positions past the account's whole value")
     return {symbol: float(value) for symbol, value in positions.items()}
 
 
 def _play(configuration: _Configuration, bars: list[dict], universe: list[str], seconds: float) -> list[dict[str, float]]:
     """The strategy's positions, one per bar, each sent only once it has answered the last.
 
-    Raise `_NoConfinement` if no sandbox started, and `_StrategyFailed` if the strategy failed in one.
+    Raise `NoConfinement` if no sandbox started, and `StrategyFailed` if the strategy failed in one.
     """
     bwrap = shutil.which("bwrap", path=SYSTEM_PATH)
     if bwrap is None:
-        raise _NoConfinement("no-confinement")
+        raise NoConfinement("no-confinement")
     expired = threading.Event()
     try:
         # It stays in this process's group, so that a session's stop reaches it, and `--die-with-parent` covers the rest.
         process = subprocess.Popen(_sandbox(bwrap), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env={}, cwd="/")
     except OSError:
-        raise _NoConfinement("no-confinement") from None
+        raise NoConfinement("no-confinement") from None
 
     def expire() -> None:
         expired.set()
@@ -401,10 +449,10 @@ def _play(configuration: _Configuration, bars: list[dict], universe: list[str], 
     try:
         return _exchange(process.stdin, process.stdout, configuration, bars, universe)
     except BrokenPipeError:
-        raise _StrategyFailed(_TIMED_OUT if expired.is_set() else _ENDED) from None
-    except _StrategyFailed as failed:
+        raise StrategyFailed(_TIMED_OUT if expired.is_set() else _ENDED) from None
+    except StrategyFailed as failed:
         # However the end looked from here, a killed strategy's came from the limit.
-        raise _StrategyFailed(_TIMED_OUT) if expired.is_set() else failed from None
+        raise StrategyFailed(_TIMED_OUT) if expired.is_set() else failed from None
     finally:
         timer.cancel()
         process.kill()
@@ -417,10 +465,10 @@ def _play(configuration: _Configuration, bars: list[dict], universe: list[str], 
 def _exchange(given: IO[bytes], output: IO[bytes], configuration: _Configuration, bars: list[dict], universe: list[str]) -> list[dict[str, float]]:
     try:
         ready = _read_message(output)
-    except _StrategyFailed:
+    except StrategyFailed:
         ready = None
     if ready != {"ready": True}:
-        raise _NoConfinement("confinement-failed")
+        raise NoConfinement("confinement-failed")
     _send(given, {"code": configuration.code, "parameters": configuration.parameters})
     positions = []
     for bar in bars:
@@ -467,7 +515,7 @@ def _run_once(configuration: _Configuration, registration: dict, bars: list[dict
     """The record of one run, whichever way it went. No position is taken on the last bar, since no return follows it."""
     try:
         positions = _play(configuration, bars[:-1], registration["universe"], seconds)
-    except _StrategyFailed as failed:
+    except StrategyFailed as failed:
         return {"status": _FAILED, "failure": str(failed)[:MAX_FAILURE_CHARACTERS]}
     measures = _measures(_returns(bars, positions, _cost_per_turnover(registration)))
     if measures is None:
@@ -498,7 +546,8 @@ def _standing_registration(events: list[dict], writer: str, strategy: str) -> di
 def _unchanged_market(registration: dict) -> _Market | None:
     """The bars a registration hashed, or None if its source no longer holds them."""
     try:
-        market = _market_data(registration["data_source"])
+        source = registration["data_source"]
+        market = _market_of(_read_bytes(_broker_copy(registration["data_hash"])) if source == paper.BARS_SOURCE else _fixture_content(source))
     except Refused:
         return None
     return market if market.data_hash == registration["data_hash"] else None
@@ -540,7 +589,7 @@ def run(arguments: dict, writer: str, seconds: float) -> dict:
         _keep_configuration(seq, configuration)
         try:
             result = _run_once(configuration, registration, bars, seconds)
-        except _NoConfinement as absent:
+        except NoConfinement as absent:
             raise refuse(absent.reason) from None
         fields = {"registration_seq": seq, "config_hash": configuration.identity, "budget_used": len(runs) + 1, **result}
         return _answer(ledger.append("config-run", fields, "runner"), registration, repeat=False)
@@ -557,7 +606,7 @@ def _kept_configuration(registration_seq: int, identity: str) -> _Configuration 
 
 
 def _holdout_run(configuration: _Configuration, registration: dict, in_sample: list[dict], holdout: list[dict], seconds: float) -> dict:
-    """The holdout's figures for one configuration, or `{failure}`; raise `_NoConfinement` if no sandbox started.
+    """The holdout's figures for one configuration, or `{failure}`; raise `NoConfinement` if no sandbox started.
 
     The strategy is fed the in-sample bars and then the holdout's, as one run, so that what it looks back on is there, and only the holdout's positions earn.
     A strategy that takes none there was never tried on it, whatever a return of nothing would pass.
@@ -565,7 +614,7 @@ def _holdout_run(configuration: _Configuration, registration: dict, in_sample: l
     """
     try:
         positions = _play(configuration, [*in_sample, *holdout[:-1]], registration["universe"], seconds)
-    except _StrategyFailed as failed:
+    except StrategyFailed as failed:
         return {"failure": failed.kind}
     on_holdout = positions[len(in_sample) :]
     if not any(weight for held in on_holdout for weight in held.values()):
@@ -623,7 +672,44 @@ def verdict(arguments: dict, writer: str, seconds: float) -> dict:
             ledger.append("verdict-opened", {"registration_seq": seq, "config_hash": identity}, "treasurer")
         try:
             figures = _holdout_run(configuration, registration, in_sample, holdout, seconds)
-        except _NoConfinement as absent:
+        except NoConfinement as absent:
             raise _refusal(ledger, seq, identity, absent.reason) from None
         event = ledger.append("verdict", treasurer.verdict_fields(registration, chosen, _trials(events, registration), figures), "treasurer")
+        # The verdict stands whatever comes of this, and the next tick opens what this could not.
+        with contextlib.suppress(AppendRefused, LedgerBroken, OSError):
+            _open_waiting(ledger)
     return {"event": event["seq"], **_own_fields(event)}
+
+
+def _open_waiting(ledger: Ledger) -> dict | None:
+    """Open the oldest verdict's paper period, with the promise of its end date, unless another holds the account; its first tick takes the first reading."""
+    events = ledger.read()
+    verdict_event = None if treasurer.open_period(events) is not None else treasurer.verdict_awaiting_paper(events)
+    if verdict_event is None:
+        return None
+    registration = treasurer.registration_of(events, verdict_event)
+    end_date = (times.now().date() + timedelta(days=registration["paper_days"])).isoformat()
+    bet = registration["writer"].removeprefix(treasurer.CELL_PREFIX)
+    promise = f"The paper period of strategy {registration['strategy']} closes by {end_date}."
+    promised = ledger.append("promise-recorded", {"promise": promise, "due_date": end_date, "bet": bet}, "runner")
+    fields = {"registration_seq": registration["seq"], "verdict_seq": verdict_event["seq"], "end_date": end_date, "drawdown_kill": registration["acceptance"]["max_drawdown"], "promise_seq": promised["seq"]}
+    return ledger.append("paper-opened", fields, "runner")
+
+
+def open_waiting_period() -> dict | None:
+    """The period a tick opens, if the account is free and a passing verdict waits for it."""
+    with _locked():
+        return _open_waiting(Ledger())
+
+
+def paper_targets(registration: dict, identity: str, bars: list[dict], seconds: float) -> dict[str, float]:
+    """A strategy's target weights on the newest of these bars, fed one at a time as a verdict feeds them, in the same sandbox.
+
+    Raise `StrategyFailed`, whose `kind` alone says how, and `NoConfinement` if no sandbox started.
+    """
+    configuration = _kept_configuration(registration["seq"], identity)
+    if configuration is None:
+        raise StrategyFailed("configuration-lost")
+    universe = registration["universe"]
+    fed = [{**bar, "symbols": {symbol: bar["symbols"][symbol] for symbol in universe}} for bar in bars]
+    return _play(configuration, fed, universe, seconds)[-1]

@@ -16,6 +16,7 @@ UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 _DISCORD_ID = re.compile(r"[0-9]{1,32}")
 # From zero up: a refund written as -5.00 would add to net revenue, since refunds are subtracted.
 _DECIMAL = re.compile(r"[0-9]+(\.[0-9]+)?")
+_SIGNED_DECIMAL = re.compile(r"-?[0-9]+(\.[0-9]+)?")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
@@ -68,6 +69,8 @@ def _type_holds(type_name: str, value, next_seq: int) -> bool:
             return _matches(_DISCORD_ID, value)
         case "decimal":
             return _matches(_DECIMAL, value)
+        case "signed-decimal":
+            return _matches(_SIGNED_DECIMAL, value)
         case "number":
             return _is_number(value)
         case "count":

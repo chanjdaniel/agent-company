@@ -32,6 +32,10 @@ def _url_allowed(path):
     return _is_document(path) or path == "uv.lock" or path == PAPER_MODULE
 
 
+def _paper_reach_allowed(path):
+    return _is_document(path) or path == PAPER_MODULE
+
+
 @dataclass(frozen=True)
 class Rule:
     name: str
@@ -71,6 +75,8 @@ RULES = (
             re.MULTILINE,
         ),
     ),
+    Rule("broker-key-variable", banned.BROKER_KEY_VARIABLE),
+    Rule("paper-reach", re.compile(r"(?<![\w.-])(?:paper-api|data)\.alpaca\.markets|APCA-API-", re.IGNORECASE), _paper_reach_allowed),
     Rule("api-key-helper", re.compile(r"apiKeyHelper"), _is_document),
     Rule("bare-mode", re.compile(r"(?<![\w-])--bare\b"), _is_document),
     Rule(

@@ -26,7 +26,7 @@ def page(events: list[dict], share: treasurer.Share | str, terms: treasurer.Term
         now,
         {
             "Bar": _bar(ladder),
-            "Bets": _bets(events, ladder),
+            "Bets": [*_bets(events, ladder), *map(_paper_line, treasurer.paper_results(events))],
             "Resources": _resources(events, share, terms, week),
             "Incidents": _incidents(events, week),
             "Honesty": _honesty(events, week),
@@ -105,6 +105,20 @@ def _bets(events: list[dict], ladder: treasurer.Ladder) -> list[str]:
     ]
     overhead = ladder.lines.get(treasurer.OVERHEAD, treasurer.Figures())
     return lines if overhead.is_zero else [*lines, _bet_line(treasurer.OVERHEAD, overhead, at_most)]
+
+
+def _paper_line(result: treasurer.PaperResult) -> str:
+    """A period's results, which are the cell's metric and no money, and say so."""
+    period = result.period
+    name = f"PAPER results, no real money: {result.bet}, strategy {result.strategy}"
+    if result.reading is None:
+        figures = "no reading yet"
+    else:
+        pnl, equity = Fraction(result.reading["pnl"]), Fraction(result.reading["equity"])
+        figures = f"profit and loss {_dollars(pnl)} on equity {_dollars(equity)} at {result.reading['taken_at']}"
+    if result.closed is not None:
+        return f"{name}: {figures}; closed: {result.closed['reason']}"
+    return f"{name}: {figures}; open until {period['end_date']}, drawdown kill {float(period['drawdown_kill']) * 100:g}%"
 
 
 def _token_line(name: str, found, terms: treasurer.Terms) -> str:

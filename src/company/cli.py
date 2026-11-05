@@ -12,8 +12,11 @@ from company import (
     contract,
     digest,
     governor,
+    kill_state,
     killswitch,
     launcher,
+    paper,
+    paper_period,
     reading,
     schedule,
     settings,
@@ -469,6 +472,40 @@ def _schedule_run(args) -> int:
     return main(list(job.command))
 
 
+def _paper_check(args) -> int:
+    """One read-only call to the paper host, which writes nothing."""
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, "paper-reading", "runner") or _is_broken(ledger):
+        return EXIT_REFUSED
+    held = kill_state.refusal(ledger.read())
+    if held:
+        print(f"company: refused: {held}, so `{kill_state.RESUME}` comes first. The paper account was not called.", file=sys.stderr)
+        return EXIT_REFUSED
+    try:
+        state = paper.Account(paper.transport()).read()
+    except paper.PaperFailed as failed:
+        print(f"company: the paper account was not read: {failed}.", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"{paper.LABEL}: the paper account's status is {state.status}, and its equity is ${state.equity:,.2f}.")
+    return EXIT_OK
+
+
+def _paper_tick(args) -> int:
+    ledger = Ledger()
+    if _refused_inside_a_session(ledger, "paper-order", "runner") or _is_broken(ledger):
+        return EXIT_REFUSED
+    try:
+        seconds = settings.positive_number(settings.load(), "backtest_max_seconds")
+        paper_period.tick(paper.Account(paper.transport()), paper.MarketData(paper.transport()), seconds, print)
+    except settings.SettingsRefused as refused:
+        print(f"company: refused: {refused}. The paper tick did not run.", file=sys.stderr)
+        return EXIT_REFUSED
+    except (paper_period.TickRefused, paper.PaperFailed, AppendRefused, LedgerBroken, OSError) as stopped:
+        print(f"company: the paper tick stopped here, with no real money involved: {stopped}. What it wrote stands.", file=sys.stderr)
+        return EXIT_REFUSED
+    return EXIT_OK
+
+
 # `settings init`'s flags: every one is the setting of the same name, and those with no value in the design are required.
 _INIT_FLAGS = {
     "company_share": True,
@@ -613,6 +650,15 @@ def _parser() -> argparse.ArgumentParser:
     firing = actions.add_parser("run", help="What a timer runs: one job, if the schedule is on and it is due.")
     firing.add_argument("job", choices=[job.name for job in schedule.JOBS])
     firing.set_defaults(run=_schedule_run)
+
+    account = commands.add_parser("paper", help="The paper account, where no real money is: code alone trades it.")
+    actions = account.add_subparsers(dest="action", required=True)
+
+    probe = actions.add_parser("check", help="Make one read-only call to the paper host, and print the account's status and equity.")
+    probe.set_defaults(run=_paper_check)
+
+    trade = actions.add_parser("tick", help="Run the open paper period once: read the account, close it if due, or run its strategy and place its orders.")
+    trade.set_defaults(run=_paper_tick)
 
     return parser
 

@@ -37,116 +37,35 @@ import time
 from pathlib import Path
 
 import pytest
+from quant_tools import (
+    FLAT,
+    HOLD,
+    HOLD_FIRST,
+    HOLDOUT_BARS,
+    HOLDOUT_CLOSE,
+    HOLDOUT_MARKER,
+    IN_SAMPLE_BARS,
+    IN_SAMPLE_MARKER,
+    SCALED,
+    SESSION,
+    CellTools,
+    ask_verdict,
+    bar,
+    registration,
+    strategy_doing,
+    text_of,
+    verdict_of,
+    write_market,
+)
 from session_checks import events, pid_is_running, wait_for
 
 from company import paths, quant, treasurer
 from company.ledger import AppendRefused, Ledger
 
-SESSION = "eeeeeeee-0000-4000-8000-000000000000"
-HOLDOUT_MARKER = "HOLDOUT-MARKER-71f3"
-IN_SAMPLE_MARKER = "IN-SAMPLE-MARKER-2c9a"
-# A close no in-sample bar has, so that a holdout price cannot pass unseen as a number.
-HOLDOUT_CLOSE = 7777.77
-
 _DEVIATIONS = (0.073875, -0.124625, -0.024625, 0.075375)
 _M2 = sum(value**2 for value in _DEVIATIONS) / 4
 WORKED_SKEW = (sum(value**3 for value in _DEVIATIONS) / 4) / _M2**1.5
 WORKED_KURTOSIS = (sum(value**4 for value in _DEVIATIONS) / 4) / _M2**2
-
-HOLD = 'def decide(bar, parameters):\n    return {"SPY": 1.0}\n'
-HOLD_FIRST = """
-seen = 0
-def decide(bar, parameters):
-    global seen
-    seen += 1
-    return {"SPY": 1.0 if seen == 1 else 0.0}
-"""
-FLAT = "def decide(bar, parameters):\n    return {}\n"
-SCALED = 'def decide(bar, parameters):\n    return {"SPY": parameters["weight"]}\n'
-
-
-def strategy_doing(action):
-    """A strategy that tries this on its first bar, and whose failure says what came of it."""
-    return f"def decide(bar, parameters):\n    {action}\n    return {{}}\n"
-
-
-def bar(day, close, note=None):
-    fields = {"open": close, "high": close, "low": close, "close": close, "volume": 1000}
-    return {"date": day, "symbols": {"SPY": fields | ({"note": note} if note else {}), "QQQ": fields}}
-
-
-IN_SAMPLE_BARS = [
-    bar("2026-01-05", 100, IN_SAMPLE_MARKER),
-    bar("2026-01-06", 110),
-    bar("2026-01-07", 99),
-    bar("2026-01-08", 99),
-    bar("2026-01-09", 108.9),
-]
-HOLDOUT_BARS = [
-    bar("2026-02-02", HOLDOUT_CLOSE, HOLDOUT_MARKER),
-    bar("2026-02-03", HOLDOUT_CLOSE * 2, HOLDOUT_MARKER),
-    bar("2026-02-04", HOLDOUT_CLOSE, HOLDOUT_MARKER),
-]
-
-
-def write_market(name="daily", bars=(*IN_SAMPLE_BARS, *HOLDOUT_BARS)):
-    folder = paths.home() / "market-data"
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{name}.jsonl"
-    path.write_text("".join(json.dumps(item) + "\n" for item in bars))
-    return path
-
-
-def registration(**changes):
-    fields = {
-        "strategy": "momentum",
-        "universe": ["SPY"],
-        "data_source": "fixture:daily",
-        "in_sample": {"start": "2026-01-05", "end": "2026-01-09"},
-        "holdout": {"start": "2026-02-02", "end": "2026-02-04"},
-        "cost_model": {"bps_per_turnover": 10},
-        "slippage_model": {"bps_per_turnover": 5},
-        "max_configurations": 3,
-        "acceptance": {"min_deflated_sharpe": 0.9, "min_holdout_return": 0, "max_drawdown": 0.2},
-    }
-    return {**fields, **changes}
-
-
-class CellTools:
-    """One cell's company tools over stdio, keeping everything the cell received."""
-
-    def __init__(self, bet="alpha", seconds=20):
-        arguments = ["-P", "-m", "company.tools", "--role", "cell", "--session", SESSION, "--bet", bet, "--backtest-seconds", str(seconds)]
-        self.process = subprocess.Popen([sys.executable, *arguments], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-        self.received = []
-        self.next_id = 1
-
-    def call(self, name, arguments):
-        message = {"jsonrpc": "2.0", "id": self.next_id, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
-        self.next_id += 1
-        self.process.stdin.write(json.dumps(message) + "\n")
-        self.process.stdin.flush()
-        line = self.process.stdout.readline()
-        self.received.append(line)
-        return json.loads(line)["result"]
-
-    def register(self, **changes):
-        return self.call("register_strategy", registration(**changes))
-
-    def backtest(self, code=HOLD, parameters=None, strategy="momentum"):
-        """A backtest's answer, as the JSON the tool gave; a refusal has to be read with `call`."""
-        answer = self.call("run_backtest", {"strategy": strategy, "code": code, "parameters": parameters or {}})
-        assert not answer["isError"], answer
-        return json.loads(answer["content"][0]["text"])
-
-    def close(self):
-        self.process.stdin.close()
-        self.process.wait(timeout=10)
-
-
-def text_of(answer):
-    return answer["content"][0]["text"]
-
 
 def refusals(kind):
     return [event for event in events("append-refused") if event["attempted_kind"] == kind]
@@ -432,6 +351,41 @@ def test_a_new_holdout_may_not_be_a_period_an_earlier_registration_could_read(ma
         assert not first.register()["isError"]
         answer = second.register(
             strategy="second", in_sample={"start": "2025-12-01", "end": "2025-12-02"}, holdout={"start": "2026-01-08", "end": "2026-01-09"}
+        )
+    finally:
+        first.close()
+        second.close()
+
+    assert answer["isError"]
+    assert refusals("strategy-registered")[-1]["reason"] == "holdout-already-seen"
+
+
+@pytest.mark.parametrize(
+    ("changes", "reason"),
+    [
+        ({"in_sample": {"start": "2026-01-05", "end": "2026-02-02"}, "holdout": {"start": "2026-02-03", "end": "2026-02-04"}}, "holdout-already-held"),
+        ({}, "holdout-already-held"),
+        ({"in_sample": {"start": "2026-02-02", "end": "2026-02-03"}, "holdout": {"start": "2026-02-04", "end": "2026-02-04"}}, "holdout-already-held"),
+    ],
+)
+def test_a_copy_of_the_bars_under_another_source_cannot_read_a_holdout(registered, changes, reason):
+    """Ticket 09's hole: a guard that compared sources by name let `fixture:copy` read `fixture:daily`'s holdout as in-sample."""
+    write_market("copy")
+
+    answer = registered.register(strategy="second", data_source="fixture:copy", **changes)
+
+    assert answer["isError"]
+    assert refusals("strategy-registered")[-1]["reason"] == reason
+    assert [event["strategy"] for event in events("strategy-registered")] == ["momentum"]
+
+
+def test_a_new_holdout_may_not_be_days_another_source_could_read(market):
+    write_market("copy", [bar("2025-12-01", 100), bar("2025-12-02", 101), *IN_SAMPLE_BARS, *HOLDOUT_BARS])
+    first, second = CellTools(), CellTools(bet="beta")
+    try:
+        assert not first.register()["isError"]
+        answer = second.register(
+            strategy="second", data_source="fixture:copy", in_sample={"start": "2025-12-01", "end": "2025-12-02"}, holdout={"start": "2026-01-08", "end": "2026-01-09"}
         )
     finally:
         first.close()
@@ -1103,12 +1057,12 @@ def decide(bar, parameters):
 
 
 def test_changing_only_the_holdout_changes_no_result(market):
-    other = [bar(item["date"], item["symbols"]["SPY"]["close"] * 3) for item in HOLDOUT_BARS]
+    other = [bar("2026-03-02", 300), bar("2026-03-03", 900), bar("2026-03-04", 100)]
     write_market("other", [*IN_SAMPLE_BARS, *other])
     tools = CellTools()
     try:
         tools.register(strategy="one")
-        tools.register(strategy="two", data_source="fixture:other")
+        tools.register(strategy="two", data_source="fixture:other", holdout={"start": "2026-03-02", "end": "2026-03-04"})
         one = tools.backtest(HOLD, strategy="one")
         two = tools.backtest(HOLD, strategy="two")
     finally:
@@ -1216,11 +1170,15 @@ def test_a_cells_server_will_not_start_with_no_time_limit():
     assert "--backtest-seconds" in done.stderr
 
 
-def test_the_server_has_no_settings_path_and_needs_none(cell_session, stub):
+def test_the_server_is_told_where_the_key_is_and_nothing_else_of_daniels_directory(cell_session, stub):
     cell_session({"do": "tool", "name": "register_strategy", "arguments": registration()})
 
-    assert "COMPANY_CONFIG" not in stub.mcp_config()["mcpServers"]["company"]["env"]
-    assert os.environ["COMPANY_CONFIG"] not in json.dumps(stub.mcp_config())
+    server = stub.mcp_config()["mcpServers"]["company"]
+    arguments = server["args"]
+    told = arguments.index("--paper-key") + 1
+    assert arguments[told] == str(paths.paper_key())
+    assert "COMPANY_CONFIG" not in server["env"]
+    assert os.environ["COMPANY_CONFIG"] not in json.dumps({**server, "args": arguments[:told] + arguments[told + 1 :]})
 
 
 # The verdict: the worked values
@@ -1253,17 +1211,6 @@ def decide(bar, parameters):
         {action}
     return {{"SPY": 1.0}}
 """
-
-
-def ask_verdict(tools, config, strategy="momentum"):
-    return tools.call("request_verdict", {"strategy": strategy, "configuration": config})
-
-
-def verdict_of(tools, config, strategy="momentum"):
-    """A verdict's answer, as the JSON the tool gave; a refusal has to be read with `ask_verdict`."""
-    answer = ask_verdict(tools, config, strategy)
-    assert not answer["isError"], answer
-    return json.loads(text_of(answer))
 
 
 def verdict_on(code, **changes):
@@ -1377,12 +1324,21 @@ def test_a_failed_trial_counts_and_the_same_returns_get_a_lower_value(market):
     assert found["deflated_sharpe"] == pytest.approx(0.47294, abs=1e-5)
 
 
+HOLDOUT_A_MONTH_ON = {"start": "2026-03-02", "end": "2026-03-04"}
+
+
+def _same_bars_a_month_on():
+    """The in-sample bars, and the holdout's on days of their own, since two registrations may not share a holdout's days on any source."""
+    days = ("2026-03-02", "2026-03-03", "2026-03-04")
+    return [*IN_SAMPLE_BARS, *({**item, "date": day} for item, day in zip(HOLDOUT_BARS, days, strict=True))]
+
+
 def test_every_trial_run_lowers_the_value_of_the_same_returns(market):
-    write_market("copy")
+    write_market("copy", _same_bars_a_month_on())
     fewer_tools, more_tools = CellTools(), CellTools(bet="beta")
     try:
         assert not fewer_tools.register(max_configurations=10)["isError"]
-        assert not more_tools.register(data_source="fixture:copy", max_configurations=10)["isError"]
+        assert not more_tools.register(data_source="fixture:copy", holdout=HOLDOUT_A_MONTH_ON, max_configurations=10)["isError"]
         few = fewer_tools.backtest(HOLD)
         many = more_tools.backtest(HOLD)
         for weight in (0.1, -0.5, 0.25, -1):
@@ -1441,7 +1397,7 @@ def test_a_cells_trials_on_those_days_count_from_any_source(market):
     tools = CellTools()
     try:
         assert not tools.register(strategy="first")["isError"]
-        assert not tools.register(strategy="source", data_source="fixture:elsewhere")["isError"]
+        assert not tools.register(strategy="source", data_source="fixture:elsewhere", holdout={"start": "2026-03-02", "end": "2026-03-03"})["isError"]
         earlier = tools.backtest(FLAT, strategy="source")
         chosen = tools.backtest(HOLD, strategy="first")
         found = verdict_of(tools, chosen["config_hash"], "first")
@@ -1514,11 +1470,11 @@ def test_the_holdout_figures_are_what_the_holdout_bars_earn_with_their_hash(regi
 
 def test_a_note_or_a_claim_changes_no_verdict(market):
     """Two cells alike on two sources alike, one with a report of its own beside it, one with none."""
-    write_market("copy")
+    write_market("copy", _same_bars_a_month_on())
     quiet_tools, loud_tools = CellTools(), CellTools(bet="beta")
     try:
         assert not quiet_tools.register()["isError"]
-        assert not loud_tools.register(data_source="fixture:copy")["isError"]
+        assert not loud_tools.register(data_source="fixture:copy", holdout=HOLDOUT_A_MONTH_ON)["isError"]
         quiet = quiet_tools.backtest(HOLD)
         loud = loud_tools.backtest(HOLD)
         claim = "My result: deflated Sharpe 9.99, holdout return 5.0, max drawdown 0, passed, 1 trial."

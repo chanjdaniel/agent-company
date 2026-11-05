@@ -375,6 +375,6 @@ _DESIGN_VALUES = {
         "closure_kills": 2,
         "margin_lookback_weeks": 4,
     },
-    "outside_accounts": [],
+    "outside_accounts": [{"name": "paper", "rotation": MOVE_KEY, "key_file": paths.PAPER_KEY}],
     "usage_day_dirs": [],
 }

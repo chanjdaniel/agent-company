@@ -12,7 +12,7 @@
     "agents": ["cell:<bet>", "strategy", "auditor", "retro", "probe"]
   },
   "field_types": {
-    "names": {"session": "uuid", "bet": "bet", "message": "discord-id", "amount": "decimal", "cost": "decimal", "weight": "number", "minutes": "minutes", "week_start": "timestamp", "charge_id": "uuid", "charge_lines": "count", "sessions": "count"},
+    "names": {"session": "uuid", "bet": "bet", "message": "discord-id", "amount": "decimal", "cost": "decimal", "equity": "decimal", "pnl": "signed-decimal", "weight": "number", "minutes": "minutes", "week_start": "timestamp", "charge_id": "uuid", "charge_lines": "count", "sessions": "count"},
     "suffixes": {"_seq": "seq", "_seqs": "seqs", "_at": "timestamp", "_date": "date"}
   },
   "kinds": {

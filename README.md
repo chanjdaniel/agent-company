@@ -7,7 +7,7 @@ The research behind it, with its critique, Daniel's decisions and draft tickets,
 
 ## The code
 
-The first slice is being built, and so far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the session launcher and company tools, the kill switch and the schedule, the quant cell's registration, backtest runner and verdict, the test suite and CI.
+The first slice is being built, and so far the code holds the `company` command, the ledger and its contract, the account reading, the Treasurer's share, minutes, ladder and weekly digest, Daniel's settings and the governor, the session launcher and company tools, the kill switch and the schedule, the quant cell's registration, backtest runner and verdict, the paper account and its period, the test suite and CI.
 It is Python 3.13 with no runtime dependency outside the standard library, and needs `uv` to run.
 
 ```sh
@@ -42,6 +42,8 @@ uv run company schedule install        # write each job's timer, every one off
 uv run company schedule enable --message 1234
                                        # Daniel's word, and the only thing that turns the timers on
 uv run company schedule disable        # turn the timers off
+uv run company paper check             # one read-only call to the paper account: its status and equity
+uv run company paper tick              # run the open paper period once, which only code does; no real money is involved
 ```
 
 The share, the charge, the governor, a session and a digest of a ledger with events read `settings.json` in Daniel's config directory, and refuse without it, since no share or floor is compiled in.
@@ -51,5 +53,5 @@ The two shares are fractions, such as 0.25 for 25%, and a number above 1 is refu
 
 Runtime state lives outside the repository.
 The company home, `~/.local/state/agent-company/` or `COMPANY_HOME`, holds the ledger, session workspaces and each session's run, and will hold the replay set.
-Daniel's config directory, `~/.config/agent-company/` or `COMPANY_CONFIG`, holds their settings, and will hold the paper key.
+Daniel's config directory, `~/.config/agent-company/` or `COMPANY_CONFIG`, holds their settings and the paper key, `paper.key`: its key id and secret on two lines, mode 600.
 The schedule's units go in systemd's own directory for the user, `~/.config/systemd/user/` or under `XDG_CONFIG_HOME`.

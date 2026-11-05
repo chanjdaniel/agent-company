@@ -5,6 +5,7 @@ import statistics
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from fractions import Fraction
 
 from company import reading, settings, times, usage
@@ -492,6 +493,72 @@ def week_charges_due(result: Share, events: list[dict]) -> list[dict]:
                 }
             )
     return due
+
+
+def opens_paper_period(verdict: dict) -> bool:
+    """Whether a verdict opens a paper period: the one place that decides it, and where a floor on a registration's acceptance would go."""
+    return verdict["passed"]
+
+
+def open_period(events: list[dict]) -> dict | None:
+    """The period holding the paper account, as one strategy at a time does."""
+    closed = {event["period_seq"] for event in _of_kind(events, "paper-closed")}
+    return next((event for event in _of_kind(events, "paper-opened") if event["seq"] not in closed), None)
+
+
+def verdict_awaiting_paper(events: list[dict]) -> dict | None:
+    """The oldest verdict that opens a period and has none yet."""
+    opened = {event["verdict_seq"] for event in _of_kind(events, "paper-opened")}
+    return next((event for event in _of_kind(events, "verdict") if opens_paper_period(event) and event["seq"] not in opened), None)
+
+
+def registration_of(events: list[dict], period_or_verdict: dict) -> dict:
+    """The registration a period or a verdict cites."""
+    return next(event for event in events if event["seq"] == period_or_verdict["registration_seq"])
+
+
+def _paper_readings(events: list[dict], period_seq: int) -> list[dict]:
+    return [event for event in _of_kind(events, "paper-reading") if event["period_seq"] == period_seq]
+
+
+def paper_pnl(events: list[dict], period_seq: int, equity: Decimal) -> Decimal:
+    """The profit and loss at this equity, against the period's first reading, which the broker's own account gave."""
+    readings = _paper_readings(events, period_seq)
+    return equity - Decimal(readings[0]["equity"]) if readings else Decimal(0)
+
+
+def paper_drawdown(events: list[dict], period_seq: int, equity: Decimal) -> Fraction:
+    """How far this equity is below the period's highest reading, as a fraction of that; an account with nothing left has lost it all."""
+    peak = max([_exact(event["equity"]) for event in _paper_readings(events, period_seq)] + [_exact(equity)])
+    return (peak - _exact(equity)) / peak if peak > 0 else Fraction(1)
+
+
+def past_drawdown_kill(drawdown: Fraction, period: dict) -> bool:
+    return drawdown > _exact(period["drawdown_kill"])
+
+
+@dataclass(frozen=True)
+class PaperResult:
+    """What the Treasurer reads of one period, the cell's metric there: `reading` is its newest, and `closed` how it ended."""
+
+    period: dict
+    bet: str
+    strategy: str
+    reading: dict | None
+    closed: dict | None
+
+
+def paper_results(events: list[dict]) -> list[PaperResult]:
+    """Each paper period, oldest first. None of this is money: paper results are never in a bar or a margin."""
+    results = []
+    for period in _of_kind(events, "paper-opened"):
+        # The contract asks only that a seq exists, and a page must not fall over a period citing something else.
+        registration = next((event for event in _of_kind(events, "strategy-registered") if event["seq"] == period["registration_seq"]), None)
+        bet, strategy = (registration["writer"].removeprefix(CELL_PREFIX), registration["strategy"]) if registration else ("unknown", "unknown")
+        readings = _paper_readings(events, period["seq"])
+        closed = next((event for event in _of_kind(events, "paper-closed") if event["period_seq"] == period["seq"]), None)
+        results.append(PaperResult(period, bet, strategy, readings[-1] if readings else None, closed))
+    return results
 
 
 def expected_maximum_sharpe(variance: float, trials: int) -> float:

@@ -6,12 +6,15 @@ import subprocess
 import pytest
 from scan_rules import scan, tracked_files
 
+from company import banned
+
 # Assembled, so that no secret scanner mistakes this file for holding a real key.
 ANTHROPIC_KEY = "sk-ant-" + "api03-" + "x1y2z3" * 8
 OPENAI_KEY = "sk-" + "a1B2c3D4" * 6
 GITHUB_TOKEN = "ghp_" + "a1B2c3D4" * 5
 AWS_KEY = "AKIA" + "ABCD1234" * 2
 PAPER_KEY = "PK" + "ABCD1234" * 2 + "XY"
+LIVE_KEY = "AK" + "ABCD1234" * 2 + "XY"
 PRIVATE_KEY = "-----BEGIN RSA " + "PRIVATE KEY-----"
 LIVE_HOST = "api." + "alpaca.markets"
 PAPER_HOST = "paper-api.alpaca.markets"
@@ -51,7 +54,14 @@ PLANTS = [
     ("extra-usage-setting", "overage_enabled = True"),
     ("live-broker-host", f"host = '{LIVE_HOST}'"),
     ("live-broker-host", f"host = '{LIVE_HOST.upper()}'"),
+    ("broker-key-variable", "APCA_API_KEY_ID=x"),
+    ("broker-key-variable", 'os.environ["APCA_API_SECRET_KEY"]'),
+    ("broker-key-variable", "APCA_API_BASE_URL=x"),
+    ("paper-reach", f"host = '{PAPER_HOST}'"),
+    ("paper-reach", f"host = '{DATA_HOST}'"),
+    ("paper-reach", '{"APCA-API-KEY-ID": key}'),
     ("real-key-shape", f"key = '{ANTHROPIC_KEY}'"),
+    ("real-key-shape", f"key = '{LIVE_KEY}'"),
     ("real-key-shape", f"key = '{OPENAI_KEY}'"),
     ("real-key-shape", f"key = '{GITHUB_TOKEN}'"),
     ("real-key-shape", f"key = '{AWS_KEY}'"),
@@ -210,6 +220,20 @@ def test_the_live_host_is_caught_everywhere(copy, plant, path, text):
     assert "live-broker-host" in rules_found(copy, path)
 
 
+@pytest.mark.parametrize("path", ["src/company/paper.py", "src/company/planted.py", "docs/design.md", "README.md"])
+@pytest.mark.parametrize(("rule", "text"), [("broker-key-variable", "APCA_API_KEY_ID=x"), ("real-key-shape", f"key = '{LIVE_KEY}'"), ("real-key-shape", f"key = '{PAPER_KEY}'")])
+def test_a_broker_credential_is_caught_everywhere(copy, plant, path, rule, text):
+    plant(path, text)
+    assert rule in rules_found(copy, path)
+
+
+@pytest.mark.parametrize("path", ["src/company/paper.py", *DOCUMENTS])
+@pytest.mark.parametrize("text", [PAPER_HOST, DATA_HOST, "APCA-API-KEY-ID"])
+def test_the_paper_module_and_the_documents_alone_may_name_how_the_broker_is_reached(copy, plant, path, text):
+    plant(path, text)
+    assert "paper-reach" not in rules_found(copy, path)
+
+
 def test_a_url_in_the_paper_module_must_be_a_paper_host(copy, plant):
     plant("src/company/paper.py", "see https://example.com/page")
     assert rules_found(copy, "src/company/paper.py") == {"url"}
@@ -234,3 +258,8 @@ def test_only_the_scan_itself_is_exempt(copy, plant):
         assert rules_found(copy, path) == set()
     plant("tests/test_something_else.py", "ANTHROPIC_API_KEY")
     assert rules_found(copy, "tests/test_something_else.py") == {"model-key-variable"}
+
+
+@pytest.mark.parametrize("name", ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "APCA_API_BASE_URL"])
+def test_no_variable_of_the_brokers_may_reach_a_session(name):
+    assert banned.is_banned(name)

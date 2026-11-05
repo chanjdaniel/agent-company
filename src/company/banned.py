@@ -1,4 +1,4 @@
-"""The model-provider variables no session may hold and no tracked file may name, in one place.
+"""The model-provider and broker variables no session may hold and no tracked file may name, in one place.
 
 The launcher reads this at run time, and the scan builds its rule from it.
 So this file joins the scan's own files, as the one place in the package that names what it bans.
@@ -25,8 +25,11 @@ MODEL_KEY_VARIABLE = re.compile(
     r"|\bAWS_BEARER_TOKEN_BEDROCK\b"
 )
 
+# The variables a broker's own tools read its credentials and host from, live ones among them. The key lives only in its file.
+BROKER_KEY_VARIABLE = re.compile(r"\bAPCA_[A-Z_]+\b")
+
 # Wider at run time than in a file: whatever else picks a provider or an account under these prefixes goes too.
-_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_USE_")
+_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_USE_", "APCA_")
 
 
 def is_banned(name: str) -> bool:

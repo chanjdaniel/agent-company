@@ -59,7 +59,7 @@ def test_init_writes_what_daniel_gave_and_what_the_design_sets(company, settings
         "margin_lookback_weeks": 4,
     }
     assert written["usage_day_dirs"] == []
-    assert written["outside_accounts"] == []
+    assert written["outside_accounts"] == [{"name": "paper", "rotation": "move-key", "key_file": "paper.key"}]
     assert "weekly_send_cap" not in written
 
 

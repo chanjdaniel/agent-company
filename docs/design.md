@@ -251,6 +251,7 @@ An `append-refused` event's writer is the code writer making the append, or `tre
 - A field ending in `_at` is a UTC timestamp like `2026-11-05T09:30:00Z`, and one ending in `_date` is a date like `2026-11-05`.
 - `bet` is a bet's id (lower-case letters, digits and hyphens), and `session` a session's UUID.
 - `message` is the Discord id of Daniel's word, as a string of digits.
+- `equity` is a decimal string from zero up, and `pnl` a decimal string that may start with a minus: both are paper figures and never money.
 - `amount` is a decimal string from zero up, always with `currency`, and `cost` is a decimal string from zero up in US dollars, so a refund is a positive `amount` of kind `refund`.
 - `minutes` is a number from zero up.
 - `week_start` is the UTC time a seven-day window opens.
@@ -580,7 +581,10 @@ Each entry of `outside_accounts` is `{"name", "rotation", "key_file"}`, whose `r
 A pull reads that list from the file as it stands, each entry checked, since it must not wait on a lock or be stopped by the tamper it may be answering; a file that then fails its digest is reported by a `rotation` step on `settings` with the result `failed`.
 
 **The paper key's rotation:** the code moves the key aside so it can no longer be used, and tells Daniel to regenerate it at the broker, because the code holds no broker admin path.
+`settings init` writes the paper key's entry by default, `{"name": "paper", "rotation": "move-key", "key_file": "paper.key"}`, so a pull rotates it with no step of Daniel's.
 The key is read by the paper module from the key file at use, and passed to no session and no log.
+The key file is `paper.key` in Daniel's config directory: the key id and the secret on two lines, which a file anyone but its owner can reach, a link, or anything but a file refuses unread.
+`company paper check` makes one read-only call to the paper host, writes nothing, and prints the account's status and equity; with no key it says what to do and exits non-zero.
 
 The schedule is systemd user timers behind a runner that tests replace, installed disabled, with its jobs listed in code in `schedule.JOBS`.
 The runner is the `systemctl` first on `PATH`, and the suite puts one there that fails any test that did not choose a stub.
@@ -703,12 +707,18 @@ Crypto and prediction markets count as trading under the same rule.
 - **Pre-registration before any backtest.**
   The ledger's `strategy-registered` holds the `universe`, the `data_source`, the `in_sample` and `holdout` periods, the `cost_model`, the `slippage_model`, `max_configurations`, the `acceptance` test (`min_deflated_sharpe`, `min_holdout_return`, `max_drawdown`) and `paper_days` (default 90).
   A cell registers through its `register_strategy` tool, which reads the data, fills in `data_hash`, and refuses a missing or malformed field, or a source it cannot read or whose data does not hold every universe symbol on each bar of both periods, with at least two bars in each.
-  A `period` is `{start, end}` in days, a `cost_model` or `slippage_model` is `{bps_per_turnover}` from 0 to 10,000, and a `data_source` is `fixture:<name>`, read from `market-data/<name>.jsonl` in the company home, one `{date, symbols}` bar on each line, whose `symbols` hold each symbol's fields, `close` among them.
+  A `period` is `{start, end}` in days, and a `cost_model` or `slippage_model` is `{bps_per_turnover}` from 0 to 10,000.
+  A `data_source` is `fixture:<name>`, read from `market-data/<name>.jsonl` in the company home, or `broker:iex`, the paper broker's free daily bars, split-adjusted, which the tool fetches at the registration and keeps in `market-data/broker/<data_hash>.jsonl`, where no `fixture:` name can reach them.
+  Either way it is one `{date, symbols}` bar on each line, whose `symbols` hold each symbol's fields, `close` among them, every later run reads those bytes, and `broker:iex` makes no further call.
+  A holdout on `broker:iex` must end before today, since a day's bar is not whole until the day ends, and with no key, or a broker that fails, the registration is refused with `data-unavailable:no-key` or `data-unavailable:broker-failed`.
+  `paper_days` is from 1 to 3,650, which keeps every end date one a date can hold.
   The holdout must begin after the in-sample period ends.
   Each strategy name is the cell's own, and a cell may replace a registration until its first run, when the newest stands.
   A registration cannot change once a `config-run` cites it.
 - **A holdout stays unseen, and is one registration's.**
-  On one data source, a new in-sample period or holdout may not touch an earlier registration's holdout, and a new holdout may not touch an earlier registration's in-sample period, whichever cell wrote it.
+  On any data source, a new in-sample period or holdout may not touch an earlier registration's holdout, and a new holdout may not touch an earlier registration's in-sample period, whichever cell wrote it.
+  The guard reads the days alone, because there is one market: two sources may hold the same bars, and a source's name or provider says nothing of what it holds.
+  So a fixture with other prices on the same days is refused too, which is the cost, and it can take other days.
   So a new name for a strategy needs a holdout of its own, and cannot reset a budget on the old one; it may share an in-sample period, so the verdict counts a cell's trials on those days across its registrations.
   A registration that was replaced holds no period, since it ran nothing.
   The refusal tells a cell only which dates another registration holds, never its bars.
@@ -728,6 +738,7 @@ Crypto and prediction markets count as trading under the same rule.
 - **Strategy code runs in its own `bwrap`, and has no other way to run.**
   Every namespace is unshared, the root is read-only, the environment is empty, and it sees only the system's files, Python, its own small driver and `/dev/urandom`, so neither the ledger, the bars, Daniel's settings nor any directory it could write are there; it has at most 4 GiB of memory, and can start no second process or thread.
   The time limit, `backtest_max_seconds`, is Daniel's setting, 60 by default, covers a whole run, and reaches the tools' server on its command line, so that the server holds no path to Daniel's settings.
+  The paper key's path reaches a cell's server the same way, `--paper-key`, for the broker's bars at a registration; that server builds `paper.MarketData`, which can read bars and nothing else.
   The sandbox stays in the session's process group and dies with its parent, so a session's stop ends it.
   A strategy that hangs, crashes, ends early or prints anything but its positions is a failed configuration, `status` `failed`, with a `failure` of `timed-out`, `crashed: <its error>`, `ended-early` or `bad-output: <what>`, and it counts against the budget.
   With no `bwrap`, or one that cannot start, nothing runs, and `config-refused` says `no-confinement` or `confinement-failed`, at no cost, since no code of the cell's ran.
@@ -748,18 +759,30 @@ Crypto and prediction markets count as trading under the same rule.
   The maximum drawdown is the worse of the backtest's and the holdout's, so that a short holdout cannot hide what the backtest recorded.
   The report allowed the probability of backtest overfitting instead; this slice builds the deflated Sharpe ratio, because it needs only the records and the standard library.
 - **About three months of paper trading.**
-  A passing verdict opens a paper period of `paper_days`, with an end date, a promise for that date, and the registration's `max_drawdown` as its drawdown kill, and the first tick on or after the end date closes it.
-  Only code places orders, in `company paper tick`, on the paper host, and the Treasurer reads the account's profit and loss as the cell's metric.
-  One strategy holds the paper account at a time in this slice.
+  A passing verdict opens a paper period of `paper_days`, with an end date, a promise for that date whose `bet` is always set, and the registration's `max_drawdown` as its drawdown kill.
+  `treasurer.opens_paper_period` is the one place that decides whether a verdict opens one, and today that is `passed` alone.
+  One strategy holds the paper account at a time in this slice: another passing verdict waits, and the tick that closes the period opens the oldest that waits, whose end date counts from then.
+  A verdict whose period could not be written opens at the next tick.
+- **A tick is the one order path.**
+  Only code places orders, in `company paper tick`, on the paper host, and no company tool can: the tools hold `paper.MarketData` alone, never load `paper_period.py`, and a test fails on any other module that reaches `paper.Account` or its order methods.
+  Each tick reads the account, whose status must be `ACTIVE`, and logs `paper-reading`, whose `pnl` is against the period's first reading, so the first tick is the base.
+  Then it closes the period if the equity is past the kill, measured from the period's highest reading at a tick, with `drawdown-kill`, or if today is on or after the end date, with `end-date`; neither needs the bars or the strategy.
+  To close, it cancels what waits, places an order against every position, and only then logs `paper-closed`, so a failed order leaves the period open for the next tick.
+  Otherwise it fetches the broker's bars since the in-sample period began, whatever source the registration names, leaves out any day lacking a universe symbol, and feeds them one at a time to the kept configuration, in the same sandbox and under the same time limit, as the verdict did, and takes its answer on the newest bar as the target.
+  A strategy that fails there closes the period with `strategy-failed:<kind>`, and only that kind is recorded; a sandbox that does not start closes nothing and places nothing.
+  It cancels what waits, so that a second tick before the market opens replaces the first's orders and does not double them, then places market orders for the day, sells first, in whole shares rounded towards zero, priced at the newest bar's close, for each symbol of the account or the target that differs; a symbol outside the target is sold, and a position crossing zero only closes on this tick and turns on the next, since the broker may refuse more against shares not yet sold.
+  A tick refuses with the kill switch pulled, the ledger broken, the settings changed, or inside a session, looks for the kill switch once more before each order, and takes `paper.lock`, so a second tick at once is refused.
 - **Paper results are paper results.**
-  They are labelled so wherever they are printed, and are not deployment evidence; Alpaca's [paper-trading docs](https://docs.alpaca.markets/docs/paper-trading) (read 2026-11-04) say the account is free, and that it does not model market impact, slippage or regulatory fees, among others.
+  They are labelled so wherever they are printed, in the tick's and the check's output and on their own lines under the digest's Bets, count towards no bar or margin, and are not deployment evidence; Alpaca's [paper-trading docs](https://docs.alpaca.markets/docs/paper-trading) (read 2026-11-04) say the account is free, and that it does not model market impact, slippage or regulatory fees, among others.
 - **No capital in view.**
   Real capital enters only when Daniel names an amount, and this document carries no figure.
   When it does, position and drawdown limits are enforced at the broker and in the Treasurer, and an LLM, if any, is an information interface feeding separate risk and execution code, never the thing that places an order.
 - **Nothing sold as advice.**
   Nothing the cell produces is sold, published or shown as advice, since a personalized recommendation to buy or sell is a high-risk use under Anthropic's usage policy and regulated advice is off limits.
 - **No path to a live account.**
-  The paper module refuses a transport aimed at any other host, and market data comes from a fixture or the broker's free IEX bars, fetched by code at registration and hashed into the ledger; a cell never holds the key or a network path.
+  The paper module refuses a transport that says it can reach any other host, before the key is read, and the real transport refuses any other host itself, follows no redirect and uses no proxy.
+  The scan fails on the live host and on the broker's credential variables and key shapes anywhere but its own files, and on the paper hosts or the broker's headers outside the paper module and the documents.
+  Market data comes from a fixture or the broker's free IEX bars, fetched by code at registration and hashed into the ledger; a cell never holds the key or a network path.
 
 ## Outreach rules
 
@@ -916,13 +939,14 @@ The file holds it as `count` 2, `days` 30 and `outside_action_fraction` 0.02.
 | The company home, outside the repository (default `~/.local/state/agent-company/`, or `COMPANY_HOME`) | The ledger, session workspaces, each session's run and the replay set |
 | Daniel's config directory, outside the repository (default `~/.config/agent-company/`, or `COMPANY_CONFIG`) | Their settings and the paper key |
 
-`company` is a thin command line over deep modules: Ledger, Usage, Reading, Treasurer, Settings, Governor, Launcher, Company tools, Quant, Paper, Kill switch, Schedule, and one entry each for Batch, Outreach, Opportunity, Portfolio, Retro and Replay.
+`company` is a thin command line over deep modules: Ledger, Usage, Reading, Treasurer, Settings, Governor, Launcher, Company tools, Quant, Paper, Paper period, Kill switch, Schedule, and one entry each for Batch, Outreach, Opportunity, Portfolio, Retro and Replay.
 
 The suite runs with no network and no model session, and fails on any attempt at either.
 It tests through the `company` command or the company tools over stdio, using a stub `claude` that plays a script through the same tools a real session uses.
 Its guards are in `tests/harness/`: each Python process has an audit hook on sockets and on Daniel's real paths, and a `claude` and a `systemctl` first on `PATH` fail the test.
 The launcher's allow-list strips the guard from a session's environment, as it must, so the seam is in the test's own executable and never in the company's code: the stub's wrapper notes the environment it was given, then sets the guard and the blocker again for the stub and the company tools it starts.
-Its scan, `tests/scan_rules.py`, walks every tracked file for what the runtime section bans; `docs/design.md`, `docs/first-run.md` and the research may name a banned variable, setting or flag and any URL, but no file but the scan's own may hold a real key's shape, a model vendor's host or SDK import, or the live broker host.
+Its scan, `tests/scan_rules.py`, walks every tracked file for what the runtime section bans; `docs/design.md`, `docs/first-run.md` and the research may name a banned variable, setting or flag and any URL, but no file but the scan's own may hold a real key's shape, a model vendor's host or SDK import, the live broker host or a broker's credential variable.
+Every test of the broker runs on a fake transport, through `paper.transport`, the one seam, so nothing in the suite has made a real call to it.
 
 ## Phases
 
@@ -968,7 +992,7 @@ No worker reads or writes a secret, Daniel's settings or the real company home, 
 | - | - | - | - |
 | S1 | Say which jurisdiction's commercial-email law applies to them; answered with CASL as the planning default | With the plan's approval | Ticket 01 |
 | S2 | Say the merge word for each PR, or give the plan-time word | The end of each phase | The next phase |
-| S3 | Create the free paper-trading account and save its key in the path `docs/first-run.md` names, mode 600 | Once phase 4 is merged | Ticket 14 |
+| S3 | Create the free paper-trading account and save its key id and secret on two lines in `paper.key` in their config directory, mode 600 | Once phase 4 is merged | Ticket 14 |
 | S4 | Install the merged `company` command, then run `company settings init` with the 25% share, the floor (recommended 60%, and open), the subscription's tier and monthly price, the reading's maximum age, a session's limits, and the models if not the defaults | Once phase 4 is merged | Ticket 14 |
 | S5 | Check on the account page that extra usage is off, since no code can see or set it, and that the dependencies under "Dependencies to re-check" still say what this document cites | Once phase 4 is merged, and before each go | Ticket 14 |
 | S6 | Record a reading of the account's use from the usage page with `company reading record`, and optionally install the status-line recorder in their interactive session's settings | Once phase 4 is merged, and whenever a launch refuses for a stale reading | Tickets 14 and 21 |
@@ -1006,6 +1030,6 @@ The research's own sources, read 2026-11-02, are listed in `report.md` and `crit
 - Canada, An Act to promote the efficiency and adaptability of the Canadian economy (Canada's Anti-Spam Legislation), S.C. 2010, c. 23, https://laws-lois.justice.gc.ca/eng/acts/E-1.6/
 - Canada, Electronic Commerce Protection Regulations (CRTC), SOR/2012-36, https://laws-lois.justice.gc.ca/eng/regulations/SOR-2012-36/FullText.html
 - US Federal Trade Commission, "CAN-SPAM Act: A Compliance Guide for Business", https://www.ftc.gov/business-guidance/resources/can-spam-act-compliance-guide-business
-- Alpaca docs: [paper trading](https://docs.alpaca.markets/docs/paper-trading), [market data](https://docs.alpaca.markets/docs/about-market-data-api)
+- Alpaca docs: [paper trading](https://docs.alpaca.markets/docs/paper-trading), [market data](https://docs.alpaca.markets/docs/about-market-data-api), and the references read 2026-11-05 for the hosts and fields the paper module uses: [account](https://docs.alpaca.markets/reference/getaccount-1), [positions](https://docs.alpaca.markets/reference/getallopenpositions), [placing an order](https://docs.alpaca.markets/reference/postorder), [cancelling orders](https://docs.alpaca.markets/reference/deleteallorders-1) and [stock bars](https://docs.alpaca.markets/reference/stockbars)
 - Xu et al., "Harness²: Recursive Agent Harnessing for an Open World", 2026, https://arxiv.org/abs/2610.14224, with its reading in T189's report, section 5, in the agent team's records
 - Bailey and López de Prado, "The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting, and Non-Normality", Journal of Portfolio Management 40(5), 2014, https://doi.org/10.3905/jpm.2014.40.5.094 (read 2026-11-05 at https://www.davidhbailey.com/dhbpapers/deflated-sharpe.pdf; the suite holds its numerical example)
